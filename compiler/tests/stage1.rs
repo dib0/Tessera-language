@@ -1,7 +1,7 @@
 //! Tests for the Tessera-written compilers.
 //!
-//! Build chain: stage 0 (this crate) builds `bootstrap/` (module-free Tessera), which
-//! builds `stage1/` (modular Tessera). Stage 1 must then:
+//! Build chain: rustc builds the generated seed `bootstrap/tessera1.rs`, which builds
+//! `stage1/`. Stage 0 (this crate) is the independent reference. Stage 1 must:
 //! - produce byte-identical Rust to stage 0 for every program without modules or `ui`,
 //! - report the same error code as stage 0 for every invalid program,
 //! - reproduce itself (self-hosting fixpoint),
@@ -30,25 +30,33 @@ fn stage1_entry() -> PathBuf {
     root().join("stage1/main.tes")
 }
 
-fn bootstrap_sources() -> Vec<PathBuf> {
-    ["source", "lexer", "ast", "parser", "checker", "codegen", "runtime_text", "main"]
-        .iter()
-        .map(|name| root().join("bootstrap").join(format!("{}.tes", name)))
-        .collect()
+fn rustc() -> PathBuf {
+    if let Some(p) = std::env::var_os("TESSERA_RUSTC") {
+        return PathBuf::from(p);
+    }
+    if Command::new("rustc").arg("--version").output().is_ok() {
+        return PathBuf::from("rustc");
+    }
+    Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".cargo/bin/rustc")
 }
 
 fn check_build(output: std::process::Output, what: &str) {
     assert!(output.status.success(), "{} failed:\n{}", what, String::from_utf8_lossy(&output.stderr));
 }
 
-/// stage 0 -> bootstrap -> stage 1, once per test run.
+/// seed (bootstrap/tessera1.rs) -> bootstrap compiler -> stage 1, once per test run.
 fn stage1() -> &'static PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY.get_or_init(|| {
         let bootstrap = work_dir().join("tessera-bootstrap");
         check_build(
-            stage0().arg("build").args(bootstrap_sources()).arg("-o").arg(&bootstrap).arg("--opt").arg("1").output().unwrap(),
-            "stage 0 building bootstrap/",
+            Command::new(rustc())
+                .args(["--edition", "2021", "-C", "opt-level=1", "--crate-name", "tessera_program", "-o"])
+                .arg(&bootstrap)
+                .arg(root().join("bootstrap/tessera1.rs"))
+                .output()
+                .unwrap(),
+            "rustc building the bootstrap seed",
         );
         let out = work_dir().join("tessera1");
         check_build(

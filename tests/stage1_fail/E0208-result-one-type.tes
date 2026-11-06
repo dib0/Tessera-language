@@ -1,0 +1,2 @@
+fn parse(text: Text) -> Result[Int] = Result.Ok(1)
+fn main() -> Unit uses io = print("x")

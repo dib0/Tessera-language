@@ -31,6 +31,7 @@ pub enum TokenKind {
     Import
     Pub
     With
+    Try
     Underscore
     LParen
     RParen
@@ -105,6 +106,7 @@ pub fn symbol_text(kind: TokenKind) -> Text {
         TokenKind.Import => "import"
         TokenKind.Pub => "pub"
         TokenKind.With => "with"
+        TokenKind.Try => "try"
         TokenKind.Underscore => "_"
         TokenKind.LParen => "("
         TokenKind.RParen => ")"
@@ -200,11 +202,12 @@ fn keyword_kind(word: Text) -> TokenKind {
         "import" => TokenKind.Import
         "pub" => TokenKind.Pub
         "with" => TokenKind.With
+        "try" => TokenKind.Try
         _ => TokenKind.Ident
     }
 }
 
-fn reserved_words() -> List[Text] = ["module", "try", "unsafe", "loop", "const", "trait", "impl"]
+fn reserved_words() -> List[Text] = ["module", "unsafe", "loop", "const", "trait", "impl"]
 
 fn token(kind: TokenKind, text: Text, span: source.Span) -> Token = Token { kind: kind, text: text, span: span }
 

@@ -1,0 +1,8 @@
+ok 1234
+error: not a digit at position 2
+error: empty input
+ok 321
+error: not a digit at position 0
+error: number too large
+4 -1
+true false

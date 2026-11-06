@@ -179,6 +179,10 @@ fn fits(actual: ast.Type, expected: ast.Type) -> Bool {
             ast.Type.Option(expected_element) => fits(actual_element, expected_element)
             _ => false
         }
+        ast.Type.Result(actual_value, actual_error) => match expected {
+            ast.Type.Result(expected_value, expected_error) => fits(actual_value, expected_value) and fits(actual_error, expected_error)
+            _ => false
+        }
         _ => actual == expected
     }
 }
@@ -206,6 +210,17 @@ fn join_types(a: ast.Type, b: ast.Type) -> Option[ast.Type] {
             ast.Type.Option(b_element) => match join_types(a_element, b_element) {
                 Option.Some(inner) => Option.Some(ast.Type.Option(inner))
                 Option.None => Option.None
+            }
+            _ => Option.None
+        }
+        ast.Type.Result(a_value, a_error) => match b {
+            ast.Type.Result(b_value, b_error) => {
+                let value = join_types(a_value, b_value)
+                let error = join_types(a_error, b_error)
+                if value == Option.None or error == Option.None {
+                    return Option.None
+                }
+                Option.Some(ast.Type.Result(value_or(value, ast.Type.Unknown), value_or(error, ast.Type.Unknown)))
             }
             _ => Option.None
         }
@@ -409,10 +424,19 @@ fn mark_set(c: Checker, name: Text) -> Checker {
 
 // ---------- declarations ----------
 
-fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Never", "WindowEvent"]
+fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Result", "Never", "WindowEvent"]
 
 fn resolve(start: Checker, te: ast.TypeExpr) -> ResolvedType {
     let name = te.name
+    if name == "Result" {
+        if length(te.args) != 2 {
+            let d = source.error_help("E0208", te.span, "`Result` needs a value type and an error type", "write e.g. `Result[Int, Text]`")
+            return ResolvedType { checker: report(start, d), ty: ast.Type.Unknown }
+        }
+        let value = resolve(start, te.args[0])
+        let error = resolve(value.checker, te.args[1])
+        return ResolvedType { checker: error.checker, ty: ast.Type.Result(value.ty, error.ty) }
+    }
     if name == "List" or name == "Option" {
         if length(te.args) != 1 {
             let d = source.error_help("E0208", te.span, "`" + name + "` needs exactly one element type", "write e.g. `" + name + "[Int]`")
@@ -432,41 +456,48 @@ fn resolve(start: Checker, te: ast.TypeExpr) -> ResolvedType {
         set ty = ast.Type.Text
     } else if name == "Unit" {
         set ty = ast.Type.Unit
-    } else if lookup_type(c, name, te.span).found {
-        let lookup = lookup_type(c, name, te.span)
-        set ty = ast.Type.Named(lookup.canonical)
-        set c = mark_window_event(lookup.checker, lookup.canonical)
-    } else if lookup_type(c, name, te.span).reported {
-        return ResolvedType { checker: lookup_type(c, name, te.span).checker, ty: ast.Type.Unknown }
     } else {
-        let hint = match name {
-            "i64" => "Int"
-            "int" => "Int"
-            "integer" => "Int"
-            "bool" => "Bool"
-            "boolean" => "Bool"
-            "str" => "Text"
-            "string" => "Text"
-            "String" => "Text"
-            "text" => "Text"
-            "unit" => "Unit"
-            "void" => "Unit"
-            "list" => "List[...]"
-            "Vec" => "List[...]"
-            "vec" => "List[...]"
-            "Array" => "List[...]"
-            _ => ""
+        let lookup = lookup_type(c, name, te.span)
+        match lookup.result {
+            Result.Ok(canonical) => {
+                set ty = ast.Type.Named(canonical)
+                set c = mark_window_event(lookup.checker, canonical)
+            }
+            Result.Error(unresolved) => {
+                if unresolved == Unresolved.Reported {
+                    return ResolvedType { checker: lookup.checker, ty: ast.Type.Unknown }
+                }
+                return ResolvedType { checker: report(c, unknown_type_error(name, te.span)), ty: ast.Type.Unknown }
+            }
         }
-        var d = source.error("E0208", te.span, "unknown type `" + name + "`")
-        if hint != "" {
-            set d = d with { help: "did you mean `" + hint + "`?" }
-        }
-        return ResolvedType { checker: report(c, d), ty: ast.Type.Unknown }
     }
     if length(te.args) > 0 {
         set c = report(c, source.error("E0208", te.span, "type `" + name + "` takes no type arguments"))
     }
     ResolvedType { checker: c, ty: ty }
+}
+
+fn unknown_type_error(name: Text, span: source.Span) -> source.Diagnostic {
+    let hint = match name {
+        "i64" => "Int"
+        "int" => "Int"
+        "integer" => "Int"
+        "bool" => "Bool"
+        "boolean" => "Bool"
+        "str" => "Text"
+        "string" => "Text"
+        "String" => "Text"
+        "text" => "Text"
+        "unit" => "Unit"
+        "void" => "Unit"
+        "list" => "List[...]"
+        "Vec" => "List[...]"
+        "vec" => "List[...]"
+        "Array" => "List[...]"
+        _ => ""
+    }
+    let d = source.error("E0208", span, "unknown type `" + name + "`")
+    if hint == "" { d } else { d with { help: "did you mean `" + hint + "`?" } }
 }
 
 fn resolve_fields(start: Checker, fields: List[ast.Field]) -> ResolvedFields {
@@ -521,13 +552,26 @@ fn mark_alias_used(c: Checker, alias: Text) -> Checker {
     c with { used_aliases: append(c.used_aliases, key) }
 }
 
-note "`reported` means an error was already recorded, so the caller must not report another."
+note "Why a name was not resolved. `Reported`: an error is already recorded. `NotDeclared`: the caller reports it with its own message."
+enum Unresolved {
+    NotDeclared
+    Reported
+}
+
+note "The result of a lookup, plus the checker, which records used imports and errors."
 type NameLookup {
     checker: Checker
-    canonical: Text
-    found: Bool
-    reported: Bool
+    result: Result[Text, Unresolved]
 }
+
+fn resolved_name(lookup: NameLookup) -> Text {
+    match lookup.result {
+        Result.Ok(canonical) => canonical
+        Result.Error(_) => ""
+    }
+}
+
+fn already_reported(lookup: NameLookup) -> Bool = lookup.result == Result.Error(Unresolved.Reported)
 
 fn module_path_of(prefix: Text) -> Text {
     let parts = source.split_on_text(prefix, "__")
@@ -539,61 +583,81 @@ fn lookup_type(c: Checker, name: Text, span: source.Span) -> NameLookup {
     let parts = source.split_on(name, 46)
     if length(parts) == 1 {
         let canonical = if name == "WindowEvent" { name } else { c.prefix + name }
-        return NameLookup { checker: c, canonical: canonical, found: type_index(c, canonical) >= 0, reported: false }
+        let result: Result[Text, Unresolved] = if type_index(c, canonical) >= 0 { Result.Ok(canonical) } else { Result.Error(Unresolved.NotDeclared) }
+        return NameLookup { checker: c, result: result }
     }
     lookup_qualified(c, parts[0], parts[1], span, true)
-}
-
-fn lookup_qualified(c: Checker, alias: Text, member: Text, span: source.Span, is_type: Bool) -> NameLookup {
-    let what = if is_type { "type" } else { "function" }
-    let path = match find_import(c, alias) {
-        Option.Some(found) => found.path
-        Option.None => {
-            var d = source.error_help("E0606", span, "unknown module `" + alias + "`", "add `import path/to/" + alias + "` at the top of the file")
-            if find_local(c, alias) != Option.None {
-                set d = d with { help: "Tessera has no method calls; call the function with the value as first argument, e.g. `" + member + "(" + alias + ", ...)`" }
-            }
-            return NameLookup { checker: report(c, d), canonical: "", found: false, reported: true }
-        }
-    }
-    let canonical = ast.module_prefix(path) + member
-    let used = mark_alias_used(c, alias)
-    var exists = false
-    var public = false
-    if is_type {
-        let index = type_index(used, canonical)
-        if index >= 0 {
-            set exists = true
-            set public = used.type_defs[index].public
-        }
-    } else {
-        match find_signature(used, canonical) {
-            Option.Some(signature) => {
-                set exists = true
-                set public = signature.public
-            }
-            Option.None => {}
-        }
-    }
-    if not exists {
-        let code = if is_type { "E0208" } else { "E0203" }
-        let d = source.error(code, span, "module `" + path + "` has no " + what + " `" + member + "`")
-        return NameLookup { checker: report(used, d), canonical: canonical, found: false, reported: true }
-    }
-    if not public {
-        let d = source.error_help("E0607", span, what + " `" + member + "` is private to module `" + path + "`", "mark it `pub` in " + path + ".tes if other modules may use it")
-        return NameLookup { checker: report(used, d), canonical: canonical, found: true, reported: true }
-    }
-    NameLookup { checker: used, canonical: canonical, found: true, reported: false }
 }
 
 fn lookup_function(c: Checker, name: Text, span: source.Span) -> NameLookup {
     let parts = source.split_on(name, 46)
     if length(parts) == 1 {
         let canonical = c.prefix + name
-        return NameLookup { checker: c, canonical: canonical, found: find_signature(c, canonical) != Option.None, reported: false }
+        let result: Result[Text, Unresolved] = if find_signature(c, canonical) != Option.None { Result.Ok(canonical) } else { Result.Error(Unresolved.NotDeclared) }
+        return NameLookup { checker: c, result: result }
     }
     lookup_qualified(c, parts[0], parts[1], span, false)
+}
+
+note "Why `alias.member` cannot be used; `lookup_qualified` turns it into a diagnostic."
+enum LookupFailure {
+    UnknownModule
+    Missing(path: Text)
+    Private(path: Text, canonical: Text)
+}
+
+fn import_named(c: Checker, alias: Text) -> Result[ast.Import, LookupFailure] {
+    match find_import(c, alias) {
+        Option.Some(found) => Result.Ok(found)
+        Option.None => Result.Error(LookupFailure.UnknownModule)
+    }
+}
+
+fn is_public(c: Checker, canonical: Text, is_type: Bool, path: Text) -> Result[Bool, LookupFailure] {
+    if is_type {
+        let index = type_index(c, canonical)
+        return if index >= 0 { Result.Ok(c.type_defs[index].public) } else { Result.Error(LookupFailure.Missing(path)) }
+    }
+    match find_signature(c, canonical) {
+        Option.Some(signature) => Result.Ok(signature.public)
+        Option.None => Result.Error(LookupFailure.Missing(path))
+    }
+}
+
+note "Pure: the canonical name of `alias.member`, or why it cannot be used. Reports nothing."
+fn qualified_name(c: Checker, alias: Text, member: Text, is_type: Bool) -> Result[Text, LookupFailure] {
+    let import_decl = try import_named(c, alias)
+    let canonical = ast.module_prefix(import_decl.path) + member
+    if not try is_public(c, canonical, is_type, import_decl.path) {
+        return Result.Error(LookupFailure.Private(import_decl.path, canonical))
+    }
+    Result.Ok(canonical)
+}
+
+fn lookup_qualified(c: Checker, alias: Text, member: Text, span: source.Span, is_type: Bool) -> NameLookup {
+    let what = if is_type { "type" } else { "function" }
+    let failure = match qualified_name(c, alias, member, is_type) {
+        Result.Ok(canonical) => return NameLookup { checker: mark_alias_used(c, alias), result: Result.Ok(canonical) }
+        Result.Error(why) => why
+    }
+    match failure {
+        LookupFailure.UnknownModule => {
+            var d = source.error_help("E0606", span, "unknown module `" + alias + "`", "add `import path/to/" + alias + "` at the top of the file")
+            if find_local(c, alias) != Option.None {
+                set d = d with { help: "Tessera has no method calls; call the function with the value as first argument, e.g. `" + member + "(" + alias + ", ...)`" }
+            }
+            NameLookup { checker: report(c, d), result: Result.Error(Unresolved.Reported) }
+        }
+        LookupFailure.Missing(path) => {
+            let code = if is_type { "E0208" } else { "E0203" }
+            let d = source.error(code, span, "module `" + path + "` has no " + what + " `" + member + "`")
+            NameLookup { checker: report(mark_alias_used(c, alias), d), result: Result.Error(Unresolved.Reported) }
+        }
+        LookupFailure.Private(path, canonical) => {
+            let d = source.error_help("E0607", span, what + " `" + member + "` is private to module `" + path + "`", "mark it `pub` in " + path + ".tes if other modules may use it")
+            NameLookup { checker: report(mark_alias_used(c, alias), d), result: Result.Ok(canonical) }
+        }
+    }
 }
 
 note "Canonical form of an already validated type expression, for the code generator."
@@ -602,8 +666,8 @@ fn canonical_type_expr(c: Checker, te: ast.TypeExpr) -> ast.TypeExpr {
     for a in te.args {
         set args = append(args, canonical_type_expr(c, a))
     }
-    let builtin_type = source.contains_text(["Int", "Bool", "Text", "Unit", "List", "Option"], te.name)
-    let name = if builtin_type { te.name } else { lookup_type(c, te.name, te.span).canonical }
+    let builtin_type = source.contains_text(["Int", "Bool", "Text", "Unit", "List", "Option", "Result"], te.name)
+    let name = if builtin_type { te.name } else { resolved_name(lookup_type(c, te.name, te.span)) }
     ast.TypeExpr { name: name, args: args, span: te.span }
 }
 
@@ -660,6 +724,7 @@ fn private_types_in(c: Checker, ty: ast.Type, prefix: Text) -> List[Text] {
     match ty {
         ast.Type.List(element) => private_types_in(c, element, prefix)
         ast.Type.Option(element) => private_types_in(c, element, prefix)
+        ast.Type.Result(value, error) => concat(private_types_in(c, value, prefix), private_types_in(c, error, prefix))
         ast.Type.Named(name) => {
             let index = type_index(c, name)
             if index >= 0 and not c.type_defs[index].public and c.type_defs[index].prefix == prefix { [name] } else { [] }
@@ -1039,7 +1104,12 @@ fn check_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
         ast.ExprKind.Match(scrutinee, arms) => check_match(c, e, scrutinee, arms, expected)
         ast.ExprKind.RecordLiteral(type_name, type_span, fields) => check_record_literal(c, e, type_name, type_span, fields)
         ast.ExprKind.RecordUpdate(target, fields) => check_record_update(c, e, target, fields, expected)
-        ast.ExprKind.VariantLiteral(type_name, variant, variant_span, args) => if type_name == "Option" { check_option_variant(c, e, variant, variant_span, args, expected) } else { check_variant(c, e, type_name, variant, variant_span, args) }
+        ast.ExprKind.VariantLiteral(type_name, variant, variant_span, args) => match type_name {
+            "Option" => check_option_variant(c, e, variant, variant_span, args, expected)
+            "Result" => check_result_variant(c, e, variant, variant_span, args, expected)
+            _ => check_variant(c, e, type_name, variant, variant_span, args)
+        }
+        ast.ExprKind.Try(operand) => check_try(c, e, operand, expected)
         ast.ExprKind.Return(value) => {
             let ret = c.return_type
             match value {
@@ -1413,7 +1483,7 @@ fn field_type_of(fields: List[FieldType], name: Text) -> Option[ast.Type] {
 fn check_record_literal(original: Checker, e: ast.Expr, type_name: Text, type_span: source.Span, inits: List[ast.FieldInit]) -> Checked {
     let lookup = lookup_type(original, type_name, type_span)
     let start = lookup.checker
-    let canonical = lookup.canonical
+    let canonical = resolved_name(lookup)
     let index = type_index(start, canonical)
     if index < 0 or start.type_defs[index].is_enum {
         let d = if index < 0 {
@@ -1421,7 +1491,7 @@ fn check_record_literal(original: Checker, e: ast.Expr, type_name: Text, type_sp
         } else {
             source.error_help("E0511", type_span, "`" + type_name + "` is an enum, not a record", "build an enum value with `" + type_name + ".Variant(...)`")
         }
-        var after = if lookup.reported and index < 0 { start } else { report(start, d) }
+        var after = if already_reported(lookup) and index < 0 { start } else { report(start, d) }
         var typed_inits: List[ast.FieldInit] = []
         for init in inits {
             let result = check_expr(after, init.value, ast.Type.Unknown)
@@ -1488,6 +1558,80 @@ fn check_option_variant(c: Checker, e: ast.Expr, variant: Text, variant_span: so
     checked(value.checker, e with { kind: ast.ExprKind.VariantLiteral("Option", variant, variant_span, [value.expr]) }, ast.Type.Option(element))
 }
 
+fn check_result_variant(c: Checker, e: ast.Expr, variant: Text, variant_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
+    let expected_value = match expected {
+        ast.Type.Result(value, _) => value
+        _ => ast.Type.Unknown
+    }
+    let expected_error = match expected {
+        ast.Type.Result(_, error) => error
+        _ => ast.Type.Unknown
+    }
+    if variant != "Ok" and variant != "Error" {
+        let d = source.error_help("E0209", variant_span, "`Result` has no variant `" + variant + "`", "available variants: `Ok`, `Error`")
+        let all = check_all(report(c, d), args)
+        return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral("Result", variant, variant_span, all.args) }, ast.Type.Unknown)
+    }
+    if length(args) != 1 {
+        let d = source.error("E0502", e.span, "`Result." + variant + "` takes 1 value, but " + to_text(length(args)) + " were given")
+        let all = check_all(report(c, d), args)
+        return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral("Result", variant, variant_span, all.args) }, ast.Type.Unknown)
+    }
+    let is_ok = variant == "Ok"
+    let hint = if is_ok { expected_value } else { expected_error }
+    let inner = check_expr(c, args[0], hint)
+    let inner_type = if hint != ast.Type.Unknown and fits(inner.expr.ty, hint) { hint } else { inner.expr.ty }
+    let other = if is_ok { expected_error } else { expected_value }
+    let typed = e with { kind: ast.ExprKind.VariantLiteral("Result", variant, variant_span, [inner.expr]) }
+    if other == ast.Type.Unknown {
+        let missing = if is_ok { "error" } else { "value" }
+        let d = source.error_help("E0505", e.span, "the " + missing + " type of this `Result." + variant + "` is unknown", "add a type annotation, e.g. `let parsed: Result[Int, Text] = ...`, or return it from a function with a `Result` return type")
+        return checked(report(inner.checker, d), typed, ast.Type.Unknown)
+    }
+    let ty = if is_ok { ast.Type.Result(inner_type, other) } else { ast.Type.Result(other, inner_type) }
+    checked(inner.checker, typed, ty)
+}
+
+note "`try value` unwraps `Result.Ok` / `Option.Some`, or returns the error / `Option.None` from the current function."
+fn check_try(c: Checker, e: ast.Expr, operand: ast.Expr, expected: ast.Type) -> Checked {
+    let hint = match c.return_type {
+        ast.Type.Result(_, error) => ast.Type.Result(expected, error)
+        ast.Type.Option(_) => ast.Type.Option(expected)
+        _ => ast.Type.Unknown
+    }
+    let result = check_expr(c, operand, hint)
+    let typed = e with { kind: ast.ExprKind.Try(result.expr) }
+    let after = result.checker
+    let returns = ast.type_text(c.return_type)
+    match result.expr.ty {
+        ast.Type.Result(value, error) => match c.return_type {
+            ast.Type.Result(_, return_error) => {
+                if fits(error, return_error) {
+                    return checked(after, typed, value)
+                }
+                let d = source.error_help("E0517", operand.span, "`try` would return an error of type `" + ast.type_text(error) + "`, but `" + c.function_name + "` returns `" + returns + "`", "convert the error first, e.g. with a `match`")
+                checked(report(after, d), typed, value)
+            }
+            _ => {
+                let d = source.error_help("E0516", e.span, "`try` on a `Result` needs a function that returns a `Result`, but `" + c.function_name + "` returns `" + returns + "`", "handle both cases with `match`, or change the return type")
+                checked(report(after, d), typed, value)
+            }
+        }
+        ast.Type.Option(element) => match c.return_type {
+            ast.Type.Option(_) => checked(after, typed, element)
+            _ => {
+                let d = source.error_help("E0516", e.span, "`try` on an `Option` needs a function that returns an `Option`, but `" + c.function_name + "` returns `" + returns + "`", "handle both cases with `match` or `value_or`, or change the return type")
+                checked(report(after, d), typed, element)
+            }
+        }
+        ast.Type.Unknown => checked(after, typed, ast.Type.Unknown)
+        _ => {
+            let d = source.error_help("E0515", operand.span, "`try` needs a `Result` or an `Option`, found `" + ast.type_text(result.expr.ty) + "`", "remove `try`; it only unwraps results and options")
+            checked(report(after, d), typed, ast.Type.Unknown)
+        }
+    }
+}
+
 fn check_record_update(c: Checker, e: ast.Expr, target: ast.Expr, inits: List[ast.FieldInit], expected: ast.Type) -> Checked {
     let target_result = check_expr(c, target, expected)
     var after = target_result.checker
@@ -1526,11 +1670,11 @@ fn check_record_update(c: Checker, e: ast.Expr, target: ast.Expr, inits: List[as
 
 fn check_variant(start: Checker, e: ast.Expr, type_name: Text, variant: Text, variant_span: source.Span, args: List[ast.Expr]) -> Checked {
     let lookup = lookup_type(start, type_name, e.span)
-    let canonical = lookup.canonical
+    let canonical = resolved_name(lookup)
     let c = mark_window_event(lookup.checker, canonical)
     let index = type_index(c, canonical)
     if index < 0 {
-        let reported = if lookup.reported { c } else { report(c, source.error("E0208", e.span, "unknown type `" + type_name + "`")) }
+        let reported = if already_reported(lookup) { c } else { report(c, source.error("E0208", e.span, "unknown type `" + type_name + "`")) }
         let all = check_all(reported, args)
         return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral(type_name, variant, variant_span, all.args) }, ast.Type.Unknown)
     }
@@ -1578,6 +1722,12 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
             set is_enum_match = true
             set is_valid = true
             set scrutinee_type_name = "Option"
+        }
+        ast.Type.Result(value, error) => {
+            set enum_variants = [VariantType { name: "Ok", fields: [FieldType { name: "value", ty: value }] }, VariantType { name: "Error", fields: [FieldType { name: "error", ty: error }] }]
+            set is_enum_match = true
+            set is_valid = true
+            set scrutinee_type_name = "Result"
         }
         ast.Type.Named(name) => {
             let index = type_index(c, name)
@@ -1639,16 +1789,18 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
                 }
             }
             ast.PatternKind.VariantPattern(type_name, variant, bindings) => {
-                let lookup = if type_name == "Option" { NameLookup { checker: c, canonical: "Option", found: true, reported: false } } else { lookup_type(c, type_name, pattern_span) }
-                set c = mark_window_event(lookup.checker, lookup.canonical)
-                set typed_pattern = arm.pattern with { kind: ast.PatternKind.VariantPattern(lookup.canonical, variant, bindings) }
+                let built_in = type_name == "Option" or type_name == "Result"
+                let lookup = if built_in { NameLookup { checker: c, result: Result.Ok(type_name) } } else { lookup_type(c, type_name, pattern_span) }
+                let pattern_type_name = resolved_name(lookup)
+                set c = mark_window_event(lookup.checker, pattern_type_name)
+                set typed_pattern = arm.pattern with { kind: ast.PatternKind.VariantPattern(pattern_type_name, variant, bindings) }
                 var resolved: Option[VariantType] = Option.None
-                if is_enum_match and scrutinee_type_name == lookup.canonical {
+                if is_enum_match and scrutinee_type_name == pattern_type_name {
                     set resolved = find_variant(enum_variants, variant)
                     if resolved == Option.None {
                         set c = report(c, source.error_help("E0209", pattern_span, "enum `" + type_name + "` has no variant `" + variant + "`", "available variants: " + quoted_names(variant_names(enum_variants))))
                     }
-                } else if st != ast.Type.Unknown and not lookup.reported {
+                } else if st != ast.Type.Unknown and not already_reported(lookup) {
                     set c = report(c, source.error("E0513", pattern_span, "pattern of type `" + type_name + "` cannot match a value of type `" + ast.type_text(st) + "`"))
                 }
                 let fields = match resolved {
@@ -1740,6 +1892,7 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
 fn type_name_for_message(ty: ast.Type) -> Text {
     match ty {
         ast.Type.Option(_) => "Option"
+        ast.Type.Result(_, _) => "Result"
         _ => ast.type_text(ty)
     }
 }
@@ -1894,10 +2047,11 @@ fn check_call(start: Checker, e: ast.Expr, name: Text, name_span: source.Span, a
         }
     }
     let lookup = lookup_function(start, name, name_span)
-    let sig = match find_signature(lookup.checker, lookup.canonical) {
+    let canonical = resolved_name(lookup)
+    let sig = match find_signature(lookup.checker, canonical) {
         Option.Some(found) => found
         Option.None => {
-            if lookup.reported {
+            if already_reported(lookup) {
                 let quiet = check_all(lookup.checker, args)
                 return call_result(quiet.checker, e, name, name_span, quiet.args, ast.Type.Unknown)
             }
@@ -1921,5 +2075,5 @@ fn check_call(start: Checker, e: ast.Expr, name: Text, name_span: source.Span, a
         return call_result(all.checker, e, name, name_span, all.args, sig.return_type)
     }
     let typed = expect_args(c, args, sig.params)
-    call_result(typed.checker, e, lookup.canonical, name_span, typed.args, sig.return_type)
+    call_result(typed.checker, e, canonical, name_span, typed.args, sig.return_type)
 }

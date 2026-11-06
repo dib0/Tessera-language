@@ -12,6 +12,7 @@ pub enum Type {
     Unknown
     List(element: Type)
     Option(element: Type)
+    Result(value: Type, error: Type)
     Named(name: Text)
 }
 
@@ -70,6 +71,7 @@ pub enum ExprKind {
     Match(scrutinee: Expr, arms: List[Arm])
     RecordLiteral(type_name: Text, type_span: source.Span, fields: List[FieldInit])
     RecordUpdate(target: Expr, fields: List[FieldInit])
+    Try(operand: Expr)
     VariantLiteral(type_name: Text, variant: Text, variant_span: source.Span, args: List[Expr])
     Return(value: Option[Expr])
     Break
@@ -219,6 +221,7 @@ pub fn type_text(ty: Type) -> Text {
         Type.Unknown => "?"
         Type.List(element) => "List[" + type_text(element) + "]"
         Type.Option(element) => "Option[" + type_text(element) + "]"
+        Type.Result(value, error) => "Result[" + type_text(value) + ", " + type_text(error) + "]"
         Type.Named(name) => display_name(name)
     }
 }

@@ -1,0 +1,2 @@
+fn twice(x: Int) -> Result[Int, Text] = Result.Ok(try x * 2)
+fn main() -> Unit uses io = print("x")

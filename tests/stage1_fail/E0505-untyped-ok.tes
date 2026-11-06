@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+    let result = Result.Ok(1)
+    print("x")
+}

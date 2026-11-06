@@ -45,6 +45,7 @@ fn rust_type(ty: ast.Type) -> Text {
         ast.Type.Unknown => "()"
         ast.Type.List(element) => "Rc<Vec<" + rust_type(element) + ">>"
         ast.Type.Option(element) => "Option<" + rust_type(element) + ">"
+        ast.Type.Result(value, error) => "Result<" + rust_type(value) + ", " + rust_type(error) + ">"
         ast.Type.Named(name) => "Rc<T_" + name + ">"
     }
 }
@@ -76,6 +77,7 @@ fn resolve_simple(te: ast.TypeExpr, defs: List[checker.TypeDef]) -> ast.Type {
         "Unit" => ast.Type.Unit
         "List" => if length(te.args) > 0 { ast.Type.List(resolve_simple(te.args[0], defs)) } else { ast.Type.List(ast.Type.Unknown) }
         "Option" => if length(te.args) > 0 { ast.Type.Option(resolve_simple(te.args[0], defs)) } else { ast.Type.Option(ast.Type.Unknown) }
+        "Result" => if length(te.args) > 1 { ast.Type.Result(resolve_simple(te.args[0], defs), resolve_simple(te.args[1], defs)) } else { ast.Type.Result(ast.Type.Unknown, ast.Type.Unknown) }
         _ => if find_type_def(defs, te.name) != Option.None { ast.Type.Named(te.name) } else { ast.Type.Unknown }
     }
 }
@@ -311,6 +313,7 @@ fn scan_expr(e: ast.Expr, name: Text) -> Usage {
             Option.Some(v) => with_jump(scan_expr(v, name))
             Option.None => with_jump(no_usage())
         }
+        ast.ExprKind.Try(operand) => with_jump(scan_expr(operand, name))
         ast.ExprKind.Break => with_jump(no_usage())
         ast.ExprKind.Continue => with_jump(no_usage())
         _ => no_usage()
@@ -442,7 +445,26 @@ fn gen_expr(g: Gen, e: ast.Expr, indent: Int) -> Code {
             }
             code(current, out + "Rc::new(" + tmp + ") }")
         }
-        ast.ExprKind.VariantLiteral(type_name, variant, _, args) => if type_name == "Option" { gen_option(g, e, variant, args, indent) } else { gen_variant(g, type_name, variant, args, indent) }
+        ast.ExprKind.VariantLiteral(type_name, variant, _, args) => match type_name {
+            "Option" => gen_option(g, e, variant, args, indent)
+            "Result" => {
+                let value = gen_expr(g, args[0], indent)
+                let constructor = if variant == "Ok" { "Ok" } else { "Err" }
+                let turbofish = match e.ty {
+                    ast.Type.Result(ok_type, error_type) => "Result::<" + rust_type(ok_type) + ", " + rust_type(error_type) + ">"
+                    _ => "Result::<(), ()>"
+                }
+                code(value.gen, turbofish + "::" + constructor + "(" + value.text + ")")
+            }
+            _ => gen_variant(g, type_name, variant, args, indent)
+        }
+        ast.ExprKind.Try(operand) => {
+            let value = gen_expr(g, operand, indent)
+            match operand.ty {
+                ast.Type.Option(_) => code(value.gen, "match " + value.text + " { Some(ok_value) => ok_value, None => return None }")
+                _ => code(value.gen, "match " + value.text + " { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) }")
+            }
+        }
         ast.ExprKind.Return(value) => match value {
             Option.Some(v) => {
                 let result = gen_expr(g, v, indent)
@@ -454,6 +476,9 @@ fn gen_expr(g: Gen, e: ast.Expr, indent: Int) -> Code {
         ast.ExprKind.Continue => code(g, "continue")
     }
 }
+
+note "Rust names of the variants of the built-in `Option` and `Result`."
+fn rust_variant(variant: Text) -> Text = if variant == "Error" { "Err" } else { variant }
 
 fn gen_option(g: Gen, e: ast.Expr, variant: Text, args: List[ast.Expr], indent: Int) -> Code {
     if variant == "None" {
@@ -495,6 +520,7 @@ fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) 
     let head = match scrutinee.ty {
         ast.Type.Named(_) => "match &*(" + s.text + ")"
         ast.Type.Option(_) => "match &(" + s.text + ")"
+        ast.Type.Result(_, _) => "match &(" + s.text + ")"
         ast.Type.Text => "match (" + s.text + ").as_str()"
         _ => "match " + s.text
     }
@@ -514,8 +540,8 @@ fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) 
                 set pattern = to_text(value)
             }
             ast.PatternKind.VariantPattern(type_name, variant, bindings) => {
-                let is_option = type_name == "Option"
-                if (is_option and variant == "Some") or variant_has_fields(g.type_defs, type_name, variant) {
+                let is_option = type_name == "Option" or type_name == "Result"
+                if (is_option and variant != "None") or variant_has_fields(g.type_defs, type_name, variant) {
                     var parts: List[Text] = []
                     for b in bindings {
                         if b.name == "_" {
@@ -527,7 +553,7 @@ fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) 
                             set parts = append(parts, tmp)
                         }
                     }
-                    let constructor = if is_option { variant } else { "T_" + type_name + "::V_" + variant }
+                    let constructor = if is_option { rust_variant(variant) } else { "T_" + type_name + "::V_" + variant }
                     set pattern = constructor + "(" + join(parts, ", ") + ")"
                 } else {
                     set pattern = if is_option { variant } else { "T_" + type_name + "::V_" + variant }

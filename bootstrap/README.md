@@ -1,22 +1,34 @@
-# Bootstrap compiler
+# Bootstrap seed
 
-Generated, module-free source of the stage 1 compiler. Stage 0 (Rust, frozen at
-draft 0.3) can build it because it uses no modules and none of the newer language
-features; it implements all of them, so it can build the real compiler in `stage1/`:
+`tessera1.rs` is the Rust code that the stage 1 compiler generates for its own
+source. Compiling it with `rustc` gives a working Tessera compiler, which then builds
+the real compiler from `stage1/`:
 
-    stage 0 (Rust)  ->  bootstrap/ (Tessera, flat)  ->  stage1/ (Tessera, modules)
+    rustc bootstrap/tessera1.rs  ->  bin/tessera-bootstrap  ->  bin/tessera1 (from stage1/)
 
-Do not edit these files. They are produced by `tools/flatten.tes`, which removes
-`import` lines, `pub` markers and module qualifiers from `stage1/`.
+This is how most self-hosted languages bootstrap: from a previous build of
+themselves. Do not edit the file; it is generated.
 
-When to regenerate: when you add a language feature to `stage1/` and want the
-compiler's own source to use it. Do it in two steps:
+## Where it comes from
 
-1. Implement the feature in `stage1/` without using it there, and run
-       compiler/target/release/tessera run tools/flatten.tes -- stage1 bootstrap \
-           source lexer ast parser checker codegen runtime_text main
-   so `bootstrap/` understands the feature but is still buildable by stage 0.
+The chain starts at the stage 0 compiler (`compiler/`, Rust). The first seed was made
+on 2026-11-06 like this, and the result was byte-identical to what the stage 1
+compiler produces for itself:
+
+    stage 0  ->  flat module-free copy of stage 1 (git history, bootstrap/*.tes)
+             ->  stage1/  ->  stage1 emit-rust stage1/main.tes  =  tessera1.rs
+
+Every later seed is produced by a compiler that was itself built from the previous
+seed, and `build.sh` checks on every build that `stage1/` compiles itself to a
+fixpoint. The file is plain safe Rust (`#![forbid(unsafe_code)]`), so it can be
+reviewed like any other generated code.
+
+## When and how to update it
+
+The seed only needs updating when `stage1/` should start using a language feature
+the seed does not support yet. Do it in two steps:
+
+1. Implement the feature in `stage1/` without using it there. Run `./build.sh`, then
+       bin/tessera1 emit-rust stage1/main.tes -o bootstrap/tessera1.rs
+   and commit. The new seed understands the feature.
 2. Only then start using the feature in `stage1/`.
-
-Draft 0.6 was done this way: `bootstrap/` supports `Option` and `with`, and
-`stage1/` uses them.

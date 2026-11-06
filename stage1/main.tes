@@ -33,47 +33,51 @@ type Options {
     output: Text
     json: Bool
     opt: Text
-    error: Text
 }
 
-fn parse_options(arguments: List[Text]) -> Options {
-    if length(arguments) == 0 {
-        return Options { command: "", files: [], output: "", json: false, opt: "2", error: "missing command" }
+fn value_after(arguments: List[Text], index: Int) -> Result[Text, Text] {
+    if index + 1 >= length(arguments) {
+        return Result.Error("`" + arguments[index] + "` needs a value")
     }
-    var files: List[Text] = []
-    var output = ""
-    var json = false
-    var opt = "2"
-    var problem = ""
+    Result.Ok(arguments[index + 1])
+}
+
+note "The error is a message for the user; `main` prints it with the usage text."
+fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
+    if length(arguments) == 0 {
+        return Result.Error("missing command")
+    }
+    var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2" }
+    if options.command == "help" or options.command == "--help" {
+        return Result.Ok(options)
+    }
     var index = 1
-    while index < length(arguments) and problem == "" {
+    while index < length(arguments) {
         let argument = arguments[index]
-        if argument == "-o" or argument == "--opt" {
-            if index + 1 >= length(arguments) {
-                set problem = "`" + argument + "` needs a value"
-            } else if argument == "-o" {
-                set output = arguments[index + 1]
-            } else if source.contains_text(["0", "1", "2", "3"], arguments[index + 1]) {
-                set opt = arguments[index + 1]
-            } else {
-                set problem = "invalid optimization level `" + arguments[index + 1] + "`"
+        if argument == "-o" {
+            set options = options with { output: try value_after(arguments, index) }
+            set index = index + 2
+        } else if argument == "--opt" {
+            let level = try value_after(arguments, index)
+            if not source.contains_text(["0", "1", "2", "3"], level) {
+                return Result.Error("invalid optimization level `" + level + "`")
             }
+            set options = options with { opt: level }
             set index = index + 2
         } else if argument == "--json" {
-            set json = true
+            set options = options with { json: true }
             set index = index + 1
         } else if source.starts_with_text(argument, "-") {
-            set problem = "unknown option `" + argument + "`"
+            return Result.Error("unknown option `" + argument + "`")
         } else {
-            set files = append(files, argument)
+            set options = options with { files: append(options.files, argument) }
             set index = index + 1
         }
     }
-    let command = arguments[0]
-    if problem == "" and length(files) == 0 and command != "help" and command != "--help" {
-        set problem = "no source files given"
+    if length(options.files) == 0 {
+        return Result.Error("no source files given")
     }
-    Options { command: command, files: files, output: output, json: json, opt: opt, error: problem }
+    Result.Ok(options)
 }
 
 type Frontend {
@@ -320,14 +324,16 @@ fn run_rustc(options: Options, rust_path: Text) -> Int uses process, env {
 }
 
 fn main() -> Unit uses io, fs, env, process {
-    let options = parse_options(args())
+    let options = match parse_options(args()) {
+        Result.Ok(parsed) => parsed
+        Result.Error(problem) => {
+            print_error("error: " + problem + "\n\n" + usage())
+            exit(2)
+        }
+    }
     if options.command == "help" or options.command == "--help" {
         print(usage())
         exit(0)
-    }
-    if options.error != "" {
-        print_error("error: " + options.error + "\n\n" + usage())
-        exit(2)
     }
     for path in options.files {
         if not source.ends_with_text(path, ".tes") {

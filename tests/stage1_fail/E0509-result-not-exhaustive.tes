@@ -1,0 +1,6 @@
+fn show(result: Result[Int, Text]) -> Text {
+    match result {
+        Result.Ok(value) => to_text(value)
+    }
+}
+fn main() -> Unit uses io = print(show(Result.Ok(1)))

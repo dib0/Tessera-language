@@ -1,0 +1,6 @@
+fn parse(text: Text) -> Result[Int, Text] = if text == "" { Result.Error("empty") } else { Result.Ok(1) }
+fn parse_twice(text: Text) -> Result[Int, Int] {
+    let value = try parse(text)
+    Result.Ok(value * 2)
+}
+fn main() -> Unit uses io = print("x")

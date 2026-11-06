@@ -1,0 +1,2 @@
+fn parse(text: Text) -> Result[Int, Text] = Result.Err("Rust spelling")
+fn main() -> Unit uses io = print("x")

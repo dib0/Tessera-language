@@ -762,6 +762,13 @@ fn parse_unary_inner(p: Parser, allow_record: Bool) -> ExprResult {
         }
         return expr_result(operand.parser, ast.ExprKind.Unary(ast.UnaryOp.Not, operand.expr), source.span_to(start, operand.expr.span))
     }
+    if at(p, lexer.TokenKind.Try) {
+        let operand = parse_unary(advance(p), allow_record)
+        if operand.parser.failed {
+            return operand
+        }
+        return expr_result(operand.parser, ast.ExprKind.Try(operand.expr), source.span_to(start, operand.expr.span))
+    }
     let primary = parse_primary(p, allow_record)
     if primary.parser.failed {
         return primary
