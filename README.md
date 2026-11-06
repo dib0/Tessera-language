@@ -61,8 +61,5 @@ Generics, concurrency, foreign-function interfaces, package management, GUI APIs
 
 ## Safety and security
 
-Tessera is not yet implemented and must not be treated as a security guarantee. The compiler, generated programs, and runtime will need testing and review. The initial design intends to avoid generating Rust `unsafe` code and to test that property, but that does not by itself prove the compiler or resulting software secure.
+Tessera is in very early stages and must not (yet) be treated as a security guarantee. The compiler, generated programs, and runtime will need testing and review. The initial design intends to avoid generating Rust `unsafe` code and to test that property, but that does not by itself prove the compiler or resulting software secure.
 
-## Project status
-
-There is not yet a released compiler or stable language specification. Build and installation instructions will be added when the prototype is available.
