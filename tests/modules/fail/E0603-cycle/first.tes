@@ -1,0 +1,5 @@
+import second
+
+pub fn name() -> Text = "first"
+
+pub fn other() -> Text = second.name()

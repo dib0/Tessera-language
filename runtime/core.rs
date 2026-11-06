@@ -130,6 +130,7 @@ fn t_exit(code: i64, loc: &str) -> ! {
     std::process::exit(code as i32)
 }
 fn t_user_fail(message: Rc<String>, loc: &str) -> ! { t_fail("R010", message.to_string(), loc) }
+fn t_file_exists(path: Rc<String>) -> bool { std::path::Path::new(path.as_str()).is_file() }
 fn t_environment_variable(name: Rc<String>) -> Rc<String> {
     match std::env::var(name.as_str()) { Ok(v) => Rc::new(v), Err(_) => Rc::new(String::new()) }
 }

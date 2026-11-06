@@ -28,6 +28,7 @@ pub const BUILTINS: &[&str] = &[
     "environment_variable",
     "run_process",
     "rgb",
+    "file_exists",
 ];
 
 pub struct Checked {
@@ -1195,6 +1196,13 @@ impl<'a> Checker<'a> {
                     self.expect_expr(&args[0], &Type::Text);
                 }
                 Type::Never
+            }
+            "file_exists" => {
+                self.use_effect("fs", name, span);
+                if self.arity(name, args, 1, span) {
+                    self.expect_expr(&args[0], &Type::Text);
+                }
+                Type::Bool
             }
             "environment_variable" => {
                 self.use_effect("env", name, span);

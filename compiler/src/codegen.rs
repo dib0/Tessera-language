@@ -462,6 +462,7 @@ impl<'a> Gen<'a> {
             "args" => format!("t_args({})", loc),
             "exit" => format!("t_exit({}, {})", a[0], loc),
             "fail" => format!("t_user_fail({}, {})", a[0], loc),
+            "file_exists" => format!("t_file_exists({})", a[0]),
             "environment_variable" => format!("t_environment_variable({})", a[0]),
             "run_process" => format!("t_run_process({}, {})", a[0], a[1]),
             "rgb" => format!("t_rgb({}, {}, {}, {})", a[0], a[1], a[2], loc),

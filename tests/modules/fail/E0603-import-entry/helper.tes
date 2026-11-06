@@ -1,0 +1,3 @@
+import main
+
+pub fn name() -> Text = main.shared()

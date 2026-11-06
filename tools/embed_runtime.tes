@@ -29,7 +29,7 @@ fn text_function(name: Text, source: Text, origin: Text) -> Text {
         }
     }
     set lines = append(lines, "        \"" + escape(from_code_points(current)) + "\",")
-    "note \"Generated from " + origin + "; do not edit by hand.\"\nfn " + name + "() -> Text {\n    let lines = [\n" + join(lines, "\n") + "\n    ]\n    join(lines, \"\\n\")\n}\n"
+    "note \"Generated from " + origin + "; do not edit by hand.\"\npub fn " + name + "() -> Text {\n    let lines = [\n" + join(lines, "\n") + "\n    ]\n    join(lines, \"\\n\")\n}\n"
 }
 
 fn main() -> Unit uses io, fs, env {

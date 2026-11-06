@@ -1,0 +1,5 @@
+import helper
+
+pub fn shared() -> Text = "shared"
+
+fn main() -> Unit uses io = print(helper.name())

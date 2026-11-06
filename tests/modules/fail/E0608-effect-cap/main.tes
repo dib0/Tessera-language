@@ -1,0 +1,3 @@
+import logger uses nothing
+
+fn main() -> Unit uses io = logger.log("hello")

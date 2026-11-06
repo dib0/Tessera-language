@@ -1,0 +1,5 @@
+fn helper() -> Text = "x"
+
+import util
+
+fn main() -> Unit uses io = print(util.name() + helper())

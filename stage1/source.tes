@@ -1,6 +1,6 @@
 // Source positions, diagnostics, and text helpers shared by all compiler phases.
 
-type Span {
+pub type Span {
     file: Int
     line: Int
     col: Int
@@ -8,13 +8,13 @@ type Span {
     end_col: Int
 }
 
-type SourceFile {
+pub type SourceFile {
     path: Text
     text: Text
 }
 
 note "Empty `label` or `help` means the diagnostic has none."
-type Diagnostic {
+pub type Diagnostic {
     code: Text
     message: Text
     span: Span
@@ -22,47 +22,47 @@ type Diagnostic {
     help: Text
 }
 
-fn span_of(file: Int, line: Int, col: Int, end_col: Int) -> Span {
+pub fn span_of(file: Int, line: Int, col: Int, end_col: Int) -> Span {
     Span { file: file, line: line, col: col, end_line: line, end_col: end_col }
 }
 
-fn span_to(start: Span, finish: Span) -> Span {
+pub fn span_to(start: Span, finish: Span) -> Span {
     Span { file: start.file, line: start.line, col: start.col, end_line: finish.end_line, end_col: finish.end_col }
 }
 
-fn error(code: Text, span: Span, message: Text) -> Diagnostic {
+pub fn error(code: Text, span: Span, message: Text) -> Diagnostic {
     Diagnostic { code: code, message: message, span: span, label: "", help: "" }
 }
 
-fn error_help(code: Text, span: Span, message: Text, help: Text) -> Diagnostic {
+pub fn error_help(code: Text, span: Span, message: Text, help: Text) -> Diagnostic {
     Diagnostic { code: code, message: message, span: span, label: "", help: help }
 }
 
-fn with_label(diagnostic: Diagnostic, label: Text) -> Diagnostic {
+pub fn with_label(diagnostic: Diagnostic, label: Text) -> Diagnostic {
     Diagnostic { code: diagnostic.code, message: diagnostic.message, span: diagnostic.span, label: label, help: diagnostic.help }
 }
 
-fn with_help(diagnostic: Diagnostic, help: Text) -> Diagnostic {
+pub fn with_help(diagnostic: Diagnostic, help: Text) -> Diagnostic {
     Diagnostic { code: diagnostic.code, message: diagnostic.message, span: diagnostic.span, label: diagnostic.label, help: help }
 }
 
 // ---------- character classes (code points) ----------
 
-fn is_digit(code: Int) -> Bool = code >= 48 and code <= 57
+pub fn is_digit(code: Int) -> Bool = code >= 48 and code <= 57
 
-fn is_upper(code: Int) -> Bool = code >= 65 and code <= 90
+pub fn is_upper(code: Int) -> Bool = code >= 65 and code <= 90
 
-fn is_lower(code: Int) -> Bool = code >= 97 and code <= 122
+pub fn is_lower(code: Int) -> Bool = code >= 97 and code <= 122
 
-fn is_letter(code: Int) -> Bool = is_upper(code) or is_lower(code)
+pub fn is_letter(code: Int) -> Bool = is_upper(code) or is_lower(code)
 
-fn is_alphanumeric(code: Int) -> Bool = is_letter(code) or is_digit(code)
+pub fn is_alphanumeric(code: Int) -> Bool = is_letter(code) or is_digit(code)
 
-fn is_hex_digit(code: Int) -> Bool = is_digit(code) or (code >= 97 and code <= 102) or (code >= 65 and code <= 70)
+pub fn is_hex_digit(code: Int) -> Bool = is_digit(code) or (code >= 97 and code <= 102) or (code >= 65 and code <= 70)
 
-fn is_control(code: Int) -> Bool = code < 32 or (code >= 127 and code < 160)
+pub fn is_control(code: Int) -> Bool = code < 32 or (code >= 127 and code < 160)
 
-fn hex_value(code: Int) -> Int {
+pub fn hex_value(code: Int) -> Int {
     if is_digit(code) {
         code - 48
     } else if code >= 97 {
@@ -74,7 +74,7 @@ fn hex_value(code: Int) -> Int {
 
 // ---------- text helpers ----------
 
-fn repeat_text(text: Text, count: Int) -> Text {
+pub fn repeat_text(text: Text, count: Int) -> Text {
     var out = ""
     var index = 0
     while index < count {
@@ -84,12 +84,12 @@ fn repeat_text(text: Text, count: Int) -> Text {
     out
 }
 
-fn starts_with_upper(text: Text) -> Bool {
+pub fn starts_with_upper(text: Text) -> Bool {
     let codes = code_points(text)
     length(codes) > 0 and is_upper(codes[0])
 }
 
-fn contains_text(items: List[Text], item: Text) -> Bool {
+pub fn contains_text(items: List[Text], item: Text) -> Bool {
     for candidate in items {
         if candidate == item {
             return true
@@ -98,7 +98,7 @@ fn contains_text(items: List[Text], item: Text) -> Bool {
     false
 }
 
-fn ends_with_text(text: Text, suffix: Text) -> Bool {
+pub fn ends_with_text(text: Text, suffix: Text) -> Bool {
     let codes = code_points(text)
     let suffix_codes = code_points(suffix)
     if length(suffix_codes) > length(codes) {
@@ -107,7 +107,7 @@ fn ends_with_text(text: Text, suffix: Text) -> Bool {
     slice(codes, length(codes) - length(suffix_codes), length(codes)) == suffix_codes
 }
 
-fn starts_with_text(text: Text, prefix: Text) -> Bool {
+pub fn starts_with_text(text: Text, prefix: Text) -> Bool {
     let codes = code_points(text)
     let prefix_codes = code_points(prefix)
     if length(prefix_codes) > length(codes) {
@@ -135,7 +135,7 @@ fn split_lines(text: Text) -> List[Text] {
     lines
 }
 
-fn split_on(text: Text, separator: Int) -> List[Text] {
+pub fn split_on(text: Text, separator: Int) -> List[Text] {
     let codes = code_points(text)
     var parts: List[Text] = []
     var start = 0
@@ -146,6 +146,25 @@ fn split_on(text: Text, separator: Int) -> List[Text] {
             set start = index + 1
         }
         set index = index + 1
+    }
+    append(parts, from_code_points(slice(codes, start, length(codes))))
+}
+
+pub fn split_on_text(text: Text, separator: Text) -> List[Text] {
+    let codes = code_points(text)
+    let sep = code_points(separator)
+    let width = length(sep)
+    var parts: List[Text] = []
+    var start = 0
+    var index = 0
+    while index + width <= length(codes) {
+        if slice(codes, index, index + width) == sep {
+            set parts = append(parts, from_code_points(slice(codes, start, index)))
+            set index = index + width
+            set start = index
+        } else {
+            set index = index + 1
+        }
     }
     append(parts, from_code_points(slice(codes, start, length(codes))))
 }
@@ -176,7 +195,7 @@ fn pad_left(text: Text, width: Int, fill: Text) -> Text {
 }
 
 note "Must match `rust_string` in the stage 0 compiler exactly, or generated code differs."
-fn rust_string(text: Text) -> Text {
+pub fn rust_string(text: Text) -> Text {
     var out: List[Text] = ["\""]
     for code in code_points(text) {
         let piece = match code {
@@ -192,7 +211,7 @@ fn rust_string(text: Text) -> Text {
     join(append(out, "\""), "")
 }
 
-fn json_string(text: Text) -> Text {
+pub fn json_string(text: Text) -> Text {
     var out: List[Text] = ["\""]
     for code in code_points(text) {
         let piece = match code {
@@ -210,7 +229,7 @@ fn json_string(text: Text) -> Text {
 
 // ---------- rendering ----------
 
-fn render(diagnostic: Diagnostic, files: List[SourceFile]) -> Text {
+pub fn render(diagnostic: Diagnostic, files: List[SourceFile]) -> Text {
     let file = files[diagnostic.span.file]
     let span = diagnostic.span
     var out = "error[" + diagnostic.code + "]: " + diagnostic.message + "\n"
@@ -240,7 +259,7 @@ fn render(diagnostic: Diagnostic, files: List[SourceFile]) -> Text {
 
 fn json_or_null(text: Text) -> Text = if text == "" { "null" } else { json_string(text) }
 
-fn render_json(diagnostics: List[Diagnostic], files: List[SourceFile]) -> Text {
+pub fn render_json(diagnostics: List[Diagnostic], files: List[SourceFile]) -> Text {
     var parts: List[Text] = []
     for d in diagnostics {
         let s = d.span
@@ -262,7 +281,7 @@ fn comes_before(a: Diagnostic, b: Diagnostic) -> Bool {
 }
 
 note "Stable merge sort by (file, line, column), matching the stage 0 order."
-fn sort_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
+pub fn sort_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
     if length(items) <= 1 {
         return items
     }
@@ -284,7 +303,7 @@ fn sort_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
     concat(concat(merged, slice(left, i, length(left))), slice(right, j, length(right)))
 }
 
-fn dedup_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
+pub fn dedup_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
     var out: List[Diagnostic] = []
     for d in items {
         let count = length(out)

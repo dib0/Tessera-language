@@ -1,0 +1,4 @@
+import a/util
+import b/util
+
+fn main() -> Unit uses io = print(util.name())

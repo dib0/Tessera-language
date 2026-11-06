@@ -1,0 +1,3 @@
+import tools/missing
+
+fn main() -> Unit uses io = print(missing.name())

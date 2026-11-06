@@ -1,0 +1,6 @@
+import util
+
+fn main() -> Unit uses io {
+    let util = "shadow"
+    print(util.name() + util)
+}

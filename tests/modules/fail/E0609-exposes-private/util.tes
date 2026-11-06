@@ -1,0 +1,7 @@
+type Secret {
+    value: Int
+}
+
+pub fn make() -> Secret = Secret { value: 1 }
+
+pub fn describe(secret: Secret) -> Text = to_text(secret.value)

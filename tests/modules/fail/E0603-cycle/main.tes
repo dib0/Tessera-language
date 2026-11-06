@@ -1,0 +1,3 @@
+import first
+
+fn main() -> Unit uses io = print(first.name())

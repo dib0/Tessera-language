@@ -1,0 +1,3 @@
+fn secret() -> Text = "hidden"
+
+pub fn name() -> Text = secret()

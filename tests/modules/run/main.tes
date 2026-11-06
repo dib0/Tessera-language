@@ -1,0 +1,17 @@
+// Entry module: uses two imported modules through qualified names.
+import geometry/shapes uses nothing
+import text/report uses nothing
+
+fn main() -> Unit uses io {
+    let all = [shapes.Shape.Circle(2), shapes.Shape.Square(3), shapes.unit_square()]
+    for shape in all {
+        print(report.line(shape))
+    }
+    let origin = shapes.Point { x: 0, y: 0 }
+    print(to_text(shapes.distance_squared(origin, shapes.Point { x: 3, y: 4 })))
+    let label = match all[0] {
+        shapes.Shape.Circle(radius) => "circle of radius " + to_text(radius)
+        shapes.Shape.Square(_) => "square"
+    }
+    print(label)
+}

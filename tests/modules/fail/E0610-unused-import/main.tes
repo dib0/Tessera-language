@@ -1,0 +1,3 @@
+import util
+
+fn main() -> Unit uses io = print("not using util")
