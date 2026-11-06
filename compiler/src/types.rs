@@ -71,4 +71,4 @@ pub enum TypeDef {
     Enum { variants: Vec<(String, Vec<(String, Type)>)> },
 }
 
-pub const EFFECTS: &[&str] = &["io", "fs", "env"];
+pub const EFFECTS: &[&str] = &["io", "fs", "env", "process"];

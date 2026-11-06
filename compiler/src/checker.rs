@@ -25,6 +25,9 @@ pub const BUILTINS: &[&str] = &[
     "args",
     "exit",
     "fail",
+    "environment_variable",
+    "run_process",
+    "rgb",
 ];
 
 pub struct Checked {
@@ -1192,6 +1195,29 @@ impl<'a> Checker<'a> {
                     self.expect_expr(&args[0], &Type::Text);
                 }
                 Type::Never
+            }
+            "environment_variable" => {
+                self.use_effect("env", name, span);
+                if self.arity(name, args, 1, span) {
+                    self.expect_expr(&args[0], &Type::Text);
+                }
+                Type::Text
+            }
+            "run_process" => {
+                self.use_effect("process", name, span);
+                if self.arity(name, args, 2, span) {
+                    self.expect_expr(&args[0], &Type::Text);
+                    self.expect_expr(&args[1], &list_of(Type::Text));
+                }
+                Type::Int
+            }
+            "rgb" => {
+                if self.arity(name, args, 3, span) {
+                    for a in args {
+                        self.expect_expr(a, &Type::Int);
+                    }
+                }
+                Type::Int
             }
             _ => {
                 let Some(sig) = self.fns.get(name).cloned() else {
