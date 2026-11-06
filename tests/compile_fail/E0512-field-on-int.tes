@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+    let n = 1
+    print(to_text(n.value))
+}

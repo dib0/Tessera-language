@@ -1,0 +1,2 @@
+fn length(x: Int) -> Int = x
+fn main() -> Unit uses io = print(to_text(length(1)))

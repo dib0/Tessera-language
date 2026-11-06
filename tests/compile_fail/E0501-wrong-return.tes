@@ -1,0 +1,2 @@
+fn name() -> Text = 42
+fn main() -> Unit uses io = print(name())

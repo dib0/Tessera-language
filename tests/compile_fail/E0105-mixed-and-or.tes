@@ -1,0 +1,2 @@
+fn check(a: Bool, b: Bool, c: Bool) -> Bool = a and b or c
+fn main() -> Unit uses io = print(to_text(check(true, false, true)))

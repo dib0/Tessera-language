@@ -1,0 +1,8 @@
+fn main() -> Unit uses io {
+    if true {
+        print("a")
+    }
+    else {
+        print("b")
+    }
+}

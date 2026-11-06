@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+    var x = 1
+    x = 2
+    print(to_text(x))
+}

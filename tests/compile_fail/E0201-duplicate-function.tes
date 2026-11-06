@@ -1,0 +1,3 @@
+fn twice(x: Int) -> Int = x * 2
+fn twice(x: Text) -> Text = x + x
+fn main() -> Unit uses io = print(to_text(twice(2)))

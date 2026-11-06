@@ -1,0 +1,50 @@
+enum Tree {
+    Leaf(value: Int)
+    Node(label: Text, children: List[Tree])
+}
+
+type Point {
+    x: Int
+    y: Int
+}
+
+fn sum(tree: Tree) -> Int {
+    match tree {
+        Tree.Leaf(value) => value
+        Tree.Node(_, children) => {
+            var total = 0
+            for child in children {
+                set total = total + sum(child)
+            }
+            total
+        }
+    }
+}
+
+fn first_label(trees: List[Tree]) -> Text {
+    for tree in trees {
+        match tree {
+            Tree.Node(label, children) => {
+                match length(children) {
+                    0 => return label + " (empty)"
+                    _ => return label
+                }
+            }
+            Tree.Leaf(_) => continue
+        }
+    }
+    "none"
+}
+
+fn checked(ok: Bool) -> Int {
+    let value = if ok { 1 } else { return -1 }
+    value * 10
+}
+
+fn log_twice(message: Text) -> Unit uses io {
+    if message == "" {
+        return
+    }
+    print(message)
+    print(message)
+}

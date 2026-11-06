@@ -1,0 +1,3 @@
+note "Detached by a blank line."
+
+fn main() -> Unit uses io = print("x")

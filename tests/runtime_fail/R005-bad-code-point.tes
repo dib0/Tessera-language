@@ -1,0 +1,1 @@
+fn main() -> Unit uses io = print(from_code_point(55296))

@@ -1,0 +1,12 @@
+[package]
+name = "tessera"
+version = "0.1.0"
+edition = "2021"
+description = "Stage 0 compiler for the Tessera language (Tessera to safe Rust)"
+publish = false
+
+# Deliberately no dependencies: the stage 0 compiler must be easy to audit.
+[dependencies]
+
+[profile.release]
+debug = false

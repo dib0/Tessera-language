@@ -1,0 +1,2 @@
+fn divide(a: Int, b: Int) -> Int = a / b
+fn main() -> Unit uses io = print(to_text(divide(1, 0)))

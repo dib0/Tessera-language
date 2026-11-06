@@ -1,0 +1,1 @@
+fn main() -> Unit uses io = print(to_text(007))

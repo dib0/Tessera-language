@@ -1,0 +1,2 @@
+fn between(a: Int, b: Int, c: Int) -> Bool = a < b < c
+fn main() -> Unit uses io = print(to_text(between(1, 2, 3)))

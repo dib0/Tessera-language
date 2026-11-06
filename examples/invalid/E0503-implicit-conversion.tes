@@ -1,0 +1,5 @@
+// Expected: type error, Text + Int has no implicit conversion. Fix: to_text(age).
+fn main() -> Unit uses io {
+    let age = 20
+    print("age: " + age)
+}

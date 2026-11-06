@@ -1,0 +1,156 @@
+// A tiny calculator: lexer, recursive-descent parser and evaluator.
+// Exercises records, recursive enums, match, return, while, and text processing.
+
+enum TokenKind {
+    Number
+    Plus
+    Minus
+    Star
+    Slash
+    LeftParen
+    RightParen
+    End
+}
+
+type Token {
+    kind: TokenKind
+    value: Int
+    column: Int
+}
+
+enum Expr {
+    Literal(value: Int)
+    Negate(operand: Expr)
+    Binary(operator: TokenKind, left: Expr, right: Expr)
+}
+
+type ParseResult {
+    expr: Expr
+    next: Int
+}
+
+fn is_digit(code: Int) -> Bool = code >= 48 and code <= 57
+
+fn single_char_kind(code: Int) -> TokenKind {
+    match code {
+        43 => TokenKind.Plus
+        45 => TokenKind.Minus
+        42 => TokenKind.Star
+        47 => TokenKind.Slash
+        40 => TokenKind.LeftParen
+        41 => TokenKind.RightParen
+        _ => fail("unexpected character " + from_code_point(code))
+    }
+}
+
+note "Tokens are produced in one pass; the final End token removes bounds checks from the parser."
+fn tokenize(source: Text) -> List[Token] {
+    let codes = code_points(source)
+    var tokens: List[Token] = []
+    var index = 0
+    while index < length(codes) {
+        let code = codes[index]
+        if code == 32 {
+            set index = index + 1
+            continue
+        }
+        if is_digit(code) {
+            let start = index
+            var value = 0
+            while index < length(codes) and is_digit(codes[index]) {
+                set value = value * 10 + codes[index] - 48
+                set index = index + 1
+            }
+            set tokens = append(tokens, Token { kind: TokenKind.Number, value: value, column: start + 1 })
+        } else {
+            set tokens = append(tokens, Token { kind: single_char_kind(code), value: 0, column: index + 1 })
+            set index = index + 1
+        }
+    }
+    append(tokens, Token { kind: TokenKind.End, value: 0, column: length(codes) + 1 })
+}
+
+fn parse_sum(tokens: List[Token], start: Int) -> ParseResult {
+    var result = parse_product(tokens, start)
+    while tokens[result.next].kind == TokenKind.Plus or tokens[result.next].kind == TokenKind.Minus {
+        let operator = tokens[result.next].kind
+        let right = parse_product(tokens, result.next + 1)
+        set result = ParseResult { expr: Expr.Binary(operator, result.expr, right.expr), next: right.next }
+    }
+    result
+}
+
+fn parse_product(tokens: List[Token], start: Int) -> ParseResult {
+    var result = parse_unary(tokens, start)
+    while tokens[result.next].kind == TokenKind.Star or tokens[result.next].kind == TokenKind.Slash {
+        let operator = tokens[result.next].kind
+        let right = parse_unary(tokens, result.next + 1)
+        set result = ParseResult { expr: Expr.Binary(operator, result.expr, right.expr), next: right.next }
+    }
+    result
+}
+
+fn parse_unary(tokens: List[Token], start: Int) -> ParseResult {
+    let token = tokens[start]
+    match token.kind {
+        TokenKind.Minus => {
+            let inner = parse_unary(tokens, start + 1)
+            ParseResult { expr: Expr.Negate(inner.expr), next: inner.next }
+        }
+        TokenKind.Number => ParseResult { expr: Expr.Literal(token.value), next: start + 1 }
+        TokenKind.LeftParen => {
+            let inner = parse_sum(tokens, start + 1)
+            if tokens[inner.next].kind != TokenKind.RightParen {
+                return fail("expected `)` at column " + to_text(tokens[inner.next].column))
+            }
+            ParseResult { expr: inner.expr, next: inner.next + 1 }
+        }
+        _ => fail("unexpected token at column " + to_text(token.column))
+    }
+}
+
+fn evaluate(expr: Expr) -> Int {
+    match expr {
+        Expr.Literal(value) => value
+        Expr.Negate(operand) => -evaluate(operand)
+        Expr.Binary(operator, left, right) => {
+            let a = evaluate(left)
+            let b = evaluate(right)
+            match operator {
+                TokenKind.Plus => a + b
+                TokenKind.Minus => a - b
+                TokenKind.Star => a * b
+                TokenKind.Slash => a / b
+                _ => fail("not a binary operator")
+            }
+        }
+    }
+}
+
+fn show(expr: Expr) -> Text {
+    match expr {
+        Expr.Literal(value) => to_text(value)
+        Expr.Negate(operand) => "(-" + show(operand) + ")"
+        Expr.Binary(operator, left, right) => {
+            let symbol = match operator {
+                TokenKind.Plus => " + "
+                TokenKind.Minus => " - "
+                TokenKind.Star => " * "
+                _ => " / "
+            }
+            "(" + show(left) + symbol + show(right) + ")"
+        }
+    }
+}
+
+fn main() -> Unit uses io, env {
+    let arguments = args()
+    let source = if length(arguments) > 0 { join(arguments, " ") } else { "2 * (3 + 4) - -5 / 5" }
+    let tokens = tokenize(source)
+    let parsed = parse_sum(tokens, 0)
+    if tokens[parsed.next].kind != TokenKind.End {
+        print_error("unexpected input at column " + to_text(tokens[parsed.next].column))
+        exit(1)
+    }
+    print(show(parsed.expr) + " = " + to_text(evaluate(parsed.expr)))
+}

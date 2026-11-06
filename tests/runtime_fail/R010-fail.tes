@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+    print("before")
+    fail("stopped on purpose")
+}

@@ -1,0 +1,1 @@
+fn main() -> Unit uses io, fs = print(read_file("/nonexistent/tessera/file.txt"))

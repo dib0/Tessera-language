@@ -1,0 +1,5 @@
+fn double(x: Int) -> Int = x * 2
+fn main() -> Unit uses io {
+    double(2)
+    print("done")
+}

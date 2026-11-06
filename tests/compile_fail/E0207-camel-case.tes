@@ -1,0 +1,2 @@
+fn addOne(x: Int) -> Int = x + 1
+fn main() -> Unit uses io = print(to_text(addOne(1)))

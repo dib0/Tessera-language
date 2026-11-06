@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+    let unsafe = 1
+    print(to_text(unsafe))
+}

@@ -1,0 +1,2 @@
+fn double(x: Int) -> Int uses io = x * 2
+fn main() -> Unit uses io = print(to_text(double(2)))

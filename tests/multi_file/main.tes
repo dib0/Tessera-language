@@ -1,0 +1,25 @@
+fn main() -> Unit uses io {
+    let tree = Tree.Node("root", [Tree.Leaf(1), Tree.Node("inner", [Tree.Leaf(2), Tree.Leaf(3)]), Tree.Node("empty", [])])
+    print(to_text(sum(tree)))
+    print(first_label([Tree.Leaf(5), Tree.Node("x", [])]))
+    print(to_text(checked(true)) + " " + to_text(checked(false)))
+    if (Point { x: 1, y: 2 }) == (Point { x: 1, y: 2 }) {
+        print("points equal")
+    }
+    let p = Point { x: 3, y: 4 }
+    let kind = match to_text(p.x) {
+        "3" => "three"
+        _ => "other"
+    }
+    print(kind)
+    var labels: List[Text] = []
+    for word in ["a", "b"] {
+        match word {
+            "a" => { set labels = append(labels, "first") }
+            _ => { set labels = append(labels, word) }
+        }
+    }
+    print(join(labels, "+"))
+    log_twice("")
+    log_twice("hi")
+}
