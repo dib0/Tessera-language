@@ -1,0 +1,54 @@
+// Option[T] and `with` record updates (draft 0.6, stage 1 only). Expected output in the .out file.
+
+type Account {
+    owner: Text
+    balance: Int
+    frozen: Bool
+}
+
+fn find_index(items: List[Text], wanted: Text) -> Option[Int] {
+    for index in range(0, length(items)) {
+        if items[index] == wanted {
+            return Option.Some(index)
+        }
+    }
+    Option.None
+}
+
+fn describe(position: Option[Int]) -> Text {
+    match position {
+        Option.Some(index) => "found at " + to_text(index)
+        Option.None => "missing"
+    }
+}
+
+fn deposit(account: Account, amount: Int) -> Account = account with { balance: account.balance + amount }
+
+fn first_word(words: List[Text]) -> Option[Text] = if length(words) > 0 { Option.Some(words[0]) } else { Option.None }
+
+fn main() -> Unit uses io {
+    let names = ["ada", "grace", "linus"]
+    print(describe(find_index(names, "grace")))
+    print(describe(find_index(names, "alan")))
+    print(to_text(value_or(find_index(names, "alan"), -1)))
+    let empty: List[Text] = []
+    print(value_or(first_word(empty), "(none)") + " " + value_or(first_word(names), "(none)"))
+    let nothing: Option[Int] = Option.None
+    print(to_text(nothing == Option.None) + " " + to_text(Option.Some(2) == Option.Some(2)))
+    let nested: List[Option[Int]] = [Option.Some(1), Option.None, Option.Some(3)]
+    var total = 0
+    for item in nested {
+        set total = total + value_or(item, 0)
+    }
+    print(to_text(total))
+
+    let start = Account { owner: "Ada", balance: 10, frozen: false }
+    var account = start
+    for amount in [5, 7] {
+        set account = deposit(account, amount)
+    }
+    let frozen = account with { frozen: true, owner: "Ada L." }
+    print(account.owner + " " + to_text(account.balance) + " " + to_text(account.frozen))
+    print(frozen.owner + " " + to_text(frozen.balance) + " " + to_text(frozen.frozen))
+    print(start.owner + " " + to_text(start.balance))
+}

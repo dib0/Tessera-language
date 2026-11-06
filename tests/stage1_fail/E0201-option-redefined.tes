@@ -1,0 +1,5 @@
+enum Option {
+    Yes
+    No
+}
+fn main() -> Unit uses io = print("x")

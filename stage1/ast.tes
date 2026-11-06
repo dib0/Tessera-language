@@ -11,6 +11,7 @@ pub enum Type {
     Never
     Unknown
     List(element: Type)
+    Option(element: Type)
     Named(name: Text)
 }
 
@@ -23,16 +24,6 @@ pub type TypeExpr {
     name: Text
     args: List[TypeExpr]
     span: source.Span
-}
-
-pub enum OptionalType {
-    Absent
-    Present(type_expr: TypeExpr)
-}
-
-pub enum OptionalExpr {
-    Absent
-    Present(expr: Expr)
 }
 
 pub enum UnaryOp {
@@ -74,12 +65,13 @@ pub enum ExprKind {
     FieldAccess(target: Expr, name: Text, name_span: source.Span)
     Unary(op: UnaryOp, operand: Expr)
     Binary(op: BinaryOp, op_span: source.Span, left: Expr, right: Expr)
-    If(condition: Expr, then_block: Block, else_branch: OptionalExpr)
+    If(condition: Expr, then_block: Block, else_branch: Option[Expr])
     BlockExpr(block: Block)
     Match(scrutinee: Expr, arms: List[Arm])
     RecordLiteral(type_name: Text, type_span: source.Span, fields: List[FieldInit])
+    RecordUpdate(target: Expr, fields: List[FieldInit])
     VariantLiteral(type_name: Text, variant: Text, variant_span: source.Span, args: List[Expr])
-    Return(value: OptionalExpr)
+    Return(value: Option[Expr])
     Break
     Continue
 }
@@ -92,13 +84,13 @@ pub type FieldInit {
 
 pub type Block {
     statements: List[Statement]
-    tail: OptionalExpr
+    tail: Option[Expr]
     span: source.Span
 }
 
 note "A `Let` named `_` discards its value."
 pub enum Statement {
-    Let(name: Text, name_span: source.Span, declared: OptionalType, value: Expr, mutable: Bool)
+    Let(name: Text, name_span: source.Span, declared: Option[TypeExpr], value: Expr, mutable: Bool)
     Set(name: Text, name_span: source.Span, value: Expr)
     For(variable: Text, variable_span: source.Span, iterable: Expr, body: Block)
     While(condition: Expr, body: Block)
@@ -217,10 +209,6 @@ pub fn display_name(canonical: Text) -> Text {
 
 pub fn make_expr(kind: ExprKind, span: source.Span) -> Expr = Expr { kind: kind, span: span, ty: Type.Unknown }
 
-pub fn with_type(expr: Expr, ty: Type) -> Expr = Expr { kind: expr.kind, span: expr.span, ty: ty }
-
-pub fn with_kind(expr: Expr, kind: ExprKind) -> Expr = Expr { kind: kind, span: expr.span, ty: expr.ty }
-
 pub fn type_text(ty: Type) -> Text {
     match ty {
         Type.Int => "Int"
@@ -230,6 +218,7 @@ pub fn type_text(ty: Type) -> Text {
         Type.Never => "Never"
         Type.Unknown => "?"
         Type.List(element) => "List[" + type_text(element) + "]"
+        Type.Option(element) => "Option[" + type_text(element) + "]"
         Type.Named(name) => display_name(name)
     }
 }

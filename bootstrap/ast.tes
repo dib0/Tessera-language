@@ -9,6 +9,7 @@ enum Type {
     Never
     Unknown
     List(element: Type)
+    Option(element: Type)
     Named(name: Text)
 }
 
@@ -76,6 +77,7 @@ enum ExprKind {
     BlockExpr(block: Block)
     Match(scrutinee: Expr, arms: List[Arm])
     RecordLiteral(type_name: Text, type_span: Span, fields: List[FieldInit])
+    RecordUpdate(target: Expr, fields: List[FieldInit])
     VariantLiteral(type_name: Text, variant: Text, variant_span: Span, args: List[Expr])
     Return(value: OptionalExpr)
     Break
@@ -228,6 +230,7 @@ fn type_text(ty: Type) -> Text {
         Type.Never => "Never"
         Type.Unknown => "?"
         Type.List(element) => "List[" + type_text(element) + "]"
+        Type.Option(element) => "Option[" + type_text(element) + "]"
         Type.Named(name) => display_name(name)
     }
 }

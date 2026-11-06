@@ -786,6 +786,16 @@ fn parse_postfix(start: ExprResult) -> ExprResult {
                 return failed_expr(after)
             }
             set result = expr_result(after, ExprKind.Index(result.expr, index.expr), span_to(result.expr.span, close))
+        } else if at(p, TokenKind.With) {
+            let update = parse_field_inits(advance(p))
+            if update.parser.failed {
+                return failed_expr(update.parser)
+            }
+            if length(update.fields) == 0 {
+                let d = error_help("E0511", update.close, "`with` must change at least one field", "write e.g. `value with { name: new_name }`")
+                return failed_expr(fail_parse(update.parser, d))
+            }
+            set result = expr_result(update.parser, ExprKind.RecordUpdate(result.expr, update.fields), span_to(result.expr.span, update.close))
         } else if at(p, TokenKind.Dot) {
             let field = identifier(advance(p), "a field name")
             if field.parser.failed {
@@ -960,6 +970,40 @@ fn parse_type_use(p: Parser, t: Token, allow_record: Bool) -> ExprResult {
         return expr_result(args.parser, ExprKind.Call(t.text, start, args.args), span_to(start, args.end))
     }
     expr_result(after, ExprKind.Name(t.text), start)
+}
+
+type FieldInitsResult {
+    parser: Parser
+    fields: List[FieldInit]
+    close: Span
+}
+
+note "Parses `{ name: value, ... }`, as used by record literals and `with` updates."
+fn parse_field_inits(start: Parser) -> FieldInitsResult {
+    var p = expect(start, TokenKind.LBrace)
+    var fields: List[FieldInit] = []
+    while not p.failed {
+        set p = skip_newlines(p)
+        if at(p, TokenKind.RBrace) {
+            break
+        }
+        let field = identifier(p, "a field name")
+        let value = parse_expr(expect(field.parser, TokenKind.Colon), true)
+        if value.parser.failed {
+            return FieldInitsResult { parser: value.parser, fields: fields, close: current_span(value.parser) }
+        }
+        set fields = append(fields, FieldInit { name: field.name, span: field.span, value: value.expr })
+        set p = skip_newlines(value.parser)
+        if at(p, TokenKind.Comma) {
+            set p = advance(p)
+        } else if not at(p, TokenKind.RBrace) {
+            set p = unexpected(p, "`,` or `}`")
+        }
+    }
+    if p.failed {
+        return FieldInitsResult { parser: p, fields: fields, close: current_span(p) }
+    }
+    FieldInitsResult { parser: advance(p), fields: fields, close: current_span(p) }
 }
 
 fn parse_record_literal(start: Parser, type_name: Text, type_span: Span) -> ExprResult {

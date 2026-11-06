@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+    let nothing = Option.None
+    print("x")
+}

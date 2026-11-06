@@ -1,0 +1,6 @@
+fn show(value: Option[Int]) -> Text {
+    match value {
+        Option.Some(number) => to_text(number)
+    }
+}
+fn main() -> Unit uses io = print(show(Option.Some(1)))

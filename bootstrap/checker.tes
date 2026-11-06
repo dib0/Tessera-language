@@ -100,7 +100,7 @@ type CheckedProgram {
 
 fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui"]
 
-fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at"]
+fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or"]
 
 fn list_of(element: Type) -> Type = Type.List(element)
 
@@ -172,6 +172,10 @@ fn fits(actual: Type, expected: Type) -> Bool {
             Type.List(expected_element) => fits(actual_element, expected_element)
             _ => false
         }
+        Type.Option(actual_element) => match expected {
+            Type.Option(expected_element) => fits(actual_element, expected_element)
+            _ => false
+        }
         _ => actual == expected
     }
 }
@@ -192,6 +196,13 @@ fn join_types(a: Type, b: Type) -> List[Type] {
             Type.List(b_element) => {
                 let inner = join_types(a_element, b_element)
                 if length(inner) == 0 { [] } else { [Type.List(inner[0])] }
+            }
+            _ => []
+        }
+        Type.Option(a_element) => match b {
+            Type.Option(b_element) => {
+                let inner = join_types(a_element, b_element)
+                if length(inner) == 0 { [] } else { [Type.Option(inner[0])] }
             }
             _ => []
         }
@@ -418,17 +429,18 @@ fn mark_set(c: Checker, name: Text) -> Checker {
 
 // ---------- declarations ----------
 
-fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Never", "WindowEvent"]
+fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Never", "WindowEvent"]
 
 fn resolve(start: Checker, te: TypeExpr) -> ResolvedType {
     let name = te.name
-    if name == "List" {
+    if name == "List" or name == "Option" {
         if length(te.args) != 1 {
-            let d = error_help("E0208", te.span, "`List` needs exactly one element type", "write e.g. `List[Int]`")
+            let d = error_help("E0208", te.span, "`" + name + "` needs exactly one element type", "write e.g. `" + name + "[Int]`")
             return ResolvedType { checker: report(start, d), ty: Type.Unknown }
         }
         let inner = resolve(start, te.args[0])
-        return ResolvedType { checker: inner.checker, ty: Type.List(inner.ty) }
+        let wrapped = if name == "List" { Type.List(inner.ty) } else { Type.Option(inner.ty) }
+        return ResolvedType { checker: inner.checker, ty: wrapped }
     }
     var c = start
     var ty = Type.Unknown
@@ -492,7 +504,6 @@ fn resolve_fields(start: Checker, fields: List[Field]) -> ResolvedFields {
     }
     ResolvedFields { checker: c, fields: out }
 }
-
 
 // ---------- modules ----------
 
@@ -608,7 +619,7 @@ fn canonical_type_expr(c: Checker, te: TypeExpr) -> TypeExpr {
     for a in te.args {
         set args = append(args, canonical_type_expr(c, a))
     }
-    let builtin_type = contains_text(["Int", "Bool", "Text", "Unit", "List"], te.name)
+    let builtin_type = contains_text(["Int", "Bool", "Text", "Unit", "List", "Option"], te.name)
     let name = if builtin_type { te.name } else { lookup_type(c, te.name, te.span).canonical }
     TypeExpr { name: name, args: args, span: te.span }
 }
@@ -665,6 +676,7 @@ fn check_imports(start: Checker, m: Module) -> Checker {
 fn private_types_in(c: Checker, ty: Type, prefix: Text) -> List[Text] {
     match ty {
         Type.List(element) => private_types_in(c, element, prefix)
+        Type.Option(element) => private_types_in(c, element, prefix)
         Type.Named(name) => {
             let index = type_index(c, name)
             if index >= 0 and not c.type_defs[index].public and c.type_defs[index].prefix == prefix { [name] } else { [] }
@@ -1039,7 +1051,8 @@ fn check_expr(c: Checker, e: Expr, expected: Type) -> Checked {
         }
         ExprKind.Match(scrutinee, arms) => check_match(c, e, scrutinee, arms, expected)
         ExprKind.RecordLiteral(type_name, type_span, fields) => check_record_literal(c, e, type_name, type_span, fields)
-        ExprKind.VariantLiteral(type_name, variant, variant_span, args) => check_variant(c, e, type_name, variant, variant_span, args)
+        ExprKind.RecordUpdate(target, fields) => check_record_update(c, e, target, fields, expected)
+        ExprKind.VariantLiteral(type_name, variant, variant_span, args) => if type_name == "Option" { check_option_variant(c, e, variant, variant_span, args, expected) } else { check_variant(c, e, type_name, variant, variant_span, args) }
         ExprKind.Return(value) => {
             let ret = c.return_type
             match value {
@@ -1441,6 +1454,77 @@ fn check_record_literal(original: Checker, e: Expr, type_name: Text, type_span: 
     checked(c, with_kind(e, ExprKind.RecordLiteral(canonical, type_span, typed)), Type.Named(canonical))
 }
 
+fn check_option_variant(c: Checker, e: Expr, variant: Text, variant_span: Span, args: List[Expr], expected: Type) -> Checked {
+    let element_expected = match expected {
+        Type.Option(element) => element
+        _ => Type.Unknown
+    }
+    let count = if variant == "Some" { 1 } else { 0 }
+    if variant != "Some" and variant != "None" {
+        let d = error_help("E0209", variant_span, "`Option` has no variant `" + variant + "`", "available variants: `Some`, `None`")
+        let all = check_all(report(c, d), args)
+        return checked(all.checker, with_kind(e, ExprKind.VariantLiteral("Option", variant, variant_span, all.args)), Type.Unknown)
+    }
+    if length(args) != count {
+        let d = error("E0502", e.span, "`Option." + variant + "` takes " + to_text(count) + " value(s), but " + to_text(length(args)) + " were given")
+        let all = check_all(report(c, d), args)
+        return checked(all.checker, with_kind(e, ExprKind.VariantLiteral("Option", variant, variant_span, all.args)), Type.Unknown)
+    }
+    if variant == "None" {
+        if element_expected == Type.Unknown {
+            let d = error_help("E0505", e.span, "the type of this `Option.None` is unknown", "add a type annotation, e.g. `let name: Option[Text] = Option.None`")
+            return checked(report(c, d), e, Type.Unknown)
+        }
+        return checked(c, e, Type.Option(element_expected))
+    }
+    let value = check_expr(c, args[0], element_expected)
+    let element = if element_expected != Type.Unknown and fits(value.expr.ty, element_expected) { element_expected } else { value.expr.ty }
+    checked(value.checker, with_kind(e, ExprKind.VariantLiteral("Option", variant, variant_span, [value.expr])), Type.Option(element))
+}
+
+fn check_record_update(c: Checker, e: Expr, target: Expr, inits: List[FieldInit], expected: Type) -> Checked {
+    let target_result = check_expr(c, target, expected)
+    var after = target_result.checker
+    let ty = target_result.expr.ty
+    var fields: List[FieldType] = []
+    var valid = false
+    match ty {
+        Type.Named(name) => {
+            let index = type_index(after, name)
+            if index >= 0 and not after.type_defs[index].is_enum {
+                set fields = after.type_defs[index].fields
+                set valid = true
+            }
+        }
+        _ => {}
+    }
+    if not valid and ty != Type.Unknown {
+        set after = report(after, error_help("E0512", target.span, "`with` needs a record, found `" + type_text(ty) + "`", "`with` creates a copy of a record with some fields changed"))
+    }
+    var seen: List[Text] = []
+    var typed: List[FieldInit] = []
+    for init in inits {
+        var field_type = Type.Unknown
+        var known = not valid
+        for f in fields {
+            if f.name == init.name {
+                set field_type = f.ty
+                set known = true
+            }
+        }
+        if not known {
+            set after = report(after, error("E0209", init.span, "type `" + type_text(ty) + "` has no field `" + init.name + "`"))
+        } else if contains_text(seen, init.name) {
+            set after = report(after, error("E0511", init.span, "field `" + init.name + "` is given twice"))
+        }
+        set seen = append(seen, init.name)
+        let result = expect_expr(after, init.value, field_type)
+        set after = result.checker
+        set typed = append(typed, FieldInit { name: init.name, span: init.span, value: result.expr })
+    }
+    checked(after, with_kind(e, ExprKind.RecordUpdate(target_result.expr, typed)), if valid { ty } else { Type.Unknown })
+}
+
 fn check_variant(start: Checker, e: Expr, type_name: Text, variant: Text, variant_span: Span, args: List[Expr]) -> Checked {
     let lookup = lookup_type(start, type_name, e.span)
     let canonical = lookup.canonical
@@ -1493,13 +1577,21 @@ fn check_match(start: Checker, e: Expr, scrutinee: Expr, arms: List[Arm], expect
     var enum_variants: List[VariantType] = []
     var is_enum_match = false
     var is_valid = st == Type.Int or st == Type.Text or st == Type.Bool or st == Type.Unknown
+    var scrutinee_type_name = ""
     match st {
+        Type.Option(element) => {
+            set enum_variants = [VariantType { name: "Some", fields: [FieldType { name: "value", ty: element }] }, VariantType { name: "None", fields: [] }]
+            set is_enum_match = true
+            set is_valid = true
+            set scrutinee_type_name = "Option"
+        }
         Type.Named(name) => {
             let index = type_index(c, name)
             if index >= 0 and c.type_defs[index].is_enum {
                 set enum_variants = c.type_defs[index].variants
                 set is_enum_match = true
                 set is_valid = true
+                set scrutinee_type_name = name
             }
         }
         _ => {}
@@ -1553,12 +1645,12 @@ fn check_match(start: Checker, e: Expr, scrutinee: Expr, arms: List[Arm], expect
                 }
             }
             PatternKind.VariantPattern(type_name, variant, bindings) => {
-                let lookup = lookup_type(c, type_name, pattern_span)
+                let lookup = if type_name == "Option" { NameLookup { checker: c, canonical: "Option", found: true, reported: false } } else { lookup_type(c, type_name, pattern_span) }
                 set c = mark_window_event(lookup.checker, lookup.canonical)
                 set typed_pattern = Pattern { kind: PatternKind.VariantPattern(lookup.canonical, variant, bindings), span: pattern_span }
                 var fields: List[FieldType] = []
                 var resolved = false
-                if is_enum_match and st == Type.Named(lookup.canonical) {
+                if is_enum_match and scrutinee_type_name == lookup.canonical {
                     for v in enum_variants {
                         if v.name == variant {
                             set fields = v.fields
@@ -1627,7 +1719,7 @@ fn check_match(start: Checker, e: Expr, scrutinee: Expr, arms: List[Arm], expect
             var missing: List[Text] = []
             for v in enum_variants {
                 if not contains_text(covered, v.name) {
-                    set missing = append(missing, type_text(st) + "." + v.name)
+                    set missing = append(missing, type_name_for_message(st) + "." + v.name)
                 }
             }
             if length(missing) > 0 {
@@ -1650,6 +1742,13 @@ fn check_match(start: Checker, e: Expr, scrutinee: Expr, arms: List[Arm], expect
         return checked(c, typed, Type.Never)
     }
     checked(c, typed, if length(result) > 0 { result[0] } else { Type.Unknown })
+}
+
+fn type_name_for_message(ty: Type) -> Text {
+    match ty {
+        Type.Option(_) => "Option"
+        _ => type_text(ty)
+    }
 }
 
 fn pattern_type(c: Checker, scrutinee: Type, pattern: Type, span: Span) -> Checker {
@@ -1740,6 +1839,28 @@ fn check_generic_call(c: Checker, e: Expr, name: Text, name_span: Span, args: Li
             set after = report(after, error("E0501", args[0].span, "`length` accepts a list or `Text`, found `" + type_text(t) + "`"))
         }
         return call_result(after, e, name, name_span, [result.expr], Type.Int)
+    }
+    if name == "value_or" {
+        if length(args) != 2 {
+            let all = arity_error(c, name, args, 2, span)
+            return call_result(all.checker, e, name, name_span, all.args, Type.Unknown)
+        }
+        let option = check_expr(c, args[0], if expected == Type.Unknown { Type.Unknown } else { Type.Option(expected) })
+        var after = option.checker
+        var element = Type.Unknown
+        match option.expr.ty {
+            Type.Option(inner) => {
+                set element = inner
+            }
+            Type.Unknown => {}
+            Type.Never => {}
+            _ => {
+                set after = report(after, error("E0501", args[0].span, "`value_or` needs an `Option`, found `" + type_text(option.expr.ty) + "`"))
+            }
+        }
+        let fallback = expect_expr(after, args[1], element)
+        let result_type = if element == Type.Unknown { fallback.expr.ty } else { element }
+        return call_result(fallback.checker, e, name, name_span, [option.expr, fallback.expr], result_type)
     }
     let count = if name == "append" or name == "concat" { 2 } else { 3 }
     if length(args) != count {

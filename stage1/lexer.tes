@@ -30,6 +30,7 @@ pub enum TokenKind {
     Continue
     Import
     Pub
+    With
     Underscore
     LParen
     RParen
@@ -103,6 +104,7 @@ pub fn symbol_text(kind: TokenKind) -> Text {
         TokenKind.Continue => "continue"
         TokenKind.Import => "import"
         TokenKind.Pub => "pub"
+        TokenKind.With => "with"
         TokenKind.Underscore => "_"
         TokenKind.LParen => "("
         TokenKind.RParen => ")"
@@ -197,6 +199,7 @@ fn keyword_kind(word: Text) -> TokenKind {
         "continue" => TokenKind.Continue
         "import" => TokenKind.Import
         "pub" => TokenKind.Pub
+        "with" => TokenKind.With
         _ => TokenKind.Ident
     }
 }
@@ -584,7 +587,7 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
     var remaining = length(open_kinds) - 1
     while remaining >= 0 {
         let d = source.error("E0102", open_spans[remaining], "`" + from_code_point(open_kinds[remaining]) + "` is never closed")
-        set diagnostics = append(diagnostics, source.with_label(d, "opened here"))
+        set diagnostics = append(diagnostics, d with { label: "opened here" })
         set remaining = remaining - 1
     }
     if newline_allowed(tokens, []) {

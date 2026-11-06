@@ -51,6 +51,7 @@ fn rust_type(ty: Type) -> Text {
         Type.Never => "()"
         Type.Unknown => "()"
         Type.List(element) => "Rc<Vec<" + rust_type(element) + ">>"
+        Type.Option(element) => "Option<" + rust_type(element) + ">"
         Type.Named(name) => "Rc<T_" + name + ">"
     }
 }
@@ -74,6 +75,7 @@ fn resolve_simple(te: TypeExpr, defs: List[TypeDef]) -> Type {
         "Text" => Type.Text
         "Unit" => Type.Unit
         "List" => if length(te.args) > 0 { Type.List(resolve_simple(te.args[0], defs)) } else { Type.List(Type.Unknown) }
+        "Option" => if length(te.args) > 0 { Type.Option(resolve_simple(te.args[0], defs)) } else { Type.Option(Type.Unknown) }
         _ => if length(find_type_def(defs, te.name)) > 0 { Type.Named(te.name) } else { Type.Unknown }
     }
 }
@@ -291,6 +293,13 @@ fn scan_expr(e: Expr, name: Text) -> Usage {
             }
             total
         }
+        ExprKind.RecordUpdate(target, fields) => {
+            var total = scan_expr(target, name)
+            for f in fields {
+                set total = add_usage(total, scan_expr(f.value, name))
+            }
+            total
+        }
         ExprKind.RecordLiteral(_, _, fields) => {
             var total = no_usage()
             for f in fields {
@@ -421,13 +430,19 @@ fn gen_expr(g: Gen, e: Expr, indent: Int) -> Code {
             }
             code(current, "Rc::new(T_" + type_name + " { " + join(parts, ", ") + " })")
         }
-        ExprKind.VariantLiteral(type_name, variant, _, args) => {
-            if length(args) == 0 {
-                return code(g, "Rc::new(T_" + type_name + "::V_" + variant + ")")
+        ExprKind.RecordUpdate(target, fields) => {
+            let t = gen_expr(g, target, indent)
+            var current = with_tmp(t.gen, t.gen.tmp + 1)
+            let tmp = "t" + to_text(current.tmp)
+            var out = "{ let mut " + tmp + " = Rc::unwrap_or_clone(" + t.text + "); "
+            for f in fields {
+                let v = gen_expr(current, f.value, indent)
+                set current = v.gen
+                set out = out + tmp + ".f_" + f.name + " = " + v.text + "; "
             }
-            let parts = gen_list(g, args, indent)
-            code(parts.gen, "Rc::new(T_" + type_name + "::V_" + variant + "(" + join(parts.texts, ", ") + "))")
+            code(current, out + "Rc::new(" + tmp + ") }")
         }
+        ExprKind.VariantLiteral(type_name, variant, _, args) => if type_name == "Option" { gen_option(g, e, variant, args, indent) } else { gen_variant(g, type_name, variant, args, indent) }
         ExprKind.Return(value) => match value {
             OptionalExpr.Present(v) => {
                 let result = gen_expr(g, v, indent)
@@ -438,6 +453,26 @@ fn gen_expr(g: Gen, e: Expr, indent: Int) -> Code {
         ExprKind.Break => code(g, "break")
         ExprKind.Continue => code(g, "continue")
     }
+}
+
+fn gen_option(g: Gen, e: Expr, variant: Text, args: List[Expr], indent: Int) -> Code {
+    if variant == "None" {
+        let element = match e.ty {
+            Type.Option(t) => rust_type(t)
+            _ => "()"
+        }
+        return code(g, "Option::<" + element + ">::None")
+    }
+    let value = gen_expr(g, args[0], indent)
+    code(value.gen, "Some(" + value.text + ")")
+}
+
+fn gen_variant(g: Gen, type_name: Text, variant: Text, args: List[Expr], indent: Int) -> Code {
+    if length(args) == 0 {
+        return code(g, "Rc::new(T_" + type_name + "::V_" + variant + ")")
+    }
+    let parts = gen_list(g, args, indent)
+    code(parts.gen, "Rc::new(T_" + type_name + "::V_" + variant + "(" + join(parts.texts, ", ") + "))")
 }
 
 fn variant_has_fields(defs: List[TypeDef], type_name: Text, variant: Text) -> Bool {
@@ -456,6 +491,7 @@ fn gen_match(start: Gen, scrutinee: Expr, arms: List[Arm], indent: Int) -> Code 
     var g = s.gen
     let head = match scrutinee.ty {
         Type.Named(_) => "match &*(" + s.text + ")"
+        Type.Option(_) => "match &(" + s.text + ")"
         Type.Text => "match (" + s.text + ").as_str()"
         _ => "match " + s.text
     }
@@ -475,7 +511,8 @@ fn gen_match(start: Gen, scrutinee: Expr, arms: List[Arm], indent: Int) -> Code 
                 set pattern = to_text(value)
             }
             PatternKind.VariantPattern(type_name, variant, bindings) => {
-                if variant_has_fields(g.type_defs, type_name, variant) {
+                let is_option = type_name == "Option"
+                if (is_option and variant == "Some") or variant_has_fields(g.type_defs, type_name, variant) {
                     var parts: List[Text] = []
                     for b in bindings {
                         if b.name == "_" {
@@ -487,9 +524,10 @@ fn gen_match(start: Gen, scrutinee: Expr, arms: List[Arm], indent: Int) -> Code 
                             set parts = append(parts, tmp)
                         }
                     }
-                    set pattern = "T_" + type_name + "::V_" + variant + "(" + join(parts, ", ") + ")"
+                    let constructor = if is_option { variant } else { "T_" + type_name + "::V_" + variant }
+                    set pattern = constructor + "(" + join(parts, ", ") + ")"
                 } else {
-                    set pattern = "T_" + type_name + "::V_" + variant
+                    set pattern = if is_option { variant } else { "T_" + type_name + "::V_" + variant }
                 }
             }
         }
@@ -517,6 +555,7 @@ fn gen_call(g: Gen, name: Text, args: List[Expr], span: Span, indent: Int) -> Co
         "concat" => call_plain("t_concat_lists", a)
         "slice" => call_with_location("t_slice", a, loc)
         "replace_at" => call_with_location("t_replace_at", a, loc)
+        "value_or" => call_plain("t_value_or", a)
         "range" => call_with_location("t_range", a, loc)
         "code_points" => "t_code_points(&" + a[0] + ")"
         "from_code_point" => call_with_location("t_from_code_point", a, loc)

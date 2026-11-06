@@ -103,7 +103,7 @@ pub type CheckedProgram {
 
 fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui"]
 
-fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at"]
+fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or"]
 
 fn list_of(element: ast.Type) -> ast.Type = ast.Type.List(element)
 
@@ -175,71 +175,62 @@ fn fits(actual: ast.Type, expected: ast.Type) -> Bool {
             ast.Type.List(expected_element) => fits(actual_element, expected_element)
             _ => false
         }
+        ast.Type.Option(actual_element) => match expected {
+            ast.Type.Option(expected_element) => fits(actual_element, expected_element)
+            _ => false
+        }
         _ => actual == expected
     }
 }
 
-note "The common type of two branches: a one-element list, or empty when there is none."
-fn join_types(a: ast.Type, b: ast.Type) -> List[ast.Type] {
+note "The common type of two branches, if there is one."
+fn join_types(a: ast.Type, b: ast.Type) -> Option[ast.Type] {
     if a == ast.Type.Never {
-        return [b]
+        return Option.Some(b)
     }
     if b == ast.Type.Never {
-        return [a]
+        return Option.Some(a)
     }
     if a == ast.Type.Unknown or b == ast.Type.Unknown {
-        return [ast.Type.Unknown]
+        return Option.Some(ast.Type.Unknown)
     }
     match a {
         ast.Type.List(a_element) => match b {
-            ast.Type.List(b_element) => {
-                let inner = join_types(a_element, b_element)
-                if length(inner) == 0 { [] } else { [ast.Type.List(inner[0])] }
+            ast.Type.List(b_element) => match join_types(a_element, b_element) {
+                Option.Some(inner) => Option.Some(ast.Type.List(inner))
+                Option.None => Option.None
             }
-            _ => []
+            _ => Option.None
         }
-        _ => if a == b { [a] } else { [] }
+        ast.Type.Option(a_element) => match b {
+            ast.Type.Option(b_element) => match join_types(a_element, b_element) {
+                Option.Some(inner) => Option.Some(ast.Type.Option(inner))
+                Option.None => Option.None
+            }
+            _ => Option.None
+        }
+        _ => if a == b { Option.Some(a) } else { Option.None }
     }
 }
 
 // ---------- checker state ----------
 
 fn report(c: Checker, d: source.Diagnostic) -> Checker {
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: c.locals, diagnostics: append(c.diagnostics, d), function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: c.loop_depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
-}
-
-fn with_locals(c: Checker, locals: List[Local]) -> Checker {
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: c.loop_depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
-}
-
-fn with_type_defs(c: Checker, defs: List[TypeDef]) -> Checker {
-    Checker { type_defs: defs, functions: c.functions, builtins: c.builtins, locals: c.locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: c.loop_depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
-}
-
-fn with_functions(c: Checker, functions: List[Signature]) -> Checker {
-    Checker { type_defs: c.type_defs, functions: functions, builtins: c.builtins, locals: c.locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: c.loop_depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
-}
-
-fn with_used_effects(c: Checker, used: List[Text]) -> Checker {
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: c.locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: used, loop_depth: c.loop_depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
-}
-
-fn with_loop_depth(c: Checker, depth: Int) -> Checker {
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: c.locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
+    c with { diagnostics: append(c.diagnostics, d) }
 }
 
 fn mark_window_event(c: Checker, type_name: Text) -> Checker {
     if type_name != "WindowEvent" or c.uses_window_event {
         return c
     }
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: c.locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: c.loop_depth, uses_window_event: true, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
+    c with { uses_window_event: true }
 }
 
 fn enter_function(c: Checker, name: Text, return_type: ast.Type, effects: List[Text]) -> Checker {
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: [], diagnostics: c.diagnostics, function_name: name, return_type: return_type, declared_effects: effects, used_effects: [], loop_depth: 0, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: c.used_aliases }
+    c with { locals: [], function_name: name, return_type: return_type, declared_effects: effects, used_effects: [], loop_depth: 0 }
 }
 
-fn checked(c: Checker, expr: ast.Expr, ty: ast.Type) -> Checked = Checked { checker: c, expr: ast.with_type(expr, ty) }
+fn checked(c: Checker, expr: ast.Expr, ty: ast.Type) -> Checked = Checked { checker: c, expr: expr with { ty: ty } }
 
 fn type_index(c: Checker, name: Text) -> Int {
     for index in range(0, length(c.type_defs)) {
@@ -250,24 +241,24 @@ fn type_index(c: Checker, name: Text) -> Int {
     -1
 }
 
-fn find_signature(c: Checker, name: Text) -> List[Signature] {
+fn find_signature(c: Checker, name: Text) -> Option[Signature] {
     for s in c.functions {
         if s.name == name {
-            return [s]
+            return Option.Some(s)
         }
     }
-    []
+    Option.None
 }
 
-fn find_local(c: Checker, name: Text) -> List[Local] {
+fn find_local(c: Checker, name: Text) -> Option[Local] {
     var index = length(c.locals) - 1
     while index >= 0 {
         if c.locals[index].name == name {
-            return [c.locals[index]]
+            return Option.Some(c.locals[index])
         }
         set index = index - 1
     }
-    []
+    Option.None
 }
 
 fn quoted_names(names: List[Text]) -> Text {
@@ -385,15 +376,13 @@ fn check_pascal(c: Checker, name: Text, span: source.Span, what: Text) -> Checke
 
 fn declare(start: Checker, name: Text, span: source.Span, ty: ast.Type, mutable: Bool, what: Text) -> Checker {
     let c = check_snake(start, name, span, what)
-    if length(find_import(c, name)) > 0 {
+    if find_import(c, name) != Option.None {
         return report(c, source.error_help("E0204", span, "`" + name + "` is the name of an imported module", "choose a different name, so `" + name + ".` always means the module"))
     }
-    let existing = find_local(c, name)
-    if length(existing) > 0 {
-        let d = source.error_help("E0204", span, "`" + name + "` is already defined on line " + to_text(existing[0].span.line), "Tessera does not allow shadowing; choose a different name")
-        return report(c, d)
+    match find_local(c, name) {
+        Option.Some(existing) => report(c, source.error_help("E0204", span, "`" + name + "` is already defined on line " + to_text(existing.span.line), "Tessera does not allow shadowing; choose a different name"))
+        Option.None => c with { locals: append(c.locals, Local { name: name, ty: ty, mutable: mutable, was_set: false, span: span }) }
     }
-    with_locals(c, append(c.locals, Local { name: name, ty: ty, mutable: mutable, was_set: false, span: span }))
 }
 
 fn pop_scope(start: Checker, mark: Int) -> Checker {
@@ -403,7 +392,7 @@ fn pop_scope(start: Checker, mark: Int) -> Checker {
             set c = report(c, source.error_help("E0206", local.span, "`" + local.name + "` is declared with `var` but never changed", "use `let` for values that do not change"))
         }
     }
-    with_locals(c, slice(c.locals, 0, mark))
+    c with { locals: slice(c.locals, 0, mark) }
 }
 
 fn mark_set(c: Checker, name: Text) -> Checker {
@@ -411,8 +400,7 @@ fn mark_set(c: Checker, name: Text) -> Checker {
     while index >= 0 {
         let local = c.locals[index]
         if local.name == name {
-            let updated = Local { name: local.name, ty: local.ty, mutable: local.mutable, was_set: true, span: local.span }
-            return with_locals(c, replace_at(c.locals, index, updated))
+            return c with { locals: replace_at(c.locals, index, local with { was_set: true }) }
         }
         set index = index - 1
     }
@@ -421,17 +409,18 @@ fn mark_set(c: Checker, name: Text) -> Checker {
 
 // ---------- declarations ----------
 
-fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Never", "WindowEvent"]
+fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Never", "WindowEvent"]
 
 fn resolve(start: Checker, te: ast.TypeExpr) -> ResolvedType {
     let name = te.name
-    if name == "List" {
+    if name == "List" or name == "Option" {
         if length(te.args) != 1 {
-            let d = source.error_help("E0208", te.span, "`List` needs exactly one element type", "write e.g. `List[Int]`")
+            let d = source.error_help("E0208", te.span, "`" + name + "` needs exactly one element type", "write e.g. `" + name + "[Int]`")
             return ResolvedType { checker: report(start, d), ty: ast.Type.Unknown }
         }
         let inner = resolve(start, te.args[0])
-        return ResolvedType { checker: inner.checker, ty: ast.Type.List(inner.ty) }
+        let wrapped = if name == "List" { ast.Type.List(inner.ty) } else { ast.Type.Option(inner.ty) }
+        return ResolvedType { checker: inner.checker, ty: wrapped }
     }
     var c = start
     var ty = ast.Type.Unknown
@@ -470,7 +459,7 @@ fn resolve(start: Checker, te: ast.TypeExpr) -> ResolvedType {
         }
         var d = source.error("E0208", te.span, "unknown type `" + name + "`")
         if hint != "" {
-            set d = source.with_help(d, "did you mean `" + hint + "`?")
+            set d = d with { help: "did you mean `" + hint + "`?" }
         }
         return ResolvedType { checker: report(c, d), ty: ast.Type.Unknown }
     }
@@ -499,7 +488,7 @@ fn resolve_fields(start: Checker, fields: List[ast.Field]) -> ResolvedFields {
 // ---------- modules ----------
 
 fn enter_module(c: Checker, m: ast.Module) -> Checker {
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: [], diagnostics: c.diagnostics, function_name: "", return_type: ast.Type.Unit, declared_effects: [], used_effects: [], loop_depth: 0, uses_window_event: c.uses_window_event, prefix: m.prefix, imports: imports_of(m), used_aliases: c.used_aliases }
+    c with { locals: [], function_name: "", return_type: ast.Type.Unit, declared_effects: [], used_effects: [], loop_depth: 0, prefix: m.prefix, imports: imports_of(m) }
 }
 
 pub fn imports_of(m: ast.Module) -> List[ast.Import] {
@@ -515,13 +504,13 @@ pub fn imports_of(m: ast.Module) -> List[ast.Import] {
     out
 }
 
-fn find_import(c: Checker, alias: Text) -> List[ast.Import] {
+fn find_import(c: Checker, alias: Text) -> Option[ast.Import] {
     for i in c.imports {
         if i.alias == alias {
-            return [i]
+            return Option.Some(i)
         }
     }
-    []
+    Option.None
 }
 
 fn mark_alias_used(c: Checker, alias: Text) -> Checker {
@@ -529,7 +518,7 @@ fn mark_alias_used(c: Checker, alias: Text) -> Checker {
     if source.contains_text(c.used_aliases, key) {
         return c
     }
-    Checker { type_defs: c.type_defs, functions: c.functions, builtins: c.builtins, locals: c.locals, diagnostics: c.diagnostics, function_name: c.function_name, return_type: c.return_type, declared_effects: c.declared_effects, used_effects: c.used_effects, loop_depth: c.loop_depth, uses_window_event: c.uses_window_event, prefix: c.prefix, imports: c.imports, used_aliases: append(c.used_aliases, key) }
+    c with { used_aliases: append(c.used_aliases, key) }
 }
 
 note "`reported` means an error was already recorded, so the caller must not report another."
@@ -557,15 +546,16 @@ fn lookup_type(c: Checker, name: Text, span: source.Span) -> NameLookup {
 
 fn lookup_qualified(c: Checker, alias: Text, member: Text, span: source.Span, is_type: Bool) -> NameLookup {
     let what = if is_type { "type" } else { "function" }
-    let imports = find_import(c, alias)
-    if length(imports) == 0 {
-        var d = source.error_help("E0606", span, "unknown module `" + alias + "`", "add `import path/to/" + alias + "` at the top of the file")
-        if length(find_local(c, alias)) > 0 {
-            set d = source.with_help(d, "Tessera has no method calls; call the function with the value as first argument, e.g. `" + member + "(" + alias + ", ...)`")
+    let path = match find_import(c, alias) {
+        Option.Some(found) => found.path
+        Option.None => {
+            var d = source.error_help("E0606", span, "unknown module `" + alias + "`", "add `import path/to/" + alias + "` at the top of the file")
+            if find_local(c, alias) != Option.None {
+                set d = d with { help: "Tessera has no method calls; call the function with the value as first argument, e.g. `" + member + "(" + alias + ", ...)`" }
+            }
+            return NameLookup { checker: report(c, d), canonical: "", found: false, reported: true }
         }
-        return NameLookup { checker: report(c, d), canonical: "", found: false, reported: true }
     }
-    let path = imports[0].path
     let canonical = ast.module_prefix(path) + member
     let used = mark_alias_used(c, alias)
     var exists = false
@@ -577,10 +567,12 @@ fn lookup_qualified(c: Checker, alias: Text, member: Text, span: source.Span, is
             set public = used.type_defs[index].public
         }
     } else {
-        let signature = find_signature(used, canonical)
-        if length(signature) > 0 {
-            set exists = true
-            set public = signature[0].public
+        match find_signature(used, canonical) {
+            Option.Some(signature) => {
+                set exists = true
+                set public = signature.public
+            }
+            Option.None => {}
         }
     }
     if not exists {
@@ -599,7 +591,7 @@ fn lookup_function(c: Checker, name: Text, span: source.Span) -> NameLookup {
     let parts = source.split_on(name, 46)
     if length(parts) == 1 {
         let canonical = c.prefix + name
-        return NameLookup { checker: c, canonical: canonical, found: length(find_signature(c, canonical)) > 0, reported: false }
+        return NameLookup { checker: c, canonical: canonical, found: find_signature(c, canonical) != Option.None, reported: false }
     }
     lookup_qualified(c, parts[0], parts[1], span, false)
 }
@@ -610,7 +602,7 @@ fn canonical_type_expr(c: Checker, te: ast.TypeExpr) -> ast.TypeExpr {
     for a in te.args {
         set args = append(args, canonical_type_expr(c, a))
     }
-    let builtin_type = source.contains_text(["Int", "Bool", "Text", "Unit", "List"], te.name)
+    let builtin_type = source.contains_text(["Int", "Bool", "Text", "Unit", "List", "Option"], te.name)
     let name = if builtin_type { te.name } else { lookup_type(c, te.name, te.span).canonical }
     ast.TypeExpr { name: name, args: args, span: te.span }
 }
@@ -667,6 +659,7 @@ fn check_imports(start: Checker, m: ast.Module) -> Checker {
 fn private_types_in(c: Checker, ty: ast.Type, prefix: Text) -> List[Text] {
     match ty {
         ast.Type.List(element) => private_types_in(c, element, prefix)
+        ast.Type.Option(element) => private_types_in(c, element, prefix)
         ast.Type.Named(name) => {
             let index = type_index(c, name)
             if index >= 0 and not c.type_defs[index].public and c.type_defs[index].prefix == prefix { [name] } else { [] }
@@ -697,15 +690,12 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
         set c = enter_module(c, m)
         for item in m.items {
             let decl = match item {
-                ast.Item.RecordItem(r) => [TypeDef { name: r.name, is_enum: false, fields: [], variants: [], span: r.name_span, public: r.public, prefix: m.prefix }]
-                ast.Item.EnumItem(e) => [TypeDef { name: e.name, is_enum: true, fields: [], variants: [], span: e.name_span, public: e.public, prefix: m.prefix }]
-                _ => []
+                ast.Item.RecordItem(r) => TypeDef { name: r.name, is_enum: false, fields: [], variants: [], span: r.name_span, public: r.public, prefix: m.prefix }
+                ast.Item.EnumItem(e) => TypeDef { name: e.name, is_enum: true, fields: [], variants: [], span: e.name_span, public: e.public, prefix: m.prefix }
+                _ => continue
             }
-            if length(decl) == 0 {
-                continue
-            }
-            let name = decl[0].name
-            let decl_span = decl[0].span
+            let name = decl.name
+            let decl_span = decl.span
             set c = check_pascal(c, name, decl_span, "type")
             if source.contains_text(builtin_type_names(), name) {
                 set c = report(c, source.error("E0201", decl_span, "`" + name + "` is a built-in type and cannot be redefined"))
@@ -717,7 +707,7 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
                 set c = report(c, source.error("E0201", decl_span, "type `" + name + "` is already defined on line " + to_text(c.type_defs[existing].span.line)))
                 continue
             }
-            set c = with_type_defs(c, append(c.type_defs, TypeDef { name: canonical, is_enum: decl[0].is_enum, fields: [], variants: [], span: decl_span, public: decl[0].public, prefix: m.prefix }))
+            set c = c with { type_defs: append(c.type_defs, decl with { name: canonical }) }
         }
     }
 
@@ -732,7 +722,7 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
                         let resolved = resolve_fields(c, r.fields)
                         set c = resolved.checker
                         let def = TypeDef { name: m.prefix + r.name, is_enum: false, fields: resolved.fields, variants: [], span: r.name_span, public: r.public, prefix: m.prefix }
-                        set c = with_type_defs(c, replace_at(c.type_defs, index, def))
+                        set c = c with { type_defs: replace_at(c.type_defs, index, def) }
                     }
                 }
                 ast.Item.EnumItem(e) => {
@@ -753,7 +743,7 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
                             set c = report(c, source.error("E0201", e.name_span, "enum `" + e.name + "` has no variants"))
                         }
                         let def = TypeDef { name: m.prefix + e.name, is_enum: true, fields: [], variants: variants, span: e.name_span, public: e.public, prefix: m.prefix }
-                        set c = with_type_defs(c, replace_at(c.type_defs, index, def))
+                        set c = c with { type_defs: replace_at(c.type_defs, index, def) }
                     }
                 }
                 _ => {}
@@ -777,10 +767,12 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
                         continue
                     }
                     let canonical = m.prefix + f.name
-                    let previous = find_signature(c, canonical)
-                    if length(previous) > 0 {
-                        set c = report(c, source.error_help("E0201", f.name_span, "function `" + f.name + "` is already defined on line " + to_text(previous[0].span.line), "Tessera has no overloading; give the function a different name"))
-                        continue
+                    match find_signature(c, canonical) {
+                        Option.Some(previous) => {
+                            set c = report(c, source.error_help("E0201", f.name_span, "function `" + f.name + "` is already defined on line " + to_text(previous.span.line), "Tessera has no overloading; give the function a different name"))
+                            continue
+                        }
+                        Option.None => {}
                     }
                     var params: List[ast.Type] = []
                     for p in f.params {
@@ -800,7 +792,7 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
                             set effects = append(effects, effect.name)
                         }
                     }
-                    set c = with_functions(c, append(c.functions, Signature { name: canonical, params: params, return_type: ret.ty, effects: effects, span: f.name_span, public: f.public, prefix: m.prefix }))
+                    set c = c with { functions: append(c.functions, Signature { name: canonical, params: params, return_type: ret.ty, effects: effects, span: f.name_span, public: f.public, prefix: m.prefix }) }
                 }
                 _ => {}
             }
@@ -886,26 +878,26 @@ pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
             match item {
                 ast.Item.FunctionItem(f) => {
                     let canonical = m.prefix + f.name
-                    let signature = find_signature(c, canonical)
-                    if length(signature) > 0 and signature[0].span == f.name_span {
-                        if source.contains_text(signature[0].effects, "ui") {
+                    let signature = value_or(find_signature(c, canonical), placeholder_signature())
+                    if signature.span == f.name_span {
+                        if source.contains_text(signature.effects, "ui") {
                             set uses_ui = true
                         }
-                        let result = check_function(c, f, signature[0])
+                        let result = check_function(c, f, signature)
                         set c = result.checker
                         var params: List[ast.Param] = []
                         for p in f.params {
-                            set params = append(params, ast.Param { name: p.name, span: p.span, type_expr: canonical_type_expr(c, p.type_expr) })
+                            set params = append(params, p with { type_expr: canonical_type_expr(c, p.type_expr) })
                         }
-                        let typed_function = ast.Function { notes: f.notes, public: f.public, name: canonical, name_span: f.name_span, params: params, return_type: canonical_type_expr(c, f.return_type), effects: f.effects, body: result.expr }
+                        let typed_function = f with { name: canonical, params: params, return_type: canonical_type_expr(c, f.return_type), body: result.expr }
                         set typed = append(typed, ast.Item.FunctionItem(typed_function))
                     }
                 }
                 ast.Item.RecordItem(r) => {
-                    set typed = append(typed, ast.Item.RecordItem(ast.RecordDecl { notes: r.notes, public: r.public, name: m.prefix + r.name, name_span: r.name_span, fields: r.fields }))
+                    set typed = append(typed, ast.Item.RecordItem(r with { name: m.prefix + r.name }))
                 }
                 ast.Item.EnumItem(e) => {
-                    set typed = append(typed, ast.Item.EnumItem(ast.EnumDecl { notes: e.notes, public: e.public, name: m.prefix + e.name, name_span: e.name_span, variants: e.variants }))
+                    set typed = append(typed, ast.Item.EnumItem(e with { name: m.prefix + e.name }))
                 }
                 ast.Item.ImportItem(_) => {}
             }
@@ -928,6 +920,11 @@ fn slice_name(canonical: Text, prefix: Text) -> Text {
     from_code_points(slice(codes, length(code_points(prefix)), length(codes)))
 }
 
+note "Stands in for a missing signature; its span matches no declaration."
+fn placeholder_signature() -> Signature {
+    Signature { name: "", params: [], return_type: ast.Type.Unknown, effects: [], span: source.span_of(-1, 0, 0, 0), public: false, prefix: "" }
+}
+
 fn check_function(start: Checker, f: ast.Function, signature: Signature) -> Checked {
     var c = enter_function(start, f.name, signature.return_type, signature.effects)
     for index in range(0, length(f.params)) {
@@ -940,13 +937,13 @@ fn check_function(start: Checker, f: ast.Function, signature: Signature) -> Chec
     if not fits(body_type, signature.return_type) {
         let span = match f.body.kind {
             ast.ExprKind.BlockExpr(block) => match block.tail {
-                ast.OptionalExpr.Present(tail) => tail.span
-                ast.OptionalExpr.Absent => block.span
+                Option.Some(tail) => tail.span
+                Option.None => block.span
             }
             _ => f.body.span
         }
         let d = source.error("E0501", span, "function `" + f.name + "` must return `" + ast.type_text(signature.return_type) + "`, but its body produces `" + ast.type_text(body_type) + "`")
-        set c = report(c, source.with_label(d, "this is `" + ast.type_text(body_type) + "`"))
+        set c = report(c, d with { label: "this is `" + ast.type_text(body_type) + "`" })
     }
     set c = pop_scope(c, 0)
     if f.name != "main" {
@@ -969,7 +966,7 @@ fn expect_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
         return result
     }
     let d = source.error("E0501", e.span, "expected `" + ast.type_text(expected) + "`, found `" + ast.type_text(actual) + "`")
-    Checked { checker: report(result.checker, source.with_label(d, "this is `" + ast.type_text(actual) + "`")), expr: result.expr }
+    Checked { checker: report(result.checker, d with { label: "this is `" + ast.type_text(actual) + "`" }), expr: result.expr }
 }
 
 fn check_all(start: Checker, exprs: List[ast.Expr]) -> CheckedArgs {
@@ -991,13 +988,13 @@ fn check_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
         ast.ExprKind.TextLiteral(_) => checked(c, e, ast.Type.Text)
         ast.ExprKind.UnitLiteral => checked(c, e, ast.Type.Unit)
         ast.ExprKind.Name(name) => {
-            let local = find_local(c, name)
-            if length(local) > 0 {
-                return checked(c, e, local[0].ty)
+            match find_local(c, name) {
+                Option.Some(local) => return checked(c, e, local.ty)
+                Option.None => {}
             }
             var d = source.error("E0202", e.span, "unknown name `" + name + "`")
-            if length(find_signature(c, c.prefix + name)) > 0 or is_builtin_name(c, name) {
-                set d = source.with_help(d, "`" + name + "` is a function; call it with `" + name + "(...)`")
+            if find_signature(c, c.prefix + name) != Option.None or is_builtin_name(c, name) {
+                set d = d with { help: "`" + name + "` is a function; call it with `" + name + "(...)`" }
             }
             checked(report(c, d), e, ast.Type.Unknown)
         }
@@ -1006,7 +1003,7 @@ fn check_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
         ast.ExprKind.Index(target, index) => {
             let target_result = check_expr(c, target, ast.Type.Unknown)
             let index_result = expect_expr(target_result.checker, index, ast.Type.Int)
-            let typed = ast.with_kind(e, ast.ExprKind.Index(target_result.expr, index_result.expr))
+            let typed = e with { kind: ast.ExprKind.Index(target_result.expr, index_result.expr) }
             let after = index_result.checker
             match target_result.expr.ty {
                 ast.Type.List(element) => checked(after, typed, element)
@@ -1025,7 +1022,7 @@ fn check_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
         ast.ExprKind.Unary(op, operand) => {
             let want = if op == ast.UnaryOp.Negate { ast.Type.Int } else { ast.Type.Bool }
             let result = check_expr(c, operand, want)
-            let typed = ast.with_kind(e, ast.ExprKind.Unary(op, result.expr))
+            let typed = e with { kind: ast.ExprKind.Unary(op, result.expr) }
             if fits(result.expr.ty, want) {
                 return checked(result.checker, typed, want)
             }
@@ -1037,24 +1034,25 @@ fn check_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
         ast.ExprKind.If(condition, then_block, else_branch) => check_if(c, e, condition, then_block, else_branch, expected)
         ast.ExprKind.BlockExpr(block) => {
             let result = check_block(c, block, expected)
-            checked(result.checker, ast.with_kind(e, ast.ExprKind.BlockExpr(result.block)), result.ty)
+            checked(result.checker, e with { kind: ast.ExprKind.BlockExpr(result.block) }, result.ty)
         }
         ast.ExprKind.Match(scrutinee, arms) => check_match(c, e, scrutinee, arms, expected)
         ast.ExprKind.RecordLiteral(type_name, type_span, fields) => check_record_literal(c, e, type_name, type_span, fields)
-        ast.ExprKind.VariantLiteral(type_name, variant, variant_span, args) => check_variant(c, e, type_name, variant, variant_span, args)
+        ast.ExprKind.RecordUpdate(target, fields) => check_record_update(c, e, target, fields, expected)
+        ast.ExprKind.VariantLiteral(type_name, variant, variant_span, args) => if type_name == "Option" { check_option_variant(c, e, variant, variant_span, args, expected) } else { check_variant(c, e, type_name, variant, variant_span, args) }
         ast.ExprKind.Return(value) => {
             let ret = c.return_type
             match value {
-                ast.OptionalExpr.Present(v) => {
+                Option.Some(v) => {
                     let result = check_expr(c, v, ret)
-                    let typed = ast.with_kind(e, ast.ExprKind.Return(ast.OptionalExpr.Present(result.expr)))
+                    let typed = e with { kind: ast.ExprKind.Return(Option.Some(result.expr)) }
                     if fits(result.expr.ty, ret) {
                         return checked(result.checker, typed, ast.Type.Never)
                     }
                     let d = source.error("E0501", v.span, "function `" + c.function_name + "` returns `" + ast.type_text(ret) + "`, but this is `" + ast.type_text(result.expr.ty) + "`")
                     checked(report(result.checker, d), typed, ast.Type.Never)
                 }
-                ast.OptionalExpr.Absent => {
+                Option.None => {
                     if fits(ast.Type.Unit, ret) {
                         return checked(c, e, ast.Type.Never)
                     }
@@ -1076,55 +1074,62 @@ fn check_jump(c: Checker, e: ast.Expr, word: Text) -> Checked {
 }
 
 fn check_list(start: Checker, e: ast.Expr, items: List[ast.Expr], expected: ast.Type) -> Checked {
-    let element_expected: List[ast.Type] = match expected {
-        ast.Type.List(element) => [element]
-        _ => []
+    let element_expected: Option[ast.Type] = match expected {
+        ast.Type.List(element) => Option.Some(element)
+        _ => Option.None
     }
     if length(items) == 0 {
-        if length(element_expected) > 0 {
-            return checked(start, e, ast.Type.List(element_expected[0]))
+        return match element_expected {
+            Option.Some(known) => checked(start, e, ast.Type.List(known))
+            Option.None => {
+                let d = source.error_help("E0505", e.span, "the element type of this empty list is unknown", "add a type annotation, e.g. `let names: List[Text] = []`")
+                checked(report(start, d), e, ast.Type.Unknown)
+            }
         }
-        let d = source.error_help("E0505", e.span, "the element type of this empty list is unknown", "add a type annotation, e.g. `let names: List[Text] = []`")
-        return checked(report(start, d), e, ast.Type.Unknown)
     }
-    let first_hint = if length(element_expected) > 0 { element_expected[0] } else { ast.Type.Unknown }
-    let first = check_expr(start, items[0], first_hint)
+    let first = check_expr(start, items[0], value_or(element_expected, ast.Type.Unknown))
     var c = first.checker
     var element = first.expr.ty
-    if length(element_expected) > 0 and fits(element, element_expected[0]) {
-        set element = element_expected[0]
+    match element_expected {
+        Option.Some(known) => {
+            if fits(element, known) {
+                set element = known
+            }
+        }
+        Option.None => {}
     }
     var typed: List[ast.Expr] = [first.expr]
     for item in slice(items, 1, length(items)) {
         let result = check_expr(c, item, element)
         set c = result.checker
         set typed = append(typed, result.expr)
-        let joined = join_types(element, result.expr.ty)
-        if length(joined) > 0 {
-            set element = joined[0]
-        } else {
-            let found = ast.type_text(result.expr.ty)
-            let d = source.error("E0501", item.span, "list elements must all have the same type: expected `" + ast.type_text(element) + "`, found `" + found + "`")
-            set c = report(c, source.with_label(d, "this is `" + found + "`"))
+        match join_types(element, result.expr.ty) {
+            Option.Some(joined) => {
+                set element = joined
+            }
+            Option.None => {
+                let found = ast.type_text(result.expr.ty)
+                let d = source.error("E0501", item.span, "list elements must all have the same type: expected `" + ast.type_text(element) + "`, found `" + found + "`")
+                set c = report(c, d with { label: "this is `" + found + "`" })
+            }
         }
     }
-    checked(c, ast.with_kind(e, ast.ExprKind.ListLiteral(typed)), ast.Type.List(element))
+    checked(c, e with { kind: ast.ExprKind.ListLiteral(typed) }, ast.Type.List(element))
 }
 
 fn check_field(c: Checker, e: ast.Expr, target: ast.Expr, name: Text, name_span: source.Span) -> Checked {
     let target_result = check_expr(c, target, ast.Type.Unknown)
     let after = target_result.checker
-    let typed = ast.with_kind(e, ast.ExprKind.FieldAccess(target_result.expr, name, name_span))
+    let typed = e with { kind: ast.ExprKind.FieldAccess(target_result.expr, name, name_span) }
     match target_result.expr.ty {
         ast.Type.Unknown => checked(after, typed, ast.Type.Unknown)
         ast.Type.Named(type_name) => {
             let index = type_index(after, type_name)
             if index >= 0 and not after.type_defs[index].is_enum {
                 let fields = after.type_defs[index].fields
-                for f in fields {
-                    if f.name == name {
-                        return checked(after, typed, f.ty)
-                    }
+                match field_type_of(fields, name) {
+                    Option.Some(field_type) => return checked(after, typed, field_type)
+                    Option.None => {}
                 }
                 let d = source.error_help("E0209", name_span, "type `" + type_name + "` has no field `" + name + "`", "available fields: " + quoted_names(field_names(fields)))
                 return checked(report(after, d), typed, ast.Type.Unknown)
@@ -1150,35 +1155,35 @@ fn check_condition(c: Checker, condition: ast.Expr, what: Text) -> Checked {
 
 fn tail_or_block_span(block: ast.Block) -> source.Span {
     match block.tail {
-        ast.OptionalExpr.Present(tail) => tail.span
-        ast.OptionalExpr.Absent => block.span
+        Option.Some(tail) => tail.span
+        Option.None => block.span
     }
 }
 
-fn check_if(c: Checker, e: ast.Expr, condition: ast.Expr, then_block: ast.Block, else_branch: ast.OptionalExpr, expected: ast.Type) -> Checked {
+fn check_if(c: Checker, e: ast.Expr, condition: ast.Expr, then_block: ast.Block, else_branch: Option[ast.Expr], expected: ast.Type) -> Checked {
     let cond = check_condition(c, condition, "if")
     match else_branch {
-        ast.OptionalExpr.Absent => {
+        Option.None => {
             let then_result = check_block(cond.checker, then_block, ast.Type.Unit)
-            let typed = ast.with_kind(e, ast.ExprKind.If(cond.expr, then_result.block, ast.OptionalExpr.Absent))
+            let typed = e with { kind: ast.ExprKind.If(cond.expr, then_result.block, Option.None) }
             if is_unit_like(then_result.ty) {
                 return checked(then_result.checker, typed, ast.Type.Unit)
             }
             let d = source.error_help("E0506", tail_or_block_span(then_block), "this `if` has no `else`, so its block cannot produce a value (found `" + ast.type_text(then_result.ty) + "`)", "add an `else` branch, or use `let _ = ...` to discard the value")
             checked(report(then_result.checker, d), typed, ast.Type.Unit)
         }
-        ast.OptionalExpr.Present(else_expr) => {
+        Option.Some(else_expr) => {
             let then_result = check_block(cond.checker, then_block, expected)
             let hint = if expected != ast.Type.Unknown { expected } else if then_result.ty != ast.Type.Never { then_result.ty } else { ast.Type.Unknown }
             let else_result = check_expr(then_result.checker, else_expr, hint)
-            let typed = ast.with_kind(e, ast.ExprKind.If(cond.expr, then_result.block, ast.OptionalExpr.Present(else_result.expr)))
-            let joined = join_types(then_result.ty, else_result.expr.ty)
-            if length(joined) > 0 {
-                return checked(else_result.checker, typed, joined[0])
+            let typed = e with { kind: ast.ExprKind.If(cond.expr, then_result.block, Option.Some(else_result.expr)) }
+            match join_types(then_result.ty, else_result.expr.ty) {
+                Option.Some(joined) => return checked(else_result.checker, typed, joined)
+                Option.None => {}
             }
             let else_text = ast.type_text(else_result.expr.ty)
             let d = source.error("E0506", else_expr.span, "`if` and `else` have different types: `" + ast.type_text(then_result.ty) + "` and `" + else_text + "`")
-            checked(report(else_result.checker, source.with_label(d, "this is `" + else_text + "`")), typed, ast.Type.Unknown)
+            checked(report(else_result.checker, d with { label: "this is `" + else_text + "`" }), typed, ast.Type.Unknown)
         }
     }
 }
@@ -1193,17 +1198,17 @@ fn check_block(start: Checker, block: ast.Block, expected: ast.Type) -> CheckedB
         set statements = append(statements, result.statement)
     }
     var ty = ast.Type.Unit
-    var tail = ast.OptionalExpr.Absent
+    var tail: Option[ast.Expr] = Option.None
     match block.tail {
-        ast.OptionalExpr.Present(tail_expr) => {
+        Option.Some(tail_expr) => {
             let result = check_expr(c, tail_expr, expected)
             set c = result.checker
             set ty = result.expr.ty
-            set tail = ast.OptionalExpr.Present(result.expr)
+            set tail = Option.Some(result.expr)
         }
-        ast.OptionalExpr.Absent => {}
+        Option.None => {}
     }
-    CheckedBlock { checker: pop_scope(c, mark), block: ast.Block { statements: statements, tail: tail, span: block.span }, ty: ty }
+    CheckedBlock { checker: pop_scope(c, mark), block: block with { statements: statements, tail: tail }, ty: ty }
 }
 
 type CheckedStatement {
@@ -1218,14 +1223,14 @@ fn check_statement(c: Checker, statement: ast.Statement) -> CheckedStatement {
             var ty = ast.Type.Unknown
             var typed_value = value
             match declared {
-                ast.OptionalType.Present(type_expr) => {
+                Option.Some(type_expr) => {
                     let resolved = resolve(c, type_expr)
                     let result = expect_expr(resolved.checker, value, resolved.ty)
                     set after = result.checker
                     set ty = resolved.ty
                     set typed_value = result.expr
                 }
-                ast.OptionalType.Absent => {
+                Option.None => {
                     let result = check_expr(c, value, ast.Type.Unknown)
                     set after = result.checker
                     set ty = result.expr.ty
@@ -1245,18 +1250,20 @@ fn check_statement(c: Checker, statement: ast.Statement) -> CheckedStatement {
             CheckedStatement { checker: after, statement: ast.Statement.Let(name, name_span, declared, typed_value, mutable) }
         }
         ast.Statement.Set(name, name_span, value) => {
-            let target = find_local(c, name)
-            if length(target) == 0 {
-                let result = check_expr(report(c, source.error("E0202", name_span, "unknown name `" + name + "`")), value, ast.Type.Unknown)
-                return CheckedStatement { checker: result.checker, statement: ast.Statement.Set(name, name_span, result.expr) }
+            let target = match find_local(c, name) {
+                Option.Some(local) => local
+                Option.None => {
+                    let unknown = check_expr(report(c, source.error("E0202", name_span, "unknown name `" + name + "`")), value, ast.Type.Unknown)
+                    return CheckedStatement { checker: unknown.checker, statement: ast.Statement.Set(name, name_span, unknown.expr) }
+                }
             }
             var after = c
-            if not target[0].mutable {
-                set after = report(after, source.error_help("E0205", name_span, "`" + name + "` cannot be changed", "declare it with `var` instead of `let` (line " + to_text(target[0].span.line) + "); parameters can never be changed"))
+            if not target.mutable {
+                set after = report(after, source.error_help("E0205", name_span, "`" + name + "` cannot be changed", "declare it with `var` instead of `let` (line " + to_text(target.span.line) + "); parameters can never be changed"))
             } else {
                 set after = mark_set(after, name)
             }
-            let result = expect_expr(after, value, target[0].ty)
+            let result = expect_expr(after, value, target.ty)
             CheckedStatement { checker: result.checker, statement: ast.Statement.Set(name, name_span, result.expr) }
         }
         ast.Statement.For(variable, variable_span, iterable, body) => {
@@ -1272,26 +1279,26 @@ fn check_statement(c: Checker, statement: ast.Statement) -> CheckedStatement {
                     let found = iterable_result.expr.ty
                     var d = source.error("E0507", iterable.span, "`for` needs a list, found `" + ast.type_text(found) + "`")
                     if found == ast.Type.Text {
-                        set d = source.with_help(d, "use `for code in code_points(text)` to loop over characters")
+                        set d = d with { help: "use `for code in code_points(text)` to loop over characters" }
                     } else if found == ast.Type.Int {
-                        set d = source.with_help(d, "use `range(0, n)` to loop over numbers")
+                        set d = d with { help: "use `range(0, n)` to loop over numbers" }
                     }
                     set after = report(after, d)
                 }
             }
             let mark = length(after.locals)
             set after = declare(after, variable, variable_span, element, false, "loop variable")
-            set after = with_loop_depth(after, after.loop_depth + 1)
+            set after = after with { loop_depth: after.loop_depth + 1 }
             let body_result = check_loop_body(after, body, "for")
-            set after = with_loop_depth(body_result.checker, body_result.checker.loop_depth - 1)
+            set after = body_result.checker with { loop_depth: body_result.checker.loop_depth - 1 }
             set after = pop_scope(after, mark)
             CheckedStatement { checker: after, statement: ast.Statement.For(variable, variable_span, iterable_result.expr, body_result.block) }
         }
         ast.Statement.While(condition, body) => {
             let cond = check_condition(c, condition, "while")
-            let inside = with_loop_depth(cond.checker, cond.checker.loop_depth + 1)
+            let inside = cond.checker with { loop_depth: cond.checker.loop_depth + 1 }
             let body_result = check_loop_body(inside, body, "while")
-            let after = with_loop_depth(body_result.checker, body_result.checker.loop_depth - 1)
+            let after = body_result.checker with { loop_depth: body_result.checker.loop_depth - 1 }
             CheckedStatement { checker: after, statement: ast.Statement.While(cond.expr, body_result.block) }
         }
         ast.Statement.ExprStatement(expr) => {
@@ -1321,7 +1328,7 @@ fn check_binary(c: Checker, e: ast.Expr, op: ast.BinaryOp, op_span: source.Span,
         let left_type = left_result.expr.ty
         let right_result = check_expr(left_result.checker, right, left_type)
         let right_type = right_result.expr.ty
-        let typed = ast.with_kind(e, ast.ExprKind.Binary(op, op_span, left_result.expr, right_result.expr))
+        let typed = e with { kind: ast.ExprKind.Binary(op, op_span, left_result.expr, right_result.expr) }
         let after = right_result.checker
         if left_type == ast.Type.Int and right_type == ast.Type.Int {
             return checked(after, typed, ast.Type.Int)
@@ -1344,17 +1351,17 @@ fn check_binary(c: Checker, e: ast.Expr, op: ast.BinaryOp, op_span: source.Span,
             _ => false
         }
         if mixed {
-            set d = source.with_help(d, "convert the number with `to_text(...)`; Tessera has no implicit conversions")
+            set d = d with { help: "convert the number with `to_text(...)`; Tessera has no implicit conversions" }
         } else if left_is_list {
-            set d = source.with_help(d, "use `concat(a, b)` to join lists or `append(list, item)` to add one item")
+            set d = d with { help: "use `concat(a, b)` to join lists or `append(list, item)` to add one item" }
         }
         return checked(report(after, d), typed, ast.Type.Unknown)
     }
     if op == ast.BinaryOp.Equal or op == ast.BinaryOp.NotEqual {
         let left_result = check_expr(c, left, ast.Type.Unknown)
         let right_result = check_expr(left_result.checker, right, left_result.expr.ty)
-        let typed = ast.with_kind(e, ast.ExprKind.Binary(op, op_span, left_result.expr, right_result.expr))
-        if length(join_types(left_result.expr.ty, right_result.expr.ty)) > 0 {
+        let typed = e with { kind: ast.ExprKind.Binary(op, op_span, left_result.expr, right_result.expr) }
+        if join_types(left_result.expr.ty, right_result.expr.ty) != Option.None {
             return checked(right_result.checker, typed, ast.Type.Bool)
         }
         let d = source.error("E0514", e.span, "cannot compare `" + ast.type_text(left_result.expr.ty) + "` with `" + ast.type_text(right_result.expr.ty) + "`")
@@ -1374,7 +1381,7 @@ fn check_binary(c: Checker, e: ast.Expr, op: ast.BinaryOp, op_span: source.Span,
     if not fits(right_result.expr.ty, operand_type) {
         set after = report(after, operand_error(op, is_order, right.span, right_result.expr.ty, operand_type))
     }
-    checked(after, ast.with_kind(e, ast.ExprKind.Binary(op, op_span, left_result.expr, right_result.expr)), result_type)
+    checked(after, e with { kind: ast.ExprKind.Binary(op, op_span, left_result.expr, right_result.expr) }, result_type)
 }
 
 fn operand_error(op: ast.BinaryOp, is_order: Bool, span: source.Span, found: ast.Type, wanted: ast.Type) -> source.Diagnostic {
@@ -1383,6 +1390,24 @@ fn operand_error(op: ast.BinaryOp, is_order: Bool, span: source.Span, found: ast
         return source.error("E0514", span, "`" + symbol + "` compares numbers only, found `" + ast.type_text(found) + "`")
     }
     source.error("E0503", span, "`" + symbol + "` needs `" + ast.type_text(wanted) + "`, found `" + ast.type_text(found) + "`")
+}
+
+fn find_variant(variants: List[VariantType], name: Text) -> Option[VariantType] {
+    for v in variants {
+        if v.name == name {
+            return Option.Some(v)
+        }
+    }
+    Option.None
+}
+
+fn field_type_of(fields: List[FieldType], name: Text) -> Option[ast.Type] {
+    for f in fields {
+        if f.name == name {
+            return Option.Some(f.ty)
+        }
+    }
+    Option.None
 }
 
 fn check_record_literal(original: Checker, e: ast.Expr, type_name: Text, type_span: source.Span, inits: List[ast.FieldInit]) -> Checked {
@@ -1401,35 +1426,27 @@ fn check_record_literal(original: Checker, e: ast.Expr, type_name: Text, type_sp
         for init in inits {
             let result = check_expr(after, init.value, ast.Type.Unknown)
             set after = result.checker
-            set typed_inits = append(typed_inits, ast.FieldInit { name: init.name, span: init.span, value: result.expr })
+            set typed_inits = append(typed_inits, init with { value: result.expr })
         }
-        return checked(after, ast.with_kind(e, ast.ExprKind.RecordLiteral(type_name, type_span, typed_inits)), ast.Type.Unknown)
+        return checked(after, e with { kind: ast.ExprKind.RecordLiteral(type_name, type_span, typed_inits) }, ast.Type.Unknown)
     }
     let fields = start.type_defs[index].fields
     var c = start
     var seen: List[Text] = []
     var typed: List[ast.FieldInit] = []
     for init in inits {
-        var field_type: List[ast.Type] = []
-        for f in fields {
-            if f.name == init.name {
-                set field_type = [f.ty]
+        let result = match field_type_of(fields, init.name) {
+            Option.Some(field_type) => {
+                if source.contains_text(seen, init.name) {
+                    set c = report(c, source.error("E0511", init.span, "field `" + init.name + "` is given twice"))
+                }
+                set seen = append(seen, init.name)
+                expect_expr(c, init.value, field_type)
             }
+            Option.None => check_expr(report(c, source.error("E0209", init.span, "type `" + type_name + "` has no field `" + init.name + "`")), init.value, ast.Type.Unknown)
         }
-        if length(field_type) > 0 {
-            if source.contains_text(seen, init.name) {
-                set c = report(c, source.error("E0511", init.span, "field `" + init.name + "` is given twice"))
-            }
-            set seen = append(seen, init.name)
-            let result = expect_expr(c, init.value, field_type[0])
-            set c = result.checker
-            set typed = append(typed, ast.FieldInit { name: init.name, span: init.span, value: result.expr })
-        } else {
-            set c = report(c, source.error("E0209", init.span, "type `" + type_name + "` has no field `" + init.name + "`"))
-            let result = check_expr(c, init.value, ast.Type.Unknown)
-            set c = result.checker
-            set typed = append(typed, ast.FieldInit { name: init.name, span: init.span, value: result.expr })
-        }
+        set c = result.checker
+        set typed = append(typed, init with { value: result.expr })
     }
     var missing: List[Text] = []
     for f in fields {
@@ -1440,7 +1457,71 @@ fn check_record_literal(original: Checker, e: ast.Expr, type_name: Text, type_sp
     if length(missing) > 0 {
         set c = report(c, source.error_help("E0511", e.span, "missing field(s) " + quoted_names(missing) + " in `" + type_name + "`", "every field must be given a value"))
     }
-    checked(c, ast.with_kind(e, ast.ExprKind.RecordLiteral(canonical, type_span, typed)), ast.Type.Named(canonical))
+    checked(c, e with { kind: ast.ExprKind.RecordLiteral(canonical, type_span, typed) }, ast.Type.Named(canonical))
+}
+
+fn check_option_variant(c: Checker, e: ast.Expr, variant: Text, variant_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
+    let element_expected = match expected {
+        ast.Type.Option(element) => element
+        _ => ast.Type.Unknown
+    }
+    let count = if variant == "Some" { 1 } else { 0 }
+    if variant != "Some" and variant != "None" {
+        let d = source.error_help("E0209", variant_span, "`Option` has no variant `" + variant + "`", "available variants: `Some`, `None`")
+        let all = check_all(report(c, d), args)
+        return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral("Option", variant, variant_span, all.args) }, ast.Type.Unknown)
+    }
+    if length(args) != count {
+        let d = source.error("E0502", e.span, "`Option." + variant + "` takes " + to_text(count) + " value(s), but " + to_text(length(args)) + " were given")
+        let all = check_all(report(c, d), args)
+        return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral("Option", variant, variant_span, all.args) }, ast.Type.Unknown)
+    }
+    if variant == "None" {
+        if element_expected == ast.Type.Unknown {
+            let d = source.error_help("E0505", e.span, "the type of this `Option.None` is unknown", "add a type annotation, e.g. `let name: Option[Text] = Option.None`")
+            return checked(report(c, d), e, ast.Type.Unknown)
+        }
+        return checked(c, e, ast.Type.Option(element_expected))
+    }
+    let value = check_expr(c, args[0], element_expected)
+    let element = if element_expected != ast.Type.Unknown and fits(value.expr.ty, element_expected) { element_expected } else { value.expr.ty }
+    checked(value.checker, e with { kind: ast.ExprKind.VariantLiteral("Option", variant, variant_span, [value.expr]) }, ast.Type.Option(element))
+}
+
+fn check_record_update(c: Checker, e: ast.Expr, target: ast.Expr, inits: List[ast.FieldInit], expected: ast.Type) -> Checked {
+    let target_result = check_expr(c, target, expected)
+    var after = target_result.checker
+    let ty = target_result.expr.ty
+    var fields: List[FieldType] = []
+    var valid = false
+    match ty {
+        ast.Type.Named(name) => {
+            let index = type_index(after, name)
+            if index >= 0 and not after.type_defs[index].is_enum {
+                set fields = after.type_defs[index].fields
+                set valid = true
+            }
+        }
+        _ => {}
+    }
+    if not valid and ty != ast.Type.Unknown {
+        set after = report(after, source.error_help("E0512", target.span, "`with` needs a record, found `" + ast.type_text(ty) + "`", "`with` creates a copy of a record with some fields changed"))
+    }
+    var seen: List[Text] = []
+    var typed: List[ast.FieldInit] = []
+    for init in inits {
+        let field_type = field_type_of(fields, init.name)
+        if valid and field_type == Option.None {
+            set after = report(after, source.error("E0209", init.span, "type `" + ast.type_text(ty) + "` has no field `" + init.name + "`"))
+        } else if source.contains_text(seen, init.name) {
+            set after = report(after, source.error("E0511", init.span, "field `" + init.name + "` is given twice"))
+        }
+        set seen = append(seen, init.name)
+        let result = expect_expr(after, init.value, value_or(field_type, ast.Type.Unknown))
+        set after = result.checker
+        set typed = append(typed, init with { value: result.expr })
+    }
+    checked(after, e with { kind: ast.ExprKind.RecordUpdate(target_result.expr, typed) }, if valid { ty } else { ast.Type.Unknown })
 }
 
 fn check_variant(start: Checker, e: ast.Expr, type_name: Text, variant: Text, variant_span: source.Span, args: List[ast.Expr]) -> Checked {
@@ -1451,30 +1532,25 @@ fn check_variant(start: Checker, e: ast.Expr, type_name: Text, variant: Text, va
     if index < 0 {
         let reported = if lookup.reported { c } else { report(c, source.error("E0208", e.span, "unknown type `" + type_name + "`")) }
         let all = check_all(reported, args)
-        return checked(all.checker, ast.with_kind(e, ast.ExprKind.VariantLiteral(type_name, variant, variant_span, all.args)), ast.Type.Unknown)
+        return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral(type_name, variant, variant_span, all.args) }, ast.Type.Unknown)
     }
     let def = c.type_defs[index]
     if not def.is_enum {
         let d = source.error_help("E0209", e.span, "`" + type_name + "` is a record, not an enum", "build it with `" + type_name + " { field: value }`")
         return checked(report(c, d), e, ast.Type.Unknown)
     }
-    var fields: List[FieldType] = []
-    var found = false
-    for v in def.variants {
-        if v.name == variant {
-            set fields = v.fields
-            set found = true
+    let fields = match find_variant(def.variants, variant) {
+        Option.Some(found) => found.fields
+        Option.None => {
+            let d = source.error_help("E0209", variant_span, "enum `" + type_name + "` has no variant `" + variant + "`", "available variants: " + quoted_names(variant_names(def.variants)))
+            let all = check_all(report(c, d), args)
+            return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral(type_name, variant, variant_span, all.args) }, ast.Type.Unknown)
         }
-    }
-    if not found {
-        let d = source.error_help("E0209", variant_span, "enum `" + type_name + "` has no variant `" + variant + "`", "available variants: " + quoted_names(variant_names(def.variants)))
-        let all = check_all(report(c, d), args)
-        return checked(all.checker, ast.with_kind(e, ast.ExprKind.VariantLiteral(type_name, variant, variant_span, all.args)), ast.Type.Unknown)
     }
     if length(args) != length(fields) {
         let d = source.error("E0502", e.span, "`" + type_name + "." + variant + "` takes " + to_text(length(fields)) + " value(s), but " + to_text(length(args)) + " were given")
         let all = check_all(report(c, d), args)
-        return checked(all.checker, ast.with_kind(e, ast.ExprKind.VariantLiteral(canonical, variant, variant_span, all.args)), ast.Type.Named(canonical))
+        return checked(all.checker, e with { kind: ast.ExprKind.VariantLiteral(canonical, variant, variant_span, all.args) }, ast.Type.Named(canonical))
     }
     var after = c
     var typed: List[ast.Expr] = []
@@ -1483,7 +1559,7 @@ fn check_variant(start: Checker, e: ast.Expr, type_name: Text, variant: Text, va
         set after = result.checker
         set typed = append(typed, result.expr)
     }
-    checked(after, ast.with_kind(e, ast.ExprKind.VariantLiteral(canonical, variant, variant_span, typed)), ast.Type.Named(canonical))
+    checked(after, e with { kind: ast.ExprKind.VariantLiteral(canonical, variant, variant_span, typed) }, ast.Type.Named(canonical))
 }
 
 // ---------- match ----------
@@ -1495,13 +1571,21 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
     var enum_variants: List[VariantType] = []
     var is_enum_match = false
     var is_valid = st == ast.Type.Int or st == ast.Type.Text or st == ast.Type.Bool or st == ast.Type.Unknown
+    var scrutinee_type_name = ""
     match st {
+        ast.Type.Option(element) => {
+            set enum_variants = [VariantType { name: "Some", fields: [FieldType { name: "value", ty: element }] }, VariantType { name: "None", fields: [] }]
+            set is_enum_match = true
+            set is_valid = true
+            set scrutinee_type_name = "Option"
+        }
         ast.Type.Named(name) => {
             let index = type_index(c, name)
             if index >= 0 and c.type_defs[index].is_enum {
                 set enum_variants = c.type_defs[index].variants
                 set is_enum_match = true
                 set is_valid = true
+                set scrutinee_type_name = name
             }
         }
         _ => {}
@@ -1509,7 +1593,7 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
     if not is_valid {
         set c = report(c, source.error_help("E0513", scrutinee.span, "cannot `match` on `" + ast.type_text(st) + "`", "`match` works on enums, `Int`, `Text` and `Bool`"))
     }
-    var result: List[ast.Type] = []
+    var result: Option[ast.Type] = Option.None
     var covered: List[Text] = []
     var seen_true = false
     var seen_false = false
@@ -1555,25 +1639,23 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
                 }
             }
             ast.PatternKind.VariantPattern(type_name, variant, bindings) => {
-                let lookup = lookup_type(c, type_name, pattern_span)
+                let lookup = if type_name == "Option" { NameLookup { checker: c, canonical: "Option", found: true, reported: false } } else { lookup_type(c, type_name, pattern_span) }
                 set c = mark_window_event(lookup.checker, lookup.canonical)
-                set typed_pattern = ast.Pattern { kind: ast.PatternKind.VariantPattern(lookup.canonical, variant, bindings), span: pattern_span }
-                var fields: List[FieldType] = []
-                var resolved = false
-                if is_enum_match and st == ast.Type.Named(lookup.canonical) {
-                    for v in enum_variants {
-                        if v.name == variant {
-                            set fields = v.fields
-                            set resolved = true
-                        }
-                    }
-                    if not resolved {
+                set typed_pattern = arm.pattern with { kind: ast.PatternKind.VariantPattern(lookup.canonical, variant, bindings) }
+                var resolved: Option[VariantType] = Option.None
+                if is_enum_match and scrutinee_type_name == lookup.canonical {
+                    set resolved = find_variant(enum_variants, variant)
+                    if resolved == Option.None {
                         set c = report(c, source.error_help("E0209", pattern_span, "enum `" + type_name + "` has no variant `" + variant + "`", "available variants: " + quoted_names(variant_names(enum_variants))))
                     }
                 } else if st != ast.Type.Unknown and not lookup.reported {
                     set c = report(c, source.error("E0513", pattern_span, "pattern of type `" + type_name + "` cannot match a value of type `" + ast.type_text(st) + "`"))
                 }
-                if resolved {
+                let fields = match resolved {
+                    Option.Some(found) => found.fields
+                    Option.None => []
+                }
+                if resolved != Option.None {
                     if source.contains_text(covered, variant) {
                         set c = report(c, source.error("E0510", pattern_span, "`" + type_name + "." + variant + "` is already matched by an earlier arm"))
                     }
@@ -1600,23 +1682,24 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
             }
         }
         var hint = expected
-        if hint == ast.Type.Unknown and length(result) > 0 and result[0] != ast.Type.Never {
-            set hint = result[0]
+        if hint == ast.Type.Unknown and result != Option.Some(ast.Type.Never) {
+            set hint = value_or(result, ast.Type.Unknown)
         }
         let body = check_expr(c, arm.body, hint)
         set c = pop_scope(body.checker, mark)
         set typed_arms = append(typed_arms, ast.Arm { pattern: typed_pattern, body: body.expr })
         let body_type = body.expr.ty
-        if length(result) == 0 {
-            set result = [body_type]
-        } else {
-            let joined = join_types(result[0], body_type)
-            if length(joined) > 0 {
-                set result = joined
-            } else {
-                let d = source.error("E0506", arm.body.span, "match arms have different types: `" + ast.type_text(result[0]) + "` and `" + ast.type_text(body_type) + "`")
-                set c = report(c, source.with_label(d, "this is `" + ast.type_text(body_type) + "`"))
-                set result = [ast.Type.Unknown]
+        match result {
+            Option.None => {
+                set result = Option.Some(body_type)
+            }
+            Option.Some(previous) => {
+                set result = join_types(previous, body_type)
+                if result == Option.None {
+                    let d = source.error("E0506", arm.body.span, "match arms have different types: `" + ast.type_text(previous) + "` and `" + ast.type_text(body_type) + "`")
+                    set c = report(c, d with { label: "this is `" + ast.type_text(body_type) + "`" })
+                    set result = Option.Some(ast.Type.Unknown)
+                }
             }
         }
     }
@@ -1629,7 +1712,7 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
             var missing: List[Text] = []
             for v in enum_variants {
                 if not source.contains_text(covered, v.name) {
-                    set missing = append(missing, ast.type_text(st) + "." + v.name)
+                    set missing = append(missing, type_name_for_message(st) + "." + v.name)
                 }
             }
             if length(missing) > 0 {
@@ -1647,11 +1730,18 @@ fn check_match(start: Checker, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.
             }
         }
     }
-    let typed = ast.with_kind(e, ast.ExprKind.Match(scrutinee_result.expr, typed_arms))
+    let typed = e with { kind: ast.ExprKind.Match(scrutinee_result.expr, typed_arms) }
     if length(arms) == 0 {
         return checked(c, typed, ast.Type.Never)
     }
-    checked(c, typed, if length(result) > 0 { result[0] } else { ast.Type.Unknown })
+    checked(c, typed, value_or(result, ast.Type.Unknown))
+}
+
+fn type_name_for_message(ty: ast.Type) -> Text {
+    match ty {
+        ast.Type.Option(_) => "Option"
+        _ => ast.type_text(ty)
+    }
 }
 
 fn pattern_type(c: Checker, scrutinee: ast.Type, pattern: ast.Type, span: source.Span) -> Checker {
@@ -1668,10 +1758,10 @@ fn use_effect(c: Checker, effect: Text, callee: Text, span: source.Span) -> Chec
         if source.contains_text(c.used_effects, effect) {
             return c
         }
-        return with_used_effects(c, append(c.used_effects, effect))
+        return c with { used_effects: append(c.used_effects, effect) }
     }
     let d = source.error_help("E0301", span, "`" + callee + "` uses effect `" + effect + "`, but `" + c.function_name + "` does not declare it", "add `uses " + effect + "` to the signature of `" + c.function_name + "`, or move the call to a function that already uses `" + effect + "`")
-    report(c, source.with_label(d, "this call needs `" + effect + "`"))
+    report(c, d with { label: "this call needs `" + effect + "`" })
 }
 
 fn arity_error(c: Checker, name: Text, args: List[ast.Expr], count: Int, span: source.Span) -> CheckedArgs {
@@ -1714,7 +1804,7 @@ fn list_arg(c: Checker, arg: ast.Expr, expected: ast.Type, name: Text) -> ListAr
 }
 
 fn call_result(c: Checker, e: ast.Expr, name: Text, name_span: source.Span, args: List[ast.Expr], ty: ast.Type) -> Checked {
-    checked(c, ast.with_kind(e, ast.ExprKind.Call(name, name_span, args)), ty)
+    checked(c, e with { kind: ast.ExprKind.Call(name, name_span, args) }, ty)
 }
 
 fn check_generic_call(c: Checker, e: ast.Expr, name: Text, name_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
@@ -1742,6 +1832,28 @@ fn check_generic_call(c: Checker, e: ast.Expr, name: Text, name_span: source.Spa
             set after = report(after, source.error("E0501", args[0].span, "`length` accepts a list or `Text`, found `" + ast.type_text(t) + "`"))
         }
         return call_result(after, e, name, name_span, [result.expr], ast.Type.Int)
+    }
+    if name == "value_or" {
+        if length(args) != 2 {
+            let all = arity_error(c, name, args, 2, span)
+            return call_result(all.checker, e, name, name_span, all.args, ast.Type.Unknown)
+        }
+        let option = check_expr(c, args[0], if expected == ast.Type.Unknown { ast.Type.Unknown } else { ast.Type.Option(expected) })
+        var after = option.checker
+        var element = ast.Type.Unknown
+        match option.expr.ty {
+            ast.Type.Option(inner) => {
+                set element = inner
+            }
+            ast.Type.Unknown => {}
+            ast.Type.Never => {}
+            _ => {
+                set after = report(after, source.error("E0501", args[0].span, "`value_or` needs an `Option`, found `" + ast.type_text(option.expr.ty) + "`"))
+            }
+        }
+        let fallback = expect_expr(after, args[1], element)
+        let result_type = if element == ast.Type.Unknown { fallback.expr.ty } else { element }
+        return call_result(fallback.checker, e, name, name_span, [option.expr, fallback.expr], result_type)
     }
     let count = if name == "append" or name == "concat" { 2 } else { 3 }
     if length(args) != count {
@@ -1782,22 +1894,24 @@ fn check_call(start: Checker, e: ast.Expr, name: Text, name_span: source.Span, a
         }
     }
     let lookup = lookup_function(start, name, name_span)
-    if not lookup.found {
-        if lookup.reported {
-            let quiet = check_all(lookup.checker, args)
-            return call_result(quiet.checker, e, name, name_span, quiet.args, ast.Type.Unknown)
+    let sig = match find_signature(lookup.checker, lookup.canonical) {
+        Option.Some(found) => found
+        Option.None => {
+            if lookup.reported {
+                let quiet = check_all(lookup.checker, args)
+                return call_result(quiet.checker, e, name, name_span, quiet.args, ast.Type.Unknown)
+            }
+            var d = source.error("E0203", name_span, "unknown function `" + name + "`")
+            let hint = hint_for_function(start, name)
+            if find_local(start, name) != Option.None {
+                set d = d with { help: "`" + name + "` is a value, not a function" }
+            } else if hint != "" {
+                set d = d with { help: hint }
+            }
+            let all = check_all(report(start, d), args)
+            return call_result(all.checker, e, name, name_span, all.args, ast.Type.Unknown)
         }
-        var d = source.error("E0203", name_span, "unknown function `" + name + "`")
-        let hint = hint_for_function(start, name)
-        if length(find_local(start, name)) > 0 {
-            set d = source.with_help(d, "`" + name + "` is a value, not a function")
-        } else if hint != "" {
-            set d = source.with_help(d, hint)
-        }
-        let all = check_all(report(start, d), args)
-        return call_result(all.checker, e, name, name_span, all.args, ast.Type.Unknown)
     }
-    let sig = find_signature(lookup.checker, lookup.canonical)[0]
     var c = lookup.checker
     for effect in sig.effects {
         set c = use_effect(c, effect, name, e.span)

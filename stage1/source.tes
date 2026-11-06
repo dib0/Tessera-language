@@ -38,14 +38,6 @@ pub fn error_help(code: Text, span: Span, message: Text, help: Text) -> Diagnost
     Diagnostic { code: code, message: message, span: span, label: "", help: help }
 }
 
-pub fn with_label(diagnostic: Diagnostic, label: Text) -> Diagnostic {
-    Diagnostic { code: diagnostic.code, message: diagnostic.message, span: diagnostic.span, label: label, help: diagnostic.help }
-}
-
-pub fn with_help(diagnostic: Diagnostic, help: Text) -> Diagnostic {
-    Diagnostic { code: diagnostic.code, message: diagnostic.message, span: diagnostic.span, label: diagnostic.label, help: help }
-}
-
 // ---------- character classes (code points) ----------
 
 pub fn is_digit(code: Int) -> Bool = code >= 48 and code <= 57

@@ -35,18 +35,6 @@ type Usage {
 
 fn code(g: Gen, text: Text) -> Code = Code { gen: g, text: text }
 
-fn with_take(g: Gen, name: Text) -> Gen {
-    Gen { paths: g.paths, type_defs: g.type_defs, function_name: g.function_name, tmp: g.tmp, take_var: name }
-}
-
-fn with_tmp(g: Gen, tmp: Int) -> Gen {
-    Gen { paths: g.paths, type_defs: g.type_defs, function_name: g.function_name, tmp: tmp, take_var: g.take_var }
-}
-
-fn for_function(g: Gen, name: Text) -> Gen {
-    Gen { paths: g.paths, type_defs: g.type_defs, function_name: name, tmp: 0, take_var: "" }
-}
-
 fn rust_type(ty: ast.Type) -> Text {
     match ty {
         ast.Type.Int => "i64"
@@ -56,19 +44,27 @@ fn rust_type(ty: ast.Type) -> Text {
         ast.Type.Never => "()"
         ast.Type.Unknown => "()"
         ast.Type.List(element) => "Rc<Vec<" + rust_type(element) + ">>"
+        ast.Type.Option(element) => "Option<" + rust_type(element) + ">"
         ast.Type.Named(name) => "Rc<T_" + name + ">"
     }
 }
 
 fn pad(indent: Int) -> Text = source.repeat_text("    ", indent)
 
-fn find_type_def(defs: List[checker.TypeDef], name: Text) -> List[checker.TypeDef] {
+fn find_type_def(defs: List[checker.TypeDef], name: Text) -> Option[checker.TypeDef] {
     for def in defs {
         if def.name == name {
-            return [def]
+            return Option.Some(def)
         }
     }
-    []
+    Option.None
+}
+
+fn definition_of(defs: List[checker.TypeDef], name: Text) -> Text {
+    match find_type_def(defs, name) {
+        Option.Some(def) => type_definition(def)
+        Option.None => fail("no type definition for `" + name + "`")
+    }
 }
 
 note "Resolve a type expression the checker already validated."
@@ -79,7 +75,8 @@ fn resolve_simple(te: ast.TypeExpr, defs: List[checker.TypeDef]) -> ast.Type {
         "Text" => ast.Type.Text
         "Unit" => ast.Type.Unit
         "List" => if length(te.args) > 0 { ast.Type.List(resolve_simple(te.args[0], defs)) } else { ast.Type.List(ast.Type.Unknown) }
-        _ => if length(find_type_def(defs, te.name)) > 0 { ast.Type.Named(te.name) } else { ast.Type.Unknown }
+        "Option" => if length(te.args) > 0 { ast.Type.Option(resolve_simple(te.args[0], defs)) } else { ast.Type.Option(ast.Type.Unknown) }
+        _ => if find_type_def(defs, te.name) != Option.None { ast.Type.Named(te.name) } else { ast.Type.Unknown }
     }
 }
 
@@ -123,15 +120,15 @@ pub fn generate(program: checker.CheckedProgram, paths: List[Text], core: Text, 
     }
     set out = out + "\n"
     if program.uses_ui {
-        set out = out + type_definition(find_type_def(program.type_defs, "WindowEvent")[0])
+        set out = out + definition_of(program.type_defs, "WindowEvent")
     }
     for item in program.items {
         match item {
             ast.Item.RecordItem(r) => {
-                set out = out + type_definition(find_type_def(program.type_defs, r.name)[0])
+                set out = out + definition_of(program.type_defs, r.name)
             }
             ast.Item.EnumItem(e) => {
-                set out = out + type_definition(find_type_def(program.type_defs, e.name)[0])
+                set out = out + definition_of(program.type_defs, e.name)
             }
             ast.Item.FunctionItem(_) => {}
             ast.Item.ImportItem(_) => {}
@@ -152,7 +149,7 @@ pub fn generate(program: checker.CheckedProgram, paths: List[Text], core: Text, 
 }
 
 fn gen_function(start: Gen, f: ast.Function) -> Code {
-    let g = for_function(start, f.name)
+    let g = start with { function_name: f.name, tmp: 0, take_var: "" }
     var out = ""
     for n in f.notes {
         set out = out + "// note: " + replace_newlines(n.text) + "\n"
@@ -181,12 +178,12 @@ fn gen_block(start: Gen, block: ast.Block, indent: Int) -> Code {
         set out = out + pad(indent + 1) + line.text + "\n"
     }
     match block.tail {
-        ast.OptionalExpr.Present(tail) => {
+        Option.Some(tail) => {
             let result = gen_expr(g, tail, indent + 1)
             set g = result.gen
             set out = out + pad(indent + 1) + result.text + "\n"
         }
-        ast.OptionalExpr.Absent => {}
+        Option.None => {}
     }
     code(g, out + pad(indent) + "}")
 }
@@ -211,9 +208,9 @@ fn gen_statement(g: Gen, statement: ast.Statement, indent: Int) -> Code {
                 ast.Type.List(_) => true
                 _ => false
             }
-            let prepared = if movable and usage.count == 1 and not usage.has_jump_or_loop { with_take(g, name) } else { g }
+            let prepared = if movable and usage.count == 1 and not usage.has_jump_or_loop { g with { take_var: name } } else { g }
             let v = gen_expr(prepared, value, indent)
-            code(with_take(v.gen, ""), "v_" + name + " = " + v.text + ";")
+            code(v.gen with { take_var: "" }, "v_" + name + " = " + v.text + ";")
         }
         ast.Statement.For(variable, _, iterable, body) => {
             let it = gen_expr(g, iterable, indent)
@@ -240,7 +237,7 @@ fn add_usage(a: Usage, b: Usage) -> Usage {
     Usage { count: a.count + b.count, has_jump_or_loop: a.has_jump_or_loop or b.has_jump_or_loop }
 }
 
-fn with_jump(u: Usage) -> Usage = Usage { count: u.count, has_jump_or_loop: true }
+fn with_jump(u: Usage) -> Usage = u with { has_jump_or_loop: true }
 
 fn scan_list(exprs: List[ast.Expr], name: Text) -> Usage {
     var total = no_usage()
@@ -257,7 +254,7 @@ fn scan_block(block: ast.Block, name: Text) -> Usage {
             ast.Statement.Let(_, _, _, value, _) => scan_expr(value, name)
             ast.Statement.Set(target, _, value) => {
                 let inner = scan_expr(value, name)
-                if target == name { Usage { count: inner.count + 2, has_jump_or_loop: inner.has_jump_or_loop } } else { inner }
+                if target == name { inner with { count: inner.count + 2 } } else { inner }
             }
             ast.Statement.ExprStatement(expr) => scan_expr(expr, name)
             ast.Statement.For(_, _, iterable, body) => with_jump(add_usage(scan_expr(iterable, name), scan_block(body, name)))
@@ -266,8 +263,8 @@ fn scan_block(block: ast.Block, name: Text) -> Usage {
         set total = add_usage(total, part)
     }
     match block.tail {
-        ast.OptionalExpr.Present(tail) => add_usage(total, scan_expr(tail, name))
-        ast.OptionalExpr.Absent => total
+        Option.Some(tail) => add_usage(total, scan_expr(tail, name))
+        Option.None => total
     }
 }
 
@@ -284,8 +281,8 @@ fn scan_expr(e: ast.Expr, name: Text) -> Usage {
         ast.ExprKind.If(condition, then_block, else_branch) => {
             let both = add_usage(scan_expr(condition, name), scan_block(then_block, name))
             match else_branch {
-                ast.OptionalExpr.Present(else_expr) => add_usage(both, scan_expr(else_expr, name))
-                ast.OptionalExpr.Absent => both
+                Option.Some(else_expr) => add_usage(both, scan_expr(else_expr, name))
+                Option.None => both
             }
         }
         ast.ExprKind.BlockExpr(block) => scan_block(block, name)
@@ -293,6 +290,13 @@ fn scan_expr(e: ast.Expr, name: Text) -> Usage {
             var total = scan_expr(scrutinee, name)
             for arm in arms {
                 set total = add_usage(total, scan_expr(arm.body, name))
+            }
+            total
+        }
+        ast.ExprKind.RecordUpdate(target, fields) => {
+            var total = scan_expr(target, name)
+            for f in fields {
+                set total = add_usage(total, scan_expr(f.value, name))
             }
             total
         }
@@ -304,8 +308,8 @@ fn scan_expr(e: ast.Expr, name: Text) -> Usage {
             total
         }
         ast.ExprKind.Return(value) => match value {
-            ast.OptionalExpr.Present(v) => with_jump(scan_expr(v, name))
-            ast.OptionalExpr.Absent => with_jump(no_usage())
+            Option.Some(v) => with_jump(scan_expr(v, name))
+            Option.None => with_jump(no_usage())
         }
         ast.ExprKind.Break => with_jump(no_usage())
         ast.ExprKind.Continue => with_jump(no_usage())
@@ -348,7 +352,7 @@ fn gen_expr(g: Gen, e: ast.Expr, indent: Int) -> Code {
         ast.ExprKind.UnitLiteral => code(g, "()")
         ast.ExprKind.Name(name) => {
             if g.take_var == name {
-                return code(with_take(g, ""), "std::mem::take(&mut v_" + name + ")")
+                return code(g with { take_var: "" }, "std::mem::take(&mut v_" + name + ")")
             }
             code(g, "v_" + name + ".clone()")
         }
@@ -407,8 +411,8 @@ fn gen_expr(g: Gen, e: ast.Expr, indent: Int) -> Code {
             let c = gen_expr(g, condition, indent)
             let t = gen_block(c.gen, then_block, indent)
             match else_branch {
-                ast.OptionalExpr.Absent => code(t.gen, "if " + c.text + " " + t.text)
-                ast.OptionalExpr.Present(else_expr) => {
+                Option.None => code(t.gen, "if " + c.text + " " + t.text)
+                Option.Some(else_expr) => {
                     let el = gen_expr(t.gen, else_expr, indent)
                     code(el.gen, "if " + c.text + " " + t.text + " else " + el.text)
                 }
@@ -426,34 +430,63 @@ fn gen_expr(g: Gen, e: ast.Expr, indent: Int) -> Code {
             }
             code(current, "Rc::new(T_" + type_name + " { " + join(parts, ", ") + " })")
         }
-        ast.ExprKind.VariantLiteral(type_name, variant, _, args) => {
-            if length(args) == 0 {
-                return code(g, "Rc::new(T_" + type_name + "::V_" + variant + ")")
+        ast.ExprKind.RecordUpdate(target, fields) => {
+            let t = gen_expr(g, target, indent)
+            var current = t.gen with { tmp: t.gen.tmp + 1 }
+            let tmp = "t" + to_text(current.tmp)
+            var out = "{ let mut " + tmp + " = Rc::unwrap_or_clone(" + t.text + "); "
+            for f in fields {
+                let v = gen_expr(current, f.value, indent)
+                set current = v.gen
+                set out = out + tmp + ".f_" + f.name + " = " + v.text + "; "
             }
-            let parts = gen_list(g, args, indent)
-            code(parts.gen, "Rc::new(T_" + type_name + "::V_" + variant + "(" + join(parts.texts, ", ") + "))")
+            code(current, out + "Rc::new(" + tmp + ") }")
         }
+        ast.ExprKind.VariantLiteral(type_name, variant, _, args) => if type_name == "Option" { gen_option(g, e, variant, args, indent) } else { gen_variant(g, type_name, variant, args, indent) }
         ast.ExprKind.Return(value) => match value {
-            ast.OptionalExpr.Present(v) => {
+            Option.Some(v) => {
                 let result = gen_expr(g, v, indent)
                 code(result.gen, "return " + result.text)
             }
-            ast.OptionalExpr.Absent => code(g, "return ()")
+            Option.None => code(g, "return ()")
         }
         ast.ExprKind.Break => code(g, "break")
         ast.ExprKind.Continue => code(g, "continue")
     }
 }
 
-fn variant_has_fields(defs: List[checker.TypeDef], type_name: Text, variant: Text) -> Bool {
-    for def in find_type_def(defs, type_name) {
-        for v in def.variants {
-            if v.name == variant {
-                return length(v.fields) > 0
-            }
+fn gen_option(g: Gen, e: ast.Expr, variant: Text, args: List[ast.Expr], indent: Int) -> Code {
+    if variant == "None" {
+        let element = match e.ty {
+            ast.Type.Option(t) => rust_type(t)
+            _ => "()"
         }
+        return code(g, "Option::<" + element + ">::None")
     }
-    false
+    let value = gen_expr(g, args[0], indent)
+    code(value.gen, "Some(" + value.text + ")")
+}
+
+fn gen_variant(g: Gen, type_name: Text, variant: Text, args: List[ast.Expr], indent: Int) -> Code {
+    if length(args) == 0 {
+        return code(g, "Rc::new(T_" + type_name + "::V_" + variant + ")")
+    }
+    let parts = gen_list(g, args, indent)
+    code(parts.gen, "Rc::new(T_" + type_name + "::V_" + variant + "(" + join(parts.texts, ", ") + "))")
+}
+
+fn variant_has_fields(defs: List[checker.TypeDef], type_name: Text, variant: Text) -> Bool {
+    match find_type_def(defs, type_name) {
+        Option.Some(def) => {
+            for v in def.variants {
+                if v.name == variant {
+                    return length(v.fields) > 0
+                }
+            }
+            false
+        }
+        Option.None => false
+    }
 }
 
 fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) -> Code {
@@ -461,6 +494,7 @@ fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) 
     var g = s.gen
     let head = match scrutinee.ty {
         ast.Type.Named(_) => "match &*(" + s.text + ")"
+        ast.Type.Option(_) => "match &(" + s.text + ")"
         ast.Type.Text => "match (" + s.text + ").as_str()"
         _ => "match " + s.text
     }
@@ -480,21 +514,23 @@ fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) 
                 set pattern = to_text(value)
             }
             ast.PatternKind.VariantPattern(type_name, variant, bindings) => {
-                if variant_has_fields(g.type_defs, type_name, variant) {
+                let is_option = type_name == "Option"
+                if (is_option and variant == "Some") or variant_has_fields(g.type_defs, type_name, variant) {
                     var parts: List[Text] = []
                     for b in bindings {
                         if b.name == "_" {
                             set parts = append(parts, "_")
                         } else {
-                            set g = with_tmp(g, g.tmp + 1)
+                            set g = g with { tmp: g.tmp + 1 }
                             let tmp = "t" + to_text(g.tmp)
                             set prefix = prefix + "let v_" + b.name + " = " + tmp + ".clone(); "
                             set parts = append(parts, tmp)
                         }
                     }
-                    set pattern = "T_" + type_name + "::V_" + variant + "(" + join(parts, ", ") + ")"
+                    let constructor = if is_option { variant } else { "T_" + type_name + "::V_" + variant }
+                    set pattern = constructor + "(" + join(parts, ", ") + ")"
                 } else {
-                    set pattern = "T_" + type_name + "::V_" + variant
+                    set pattern = if is_option { variant } else { "T_" + type_name + "::V_" + variant }
                 }
             }
         }
@@ -522,6 +558,7 @@ fn gen_call(g: Gen, name: Text, args: List[ast.Expr], span: source.Span, indent:
         "concat" => call_plain("t_concat_lists", a)
         "slice" => call_with_location("t_slice", a, loc)
         "replace_at" => call_with_location("t_replace_at", a, loc)
+        "value_or" => call_plain("t_value_or", a)
         "range" => call_with_location("t_range", a, loc)
         "code_points" => "t_code_points(&" + a[0] + ")"
         "from_code_point" => call_with_location("t_from_code_point", a, loc)

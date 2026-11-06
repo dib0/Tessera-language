@@ -1,0 +1,2 @@
+fn first(values: Option[Int, Text]) -> Int = 0
+fn main() -> Unit uses io = print("x")

@@ -28,6 +28,7 @@ enum TokenKind {
     Continue
     Import
     Pub
+    With
     Underscore
     LParen
     RParen
@@ -101,6 +102,7 @@ fn symbol_text(kind: TokenKind) -> Text {
         TokenKind.Continue => "continue"
         TokenKind.Import => "import"
         TokenKind.Pub => "pub"
+        TokenKind.With => "with"
         TokenKind.Underscore => "_"
         TokenKind.LParen => "("
         TokenKind.RParen => ")"
@@ -195,6 +197,7 @@ fn keyword_kind(word: Text) -> TokenKind {
         "continue" => TokenKind.Continue
         "import" => TokenKind.Import
         "pub" => TokenKind.Pub
+        "with" => TokenKind.With
         _ => TokenKind.Ident
     }
 }

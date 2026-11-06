@@ -179,3 +179,28 @@ fn stage1_builds_the_graphical_tic_tac_toe() {
     let rust = std::fs::read_to_string(exe.with_extension("rs")).unwrap();
     assert!(rust.contains("#![forbid(unsafe_code)]") && rust.contains("fn t_open_window(") && rust.contains("fn f_rules__play("));
 }
+
+#[test]
+fn stage1_only_programs_run_with_expected_output() {
+    for path in tes_files("tests/stage1_run") {
+        let exe = work_dir().join(path.file_stem().unwrap());
+        check_build(Command::new(stage1()).arg("build").arg(&path).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building a stage 1 test program");
+        let out = Command::new(&exe).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", path.display());
+        let expected = std::fs::read_to_string(path.with_extension("out")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{}", path.display());
+    }
+}
+
+#[test]
+fn stage1_only_errors_are_reported() {
+    let files = tes_files("tests/stage1_fail");
+    assert!(files.len() >= 10);
+    for path in files {
+        let code = path.file_name().unwrap().to_string_lossy().split('-').next().unwrap().to_string();
+        let out = Command::new(stage1()).arg("check").arg("--json").arg(&path).output().unwrap();
+        let json = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(1), "{}", path.display());
+        assert!(json.contains(&format!("\"code\":\"{}\"", code)), "{}: expected {} in {}", path.display(), code, json);
+    }
+}

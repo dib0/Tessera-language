@@ -88,6 +88,7 @@ fn t_range(start: i64, end: i64, loc: &str) -> Rc<Vec<i64>> {
     if start > end { t_fail("R004", format!("invalid range({}, {}): start is greater than end", start, end), loc) }
     Rc::new((start..end).collect())
 }
+fn t_value_or<T>(option: Option<T>, default: T) -> T { match option { Some(v) => v, None => default } }
 fn t_iter<T: Clone>(l: Rc<Vec<T>>) -> impl Iterator<Item = T> { (0..l.len()).map(move |i| l[i].clone()) }
 
 fn t_print(t: Rc<String>) {
