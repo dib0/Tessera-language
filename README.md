@@ -1,6 +1,8 @@
-# Tessera
+<h1 align="center">
+  <img src="resources/tessera-logo.svg" alt="Tessera" width="260" />
+</h1>
 
-**A compact, safety-first programming language designed for LLM-assisted software development.**
+<p align="center"><strong>A compact, safety-first programming language designed for LLM-assisted software development.</strong></p>
 
 Tessera aims to make it easy for language models to create, review, and maintain software without sacrificing clear behavior or safety. Its source is text, its syntax is intended to be compact and regular, and design rationale is preserved alongside code. **This is for humans that care about functionality of software, not about the code.**
 
