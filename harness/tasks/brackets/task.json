@@ -1,0 +1,21 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "([]{})",
+        "(]",
+        "((",
+        "a(b)c",
+        "",
+        "}{"
+      ],
+      "stdout": "balanced\nunbalanced\nunbalanced\nbalanced\nbalanced\nunbalanced\n",
+      "exit": 0
+    }
+  ]
+}

@@ -196,7 +196,7 @@ pub fn rust_string(text: Text) -> Text {
             10 => "\\n"
             13 => "\\r"
             9 => "\\t"
-            _ => if code >= 32 and code <= 126 { from_code_point(code) } else { "\\u{" + hex_text(code) + "}" }
+            _ => if code >= 32 and code <= 126 { from_code_point(code) } else { "\\u{\(hex_text(code))}" }
         }
         set out = append(out, piece)
     }
@@ -212,7 +212,7 @@ pub fn json_string(text: Text) -> Text {
             10 => "\\n"
             13 => "\\r"
             9 => "\\t"
-            _ => if code < 32 { "\\u" + pad_left(hex_text(code), 4, "0") } else { from_code_point(code) }
+            _ => if code < 32 { "\\u\(pad_left(hex_text(code), 4, "0"))" } else { from_code_point(code) }
         }
         set out = append(out, piece)
     }
@@ -224,27 +224,27 @@ pub fn json_string(text: Text) -> Text {
 pub fn render(diagnostic: Diagnostic, files: List[SourceFile]) -> Text {
     let file = files[diagnostic.span.file]
     let span = diagnostic.span
-    var out = "error[" + diagnostic.code + "]: " + diagnostic.message + "\n"
-    set out = out + "  --> " + file.path + ":" + to_text(span.line) + ":" + to_text(span.col) + "\n"
+    var out = "error[\(diagnostic.code)]: \(diagnostic.message)\n"
+    set out = "\(out)  --> \(file.path):\(span.line):\(span.col)\n"
     let lines = split_lines(file.text)
     if span.line >= 1 and span.line <= length(lines) {
         let line_text = lines[span.line - 1]
         let number = to_text(span.line)
         let pad = repeat_text(" ", length(number))
-        set out = out + pad + " |\n"
-        set out = out + number + " | " + line_text + "\n"
+        set out = "\(out)\(pad) |\n"
+        set out = "\(out)\(number) | \(line_text)\n"
         let start = if span.col < 1 { 1 } else { span.col }
         let finish = if span.end_line == span.line { span.end_col } else { length(line_text) + 1 }
         let width = if finish - start < 1 { 1 } else { finish - start }
-        var marker = pad + " | " + repeat_text(" ", start - 1) + repeat_text("^", width)
+        var marker = "\(pad) | \(repeat_text(" ", start - 1))\(repeat_text("^", width))"
         if diagnostic.label != "" {
-            set marker = marker + " " + diagnostic.label
+            set marker = "\(marker) \(diagnostic.label)"
         }
-        set out = out + marker + "\n"
-        set out = out + pad + " |\n"
+        set out = "\(out)\(marker)\n"
+        set out = "\(out)\(pad) |\n"
     }
     if diagnostic.help != "" {
-        set out = out + "help: " + diagnostic.help + "\n"
+        set out = "\(out)help: \(diagnostic.help)\n"
     }
     out
 }
@@ -255,9 +255,9 @@ pub fn render_json(diagnostics: List[Diagnostic], files: List[SourceFile]) -> Te
     var parts: List[Text] = []
     for d in diagnostics {
         let s = d.span
-        set parts = append(parts, "{\"severity\":\"error\",\"code\":" + json_string(d.code) + ",\"message\":" + json_string(d.message) + ",\"file\":" + json_string(files[s.file].path) + ",\"line\":" + to_text(s.line) + ",\"column\":" + to_text(s.col) + ",\"end_line\":" + to_text(s.end_line) + ",\"end_column\":" + to_text(s.end_col) + ",\"label\":" + json_or_null(d.label) + ",\"help\":" + json_or_null(d.help) + "}")
+        set parts = append(parts, "{\"severity\":\"error\",\"code\":\(json_string(d.code)),\"message\":\(json_string(d.message)),\"file\":\(json_string(files[s.file].path)),\"line\":\(s.line),\"column\":\(s.col),\"end_line\":\(s.end_line),\"end_column\":\(s.end_col),\"label\":\(json_or_null(d.label)),\"help\":\(json_or_null(d.help))}")
     }
-    "{\"diagnostics\":[" + join(parts, ",") + "]}"
+    "{\"diagnostics\":[\(join(parts, ","))]}"
 }
 
 // ---------- ordering ----------

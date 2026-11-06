@@ -1,0 +1,44 @@
+fn parse(text: Text) -> Option[Int] {
+    let codes = code_points(text)
+    if length(codes) == 0 or length(codes) > 4 {
+        return Option.None
+    }
+    var value = 0
+    for code in codes {
+        if code < 48 or code > 57 {
+            return Option.None
+        }
+        set value = value * 10 + (code - 48)
+    }
+    Option.Some(value)
+}
+
+fn roman(number: Int) -> Text {
+    let values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    let symbols = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
+    var remaining = number
+    var out = ""
+    for index in range(0, length(values)) {
+        while remaining >= values[index] {
+            set out = out + symbols[index]
+            set remaining = remaining - values[index]
+        }
+    }
+    out
+}
+
+fn main() -> Unit uses io, env {
+    var failed = false
+    for argument in args() {
+        let number = value_or(parse(argument), 0)
+        if number >= 1 and number <= 3999 {
+            print(roman(number))
+        } else {
+            print("invalid")
+            set failed = true
+        }
+    }
+    if failed {
+        exit(1)
+    }
+}

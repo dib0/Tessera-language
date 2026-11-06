@@ -1,0 +1,1 @@
+Write a program that takes one command-line argument, a positive integer N, and prints the numbers 1 to N, one per line. For multiples of 3 print `Fizz` instead of the number, for multiples of 5 print `Buzz`, and for multiples of both print `FizzBuzz`.

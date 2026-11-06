@@ -1,0 +1,43 @@
+{
+  "kind": "extend",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "add:apple:5",
+        "add:pear:2",
+        "remove:apple:3",
+        "add:fig:1",
+        "clear:pear"
+      ],
+      "stdout": "apple 2\nfig 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "add:apple:1",
+        "remove:apple:2"
+      ],
+      "stdout": "error: cannot remove 2 apple\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "remove:kiwi:1"
+      ],
+      "stdout": "error: cannot remove 1 kiwi\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "add:apple:1",
+        "eat:apple"
+      ],
+      "stdout": "error: unknown command eat:apple\n",
+      "exit": 1
+    }
+  ]
+}

@@ -37,19 +37,19 @@ type Options {
 
 fn value_after(arguments: List[Text], index: Int) -> Result[Text, Text] {
     if index + 1 >= length(arguments) {
-        return Result.Error("`" + arguments[index] + "` needs a value")
+        return .Error("`\(arguments[index])` needs a value")
     }
-    Result.Ok(arguments[index + 1])
+    .Ok(arguments[index + 1])
 }
 
 note "The error is a message for the user; `main` prints it with the usage text."
 fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
     if length(arguments) == 0 {
-        return Result.Error("missing command")
+        return .Error("missing command")
     }
     var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2" }
     if options.command == "help" or options.command == "--help" {
-        return Result.Ok(options)
+        return .Ok(options)
     }
     var index = 1
     while index < length(arguments) {
@@ -60,7 +60,7 @@ fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
         } else if argument == "--opt" {
             let level = try value_after(arguments, index)
             if not source.contains_text(["0", "1", "2", "3"], level) {
-                return Result.Error("invalid optimization level `" + level + "`")
+                return .Error("invalid optimization level `\(level)`")
             }
             set options = options with { opt: level }
             set index = index + 2
@@ -68,16 +68,16 @@ fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
             set options = options with { json: true }
             set index = index + 1
         } else if source.starts_with_text(argument, "-") {
-            return Result.Error("unknown option `" + argument + "`")
+            return .Error("unknown option `\(argument)`")
         } else {
             set options = options with { files: append(options.files, argument) }
             set index = index + 1
         }
     }
     if length(options.files) == 0 {
-        return Result.Error("no source files given")
+        return .Error("no source files given")
     }
-    Result.Ok(options)
+    .Ok(options)
 }
 
 type Frontend {
@@ -126,7 +126,7 @@ fn base_name(path: Text) -> Text {
     from_code_points(slice(code_points(path), length(code_points(directory)) + 1, length(code_points(path))))
 }
 
-fn join_path(directory: Text, relative: Text) -> Text = if directory == "." { relative } else { directory + "/" + relative }
+fn join_path(directory: Text, relative: Text) -> Text = if directory == "." { relative } else { "\(directory)/\(relative)" }
 
 fn valid_module_path(path: Text) -> Bool {
     for segment in source.split_on(path, 47) {
@@ -162,13 +162,13 @@ fn load_program(entry_paths: List[Text]) -> Loaded uses fs {
                 continue
             }
             set loaded = append(loaded, i.path)
-            let file_path = join_path(root, i.path + ".tes")
+            let file_path = join_path(root, "\(i.path).tes")
             if source.contains_text(entry_files, file_path) {
-                set diagnostics = append(diagnostics, source.error_help("E0603", i.span, "`" + i.path + "` is the entry module and cannot be imported", "move the shared code into its own module"))
+                set diagnostics = append(diagnostics, source.error_help("E0603", i.span, "`\(i.path)` is the entry module and cannot be imported", "move the shared code into its own module"))
                 continue
             }
             if not file_exists(file_path) {
-                set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "cannot find module `" + i.path + "`", "expected the file `" + file_path + "`"))
+                set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "cannot find module `\(i.path)`", "expected the file `\(file_path)`"))
                 continue
             }
             let file = length(files)
@@ -221,7 +221,7 @@ fn visit_module(node: Int, modules: List[ast.Module], start: Visit, path_stack: 
                 }
             }
             set names = append(names, module_label(modules[target]))
-            set diagnostics = append(diagnostics, source.error_help("E0603", i.span, "import cycle: " + join(names, " -> "), "modules must form layers; move the shared part into a module that both can import"))
+            set diagnostics = append(diagnostics, source.error_help("E0603", i.span, "import cycle: \(join(names, " -> "))", "modules must form layers; move the shared part into a module that both can import"))
         } else if states[target] == 0 {
             let result = visit_module(target, modules, Visit { states: states, diagnostics: diagnostics }, stack)
             set states = result.states
@@ -261,7 +261,7 @@ fn report_diagnostics(diagnostics: List[source.Diagnostic], files: List[source.S
     if length(diagnostics) == 0 {
         print_error("ok: no errors")
     } else {
-        print_error(to_text(length(diagnostics)) + " error(s)" + summary)
+        print_error("\(length(diagnostics)) error(s)\(summary)")
     }
 }
 
@@ -284,10 +284,10 @@ fn notes_json(items: List[ast.Item], files: List[source.SourceFile]) -> Text {
     var entries: List[Text] = []
     for item in items {
         let entry = match item {
-            ast.Item.FunctionItem(f) => note_entry("function", ast.display_name(f.name), f.name_span, f.notes, files)
-            ast.Item.RecordItem(r) => note_entry("type", ast.display_name(r.name), r.name_span, r.notes, files)
-            ast.Item.EnumItem(e) => note_entry("enum", ast.display_name(e.name), e.name_span, e.notes, files)
-            ast.Item.ImportItem(_) => ""
+            .FunctionItem(f) => note_entry("function", ast.display_name(f.name), f.name_span, f.notes, files)
+            .RecordItem(r) => note_entry("type", ast.display_name(r.name), r.name_span, r.notes, files)
+            .EnumItem(e) => note_entry("enum", ast.display_name(e.name), e.name_span, e.notes, files)
+            .ImportItem(_) => ""
         }
         if entry != "" {
             set entries = append(entries, entry)
@@ -296,7 +296,7 @@ fn notes_json(items: List[ast.Item], files: List[source.SourceFile]) -> Text {
     if length(entries) == 0 {
         return "{\n  \"notes\": []\n}\n"
     }
-    "{\n  \"notes\": [\n" + join(entries, ",\n") + "\n  ]\n}\n"
+    "{\n  \"notes\": [\n\(join(entries, ",\n"))\n  ]\n}\n"
 }
 
 fn note_entry(kind: Text, name: Text, span: source.Span, notes: List[ast.Note], files: List[source.SourceFile]) -> Text {
@@ -307,11 +307,11 @@ fn note_entry(kind: Text, name: Text, span: source.Span, notes: List[ast.Note], 
     for n in notes {
         set texts = append(texts, source.json_string(n.text))
     }
-    "    {\"file\": " + source.json_string(files[span.file].path) + ", \"item\": " + source.json_string(name) + ", \"kind\": " + source.json_string(kind) + ", \"line\": " + to_text(span.line) + ", \"text\": [" + join(texts, ", ") + "]}"
+    "    {\"file\": \(source.json_string(files[span.file].path)), \"item\": \(source.json_string(name)), \"kind\": \(source.json_string(kind)), \"line\": \(span.line), \"text\": [\(join(texts, ", "))]}"
 }
 
 fn run_rustc(options: Options, rust_path: Text) -> Int uses process, env {
-    let arguments = ["--edition", "2021", "-C", "opt-level=" + options.opt, "--crate-name", "tessera_program", "-o", options.output, rust_path]
+    let arguments = ["--edition", "2021", "-C", "opt-level=\(options.opt)", "--crate-name", "tessera_program", "-o", options.output, rust_path]
     let configured = environment_variable("TESSERA_RUSTC")
     if configured != "" {
         return run_process(configured, arguments)
@@ -320,14 +320,14 @@ fn run_rustc(options: Options, rust_path: Text) -> Int uses process, env {
     if status != -1 {
         return status
     }
-    run_process(environment_variable("HOME") + "/.cargo/bin/rustc", arguments)
+    run_process("\(environment_variable("HOME"))/.cargo/bin/rustc", arguments)
 }
 
 fn main() -> Unit uses io, fs, env, process {
     let options = match parse_options(args()) {
-        Result.Ok(parsed) => parsed
-        Result.Error(problem) => {
-            print_error("error: " + problem + "\n\n" + usage())
+        .Ok(parsed) => parsed
+        .Error(problem) => {
+            print_error("error: \(problem)\n\n\(usage())")
             exit(2)
         }
     }
@@ -337,17 +337,17 @@ fn main() -> Unit uses io, fs, env, process {
     }
     for path in options.files {
         if not source.ends_with_text(path, ".tes") {
-            print_error("error: `" + path + "` is not a Tessera source file (expected the `.tes` extension)")
+            print_error("error: `\(path)` is not a Tessera source file (expected the `.tes` extension)")
             exit(2)
         }
         if not file_exists(path) {
-            print_error("error: cannot read `" + path + "`")
+            print_error("error: cannot read `\(path)`")
             exit(2)
         }
     }
     let command = options.command
     if not source.contains_text(["check", "build", "emit-rust", "notes"], command) {
-        print_error("error: unknown command `" + command + "`")
+        print_error("error: unknown command `\(command)`")
         exit(2)
     }
     let frontend = run_frontend(options.files)
@@ -377,7 +377,7 @@ fn main() -> Unit uses io, fs, env, process {
         print_error("error: `build` needs `-o <output>`")
         exit(2)
     }
-    let rust_path = options.output + ".rs"
+    let rust_path = "\(options.output).rs"
     write_file(rust_path, rust)
     let status = run_rustc(options, rust_path)
     if status == -1 {

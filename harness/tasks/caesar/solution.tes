@@ -1,0 +1,43 @@
+fn parse_shift(text: Text) -> Int {
+    let codes = code_points(text)
+    var sign = 1
+    var start = 0
+    if length(codes) > 0 and codes[0] == 45 {
+        set sign = -1
+        set start = 1
+    }
+    var value = 0
+    for index in range(start, length(codes)) {
+        set value = value * 10 + (codes[index] - 48)
+    }
+    sign * value
+}
+
+fn rotate(code: Int, base: Int, shift: Int) -> Int {
+    let offset = ((code - base + shift) % 26 + 26) % 26
+    base + offset
+}
+
+fn shift_word(word: Text, shift: Int) -> Text {
+    var out: List[Int] = []
+    for code in code_points(word) {
+        if code >= 97 and code <= 122 {
+            set out = append(out, rotate(code, 97, shift))
+        } else if code >= 65 and code <= 90 {
+            set out = append(out, rotate(code, 65, shift))
+        } else {
+            set out = append(out, code)
+        }
+    }
+    from_code_points(out)
+}
+
+fn main() -> Unit uses io, env {
+    let arguments = args()
+    let shift = parse_shift(arguments[0])
+    var words: List[Text] = []
+    for word in slice(arguments, 1, length(arguments)) {
+        set words = append(words, shift_word(word, shift))
+    }
+    print(join(words, " "))
+}

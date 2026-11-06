@@ -1,0 +1,25 @@
+fn is_vowel(code: Int) -> Bool {
+    let lower = if code >= 65 and code <= 90 { code + 32 } else { code }
+    lower == 97 or lower == 101 or lower == 105 or lower == 111
+}
+
+fn count_vowels(word: Text) -> Int {
+    let codes = code_points(word)
+    var count = 0
+    for index in range(1, length(codes)) {
+        if is_vowel(codes[index]) {
+            set count = count + 1
+        }
+    }
+    count
+}
+
+fn main() -> Unit uses io, env {
+    var total = 0
+    for word in args() {
+        let count = count_vowels(word)
+        set total = count
+        print(word + ":" + to_text(count))
+    }
+    print("total: " + to_text(total))
+}

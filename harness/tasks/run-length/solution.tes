@@ -1,0 +1,36 @@
+fn encode(text: Text) -> Text {
+    let codes = code_points(text)
+    var out = ""
+    var index = 0
+    while index < length(codes) {
+        var run = 1
+        while index + run < length(codes) and codes[index + run] == codes[index] {
+            set run = run + 1
+        }
+        set out = out + to_text(run) + from_code_point(codes[index])
+        set index = index + run
+    }
+    out
+}
+
+fn decode(text: Text) -> Text {
+    var out = ""
+    var count = 0
+    for code in code_points(text) {
+        if code >= 48 and code <= 57 {
+            set count = count * 10 + (code - 48)
+        } else {
+            for step in range(0, count) {
+                set out = out + from_code_point(code)
+            }
+            set count = 0
+        }
+    }
+    out
+}
+
+fn main() -> Unit uses io, env {
+    let arguments = args()
+    let result = if arguments[0] == "encode" { encode(arguments[1]) } else { decode(arguments[1]) }
+    print(result)
+}

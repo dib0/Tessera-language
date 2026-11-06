@@ -1,0 +1,26 @@
+fn parse(text: Text) -> Int {
+    var value = 0
+    for code in code_points(text) {
+        set value = value * 10 + (code - 48)
+    }
+    value
+}
+
+fn line(n: Int) -> Text {
+    if n % 15 == 0 {
+        "FizzBuzz"
+    } else if n % 3 == 0 {
+        "Fizz"
+    } else if n % 5 == 0 {
+        "Buzz"
+    } else {
+        to_text(n)
+    }
+}
+
+fn main() -> Unit uses io, env {
+    let n = parse(args()[0])
+    for i in range(1, n + 1) {
+        print(line(i))
+    }
+}

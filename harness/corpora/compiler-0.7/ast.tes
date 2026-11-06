@@ -1,0 +1,245 @@
+// Syntax tree. The parser fills every `ty` with `Type.Unknown`; the checker
+// returns a copy of the tree with the real types filled in.
+
+import source uses nothing
+
+pub enum Type {
+    Int
+    Bool
+    Text
+    Unit
+    Never
+    Unknown
+    List(element: Type)
+    Option(element: Type)
+    Result(value: Type, error: Type)
+    Named(name: Text)
+}
+
+pub type Note {
+    text: Text
+    span: source.Span
+}
+
+pub type TypeExpr {
+    name: Text
+    args: List[TypeExpr]
+    span: source.Span
+}
+
+pub enum UnaryOp {
+    Negate
+    Not
+}
+
+pub enum BinaryOp {
+    Add
+    Subtract
+    Multiply
+    Divide
+    Remainder
+    Equal
+    NotEqual
+    Less
+    LessEqual
+    Greater
+    GreaterEqual
+    And
+    Or
+}
+
+pub type Expr {
+    kind: ExprKind
+    span: source.Span
+    ty: Type
+}
+
+pub enum ExprKind {
+    IntLiteral(value: Int)
+    BoolLiteral(value: Bool)
+    TextLiteral(value: Text)
+    UnitLiteral
+    Name(name: Text)
+    ListLiteral(items: List[Expr])
+    Call(name: Text, name_span: source.Span, args: List[Expr])
+    Index(target: Expr, index: Expr)
+    FieldAccess(target: Expr, name: Text, name_span: source.Span)
+    Unary(op: UnaryOp, operand: Expr)
+    Binary(op: BinaryOp, op_span: source.Span, left: Expr, right: Expr)
+    If(condition: Expr, then_block: Block, else_branch: Option[Expr])
+    BlockExpr(block: Block)
+    Match(scrutinee: Expr, arms: List[Arm])
+    RecordLiteral(type_name: Text, type_span: source.Span, fields: List[FieldInit])
+    RecordUpdate(target: Expr, fields: List[FieldInit])
+    Try(operand: Expr)
+    VariantLiteral(type_name: Text, variant: Text, variant_span: source.Span, args: List[Expr])
+    Return(value: Option[Expr])
+    Break
+    Continue
+}
+
+pub type FieldInit {
+    name: Text
+    span: source.Span
+    value: Expr
+}
+
+pub type Block {
+    statements: List[Statement]
+    tail: Option[Expr]
+    span: source.Span
+}
+
+note "A `Let` named `_` discards its value."
+pub enum Statement {
+    Let(name: Text, name_span: source.Span, declared: Option[TypeExpr], value: Expr, mutable: Bool)
+    Set(name: Text, name_span: source.Span, value: Expr)
+    For(variable: Text, variable_span: source.Span, iterable: Expr, body: Block)
+    While(condition: Expr, body: Block)
+    ExprStatement(expr: Expr)
+}
+
+pub type Arm {
+    pattern: Pattern
+    body: Expr
+}
+
+pub type Pattern {
+    kind: PatternKind
+    span: source.Span
+}
+
+pub type Binding {
+    name: Text
+    span: source.Span
+}
+
+note "A binding named `_` ignores its field."
+pub enum PatternKind {
+    Wildcard
+    IntPattern(value: Int)
+    TextPattern(value: Text)
+    BoolPattern(value: Bool)
+    VariantPattern(type_name: Text, variant: Text, bindings: List[Binding])
+}
+
+pub type Param {
+    name: Text
+    span: source.Span
+    type_expr: TypeExpr
+}
+
+pub type Field {
+    name: Text
+    span: source.Span
+    type_expr: TypeExpr
+}
+
+pub type EffectName {
+    name: Text
+    span: source.Span
+}
+
+pub type Function {
+    notes: List[Note]
+    public: Bool
+    name: Text
+    name_span: source.Span
+    params: List[Param]
+    return_type: TypeExpr
+    effects: List[EffectName]
+    body: Expr
+}
+
+pub type RecordDecl {
+    notes: List[Note]
+    public: Bool
+    name: Text
+    name_span: source.Span
+    fields: List[Field]
+}
+
+pub type VariantDecl {
+    name: Text
+    span: source.Span
+    fields: List[Field]
+}
+
+pub type EnumDecl {
+    notes: List[Note]
+    public: Bool
+    name: Text
+    name_span: source.Span
+    variants: List[VariantDecl]
+}
+
+note "`limited` is false when the import has no `uses` clause; `allowed` then is empty."
+pub type Import {
+    path: Text
+    alias: Text
+    span: source.Span
+    limited: Bool
+    allowed: List[Text]
+}
+
+pub enum Item {
+    FunctionItem(function: Function)
+    RecordItem(record: RecordDecl)
+    EnumItem(decl: EnumDecl)
+    ImportItem(import_decl: Import)
+}
+
+note "A module is one file, or for the entry module all files given on the command line. `prefix` makes its names unique in generated code; it is empty for the entry module."
+pub type Module {
+    path: Text
+    prefix: Text
+    items: List[Item]
+    is_entry: Bool
+}
+
+pub fn module_prefix(path: Text) -> Text = join(source.split_on(path, 47), "__") + "__"
+
+note "Display form of a canonical type name: `geometry__shapes__Shape` becomes `geometry/shapes.Shape`."
+pub fn display_name(canonical: Text) -> Text {
+    let parts = source.split_on_text(canonical, "__")
+    let count = length(parts)
+    if count <= 1 {
+        return canonical
+    }
+    join(slice(parts, 0, count - 1), "/") + "." + parts[count - 1]
+}
+
+pub fn make_expr(kind: ExprKind, span: source.Span) -> Expr = Expr { kind: kind, span: span, ty: Type.Unknown }
+
+pub fn type_text(ty: Type) -> Text {
+    match ty {
+        Type.Int => "Int"
+        Type.Bool => "Bool"
+        Type.Text => "Text"
+        Type.Unit => "Unit"
+        Type.Never => "Never"
+        Type.Unknown => "?"
+        Type.List(element) => "List[" + type_text(element) + "]"
+        Type.Option(element) => "Option[" + type_text(element) + "]"
+        Type.Result(value, error) => "Result[" + type_text(value) + ", " + type_text(error) + "]"
+        Type.Named(name) => display_name(name)
+    }
+}
+
+pub fn binary_symbol(op: BinaryOp) -> Text {
+    match op {
+        BinaryOp.Add => "+"
+        BinaryOp.Subtract => "-"
+        BinaryOp.Multiply => "*"
+        BinaryOp.Divide => "/"
+        BinaryOp.Remainder => "%"
+        BinaryOp.Equal => "=="
+        BinaryOp.NotEqual => "!="
+        BinaryOp.Less => "<"
+        BinaryOp.LessEqual => "<="
+        BinaryOp.Greater => ">"
+        BinaryOp.GreaterEqual => ">="
+        BinaryOp.And => "and"
+        BinaryOp.Or => "or"
+    }
+}

@@ -1,0 +1,26 @@
+fn parse(text: Text) -> Int {
+    var value = 0
+    for code in code_points(text) {
+        set value = value * 10 + (code - 48)
+    }
+    value
+}
+
+fn main() -> Unit uses io, env {
+    let arguments = args()
+    let width = parse(arguments[0])
+    var line = ""
+    for word in slice(arguments, 1, length(arguments)) {
+        if line == "" {
+            set line = word
+        } else if length(line) + 1 + length(word) <= width {
+            set line = line + " " + word
+        } else {
+            print(line)
+            set line = word
+        }
+    }
+    if line != "" {
+        print(line)
+    }
+}

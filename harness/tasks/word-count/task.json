@@ -1,0 +1,28 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "the",
+        "cat",
+        "The",
+        "hat",
+        "THE",
+        "cat"
+      ],
+      "stdout": "the: 3\ncat: 2\nhat: 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "One"
+      ],
+      "stdout": "one: 1\n",
+      "exit": 0
+    }
+  ]
+}

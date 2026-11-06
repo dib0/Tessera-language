@@ -1,0 +1,23 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "15"
+      ],
+      "stdout": "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "3"
+      ],
+      "stdout": "1\n2\nFizz\n",
+      "exit": 0
+    }
+  ]
+}

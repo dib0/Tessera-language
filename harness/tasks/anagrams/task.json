@@ -1,0 +1,32 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "listen",
+        "google",
+        "silent",
+        "enlist",
+        "elgoog",
+        "cat",
+        "act",
+        "tac"
+      ],
+      "stdout": "listen silent enlist\ngoogle elgoog\ncat act tac\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "a",
+        "b",
+        "a"
+      ],
+      "stdout": "a a\nb\n",
+      "exit": 0
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "30"
+      ],
+      "stdout": "2 3 5 7 11 13 17 19 23 29\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1"
+      ],
+      "stdout": "\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "2"
+      ],
+      "stdout": "2\n",
+      "exit": 0
+    }
+  ]
+}

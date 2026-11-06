@@ -1,0 +1,1 @@
+Write a program that checks each command-line argument for balanced brackets. The bracket pairs are `()`, `[]` and `{}`; all other characters are ignored. For each argument print `balanced` or `unbalanced` on its own line.

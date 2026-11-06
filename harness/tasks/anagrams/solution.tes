@@ -1,0 +1,32 @@
+fn signature(word: Text) -> List[Int] {
+    var counts: List[Int] = []
+    for step in range(0, 26) {
+        set counts = append(counts, 0)
+    }
+    for code in code_points(word) {
+        set counts = replace_at(counts, code - 97, counts[code - 97] + 1)
+    }
+    counts
+}
+
+fn main() -> Unit uses io, env {
+    var keys: List[List[Int]] = []
+    var groups: List[List[Text]] = []
+    for word in args() {
+        let key = signature(word)
+        var placed = false
+        for index in range(0, length(keys)) {
+            if not placed and keys[index] == key {
+                set groups = replace_at(groups, index, append(groups[index], word))
+                set placed = true
+            }
+        }
+        if not placed {
+            set keys = append(keys, key)
+            set groups = append(groups, [word])
+        }
+    }
+    for group in groups {
+        print(join(group, " "))
+    }
+}

@@ -1,0 +1,1 @@
+Write a program that takes one argument N (a non-negative integer) and prints all prime numbers less than or equal to N on one line, separated by single spaces. If there are none, print an empty line.

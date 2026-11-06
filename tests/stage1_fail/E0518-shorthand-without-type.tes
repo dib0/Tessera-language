@@ -1,0 +1,8 @@
+enum Color {
+    Red
+    Green
+}
+fn main() -> Unit uses io {
+    let color = .Red
+    print("x")
+}

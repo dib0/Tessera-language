@@ -1,0 +1,1 @@
+Write a program that groups anagrams. Every command-line argument is a lowercase word. Two words are anagrams if they contain the same letters with the same counts. Print one line per group, in order of the first appearance of the group; within a line, print the group's words in order of appearance, separated by single spaces. Repeated words are kept.

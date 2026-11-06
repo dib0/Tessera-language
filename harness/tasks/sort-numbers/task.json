@@ -1,0 +1,36 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "5",
+        "-3",
+        "10",
+        "0",
+        "-3"
+      ],
+      "stdout": "-3 -3 0 5 10\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "4",
+        "x1",
+        "2"
+      ],
+      "stdout": "error: not a number: x1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "7"
+      ],
+      "stdout": "7\n",
+      "exit": 0
+    }
+  ]
+}

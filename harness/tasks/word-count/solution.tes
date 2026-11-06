@@ -1,0 +1,29 @@
+fn lowercase(word: Text) -> Text {
+    var out: List[Int] = []
+    for code in code_points(word) {
+        set out = append(out, if code >= 65 and code <= 90 { code + 32 } else { code })
+    }
+    from_code_points(out)
+}
+
+fn main() -> Unit uses io, env {
+    var words: List[Text] = []
+    var counts: List[Int] = []
+    for argument in args() {
+        let word = lowercase(argument)
+        var found = false
+        for index in range(0, length(words)) {
+            if words[index] == word {
+                set counts = replace_at(counts, index, counts[index] + 1)
+                set found = true
+            }
+        }
+        if not found {
+            set words = append(words, word)
+            set counts = append(counts, 1)
+        }
+    }
+    for index in range(0, length(words)) {
+        print(words[index] + ": " + to_text(counts[index]))
+    }
+}

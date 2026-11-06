@@ -1,0 +1,1 @@
+Write a program that counts words. Every command-line argument is one word. Words are compared case-insensitively (only ASCII letters change case) and reported in lowercase. Print one line per distinct word, in order of first appearance, formatted as `word: count`.

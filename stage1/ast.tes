@@ -197,7 +197,7 @@ pub type Module {
     is_entry: Bool
 }
 
-pub fn module_prefix(path: Text) -> Text = join(source.split_on(path, 47), "__") + "__"
+pub fn module_prefix(path: Text) -> Text = "\(join(source.split_on(path, 47), "__"))__"
 
 note "Display form of a canonical type name: `geometry__shapes__Shape` becomes `geometry/shapes.Shape`."
 pub fn display_name(canonical: Text) -> Text {
@@ -206,40 +206,40 @@ pub fn display_name(canonical: Text) -> Text {
     if count <= 1 {
         return canonical
     }
-    join(slice(parts, 0, count - 1), "/") + "." + parts[count - 1]
+    "\(join(slice(parts, 0, count - 1), "/")).\(parts[count - 1])"
 }
 
-pub fn make_expr(kind: ExprKind, span: source.Span) -> Expr = Expr { kind: kind, span: span, ty: Type.Unknown }
+pub fn make_expr(kind: ExprKind, span: source.Span) -> Expr = Expr { kind: kind, span: span, ty: .Unknown }
 
 pub fn type_text(ty: Type) -> Text {
     match ty {
-        Type.Int => "Int"
-        Type.Bool => "Bool"
-        Type.Text => "Text"
-        Type.Unit => "Unit"
-        Type.Never => "Never"
-        Type.Unknown => "?"
-        Type.List(element) => "List[" + type_text(element) + "]"
-        Type.Option(element) => "Option[" + type_text(element) + "]"
-        Type.Result(value, error) => "Result[" + type_text(value) + ", " + type_text(error) + "]"
-        Type.Named(name) => display_name(name)
+        .Int => "Int"
+        .Bool => "Bool"
+        .Text => "Text"
+        .Unit => "Unit"
+        .Never => "Never"
+        .Unknown => "?"
+        .List(element) => "List[" + type_text(element) + "]"
+        .Option(element) => "Option[" + type_text(element) + "]"
+        .Result(value, error) => "Result[" + type_text(value) + ", " + type_text(error) + "]"
+        .Named(name) => display_name(name)
     }
 }
 
 pub fn binary_symbol(op: BinaryOp) -> Text {
     match op {
-        BinaryOp.Add => "+"
-        BinaryOp.Subtract => "-"
-        BinaryOp.Multiply => "*"
-        BinaryOp.Divide => "/"
-        BinaryOp.Remainder => "%"
-        BinaryOp.Equal => "=="
-        BinaryOp.NotEqual => "!="
-        BinaryOp.Less => "<"
-        BinaryOp.LessEqual => "<="
-        BinaryOp.Greater => ">"
-        BinaryOp.GreaterEqual => ">="
-        BinaryOp.And => "and"
-        BinaryOp.Or => "or"
+        .Add => "+"
+        .Subtract => "-"
+        .Multiply => "*"
+        .Divide => "/"
+        .Remainder => "%"
+        .Equal => "=="
+        .NotEqual => "!="
+        .Less => "<"
+        .LessEqual => "<="
+        .Greater => ">"
+        .GreaterEqual => ">="
+        .And => "and"
+        .Or => "or"
     }
 }

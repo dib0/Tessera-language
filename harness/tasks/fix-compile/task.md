@@ -1,0 +1,1 @@
+The program below should print the average of its integer command-line arguments, truncated toward zero, as `average: A`, or `no numbers` when there are no arguments. Arguments are non-negative decimal integers. The program does not compile. Fix it so that it compiles and behaves as described; keep its structure.

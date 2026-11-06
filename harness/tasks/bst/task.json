@@ -1,0 +1,43 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "5",
+        "3",
+        "8",
+        "1",
+        "4",
+        "8"
+      ],
+      "stdout": "1 3 4 5 8\nheight: 3\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "2",
+        "3"
+      ],
+      "stdout": "1 2 3\nheight: 3\n",
+      "exit": 0
+    },
+    {
+      "args": [],
+      "stdout": "\nheight: 0\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "-2",
+        "7"
+      ],
+      "stdout": "-2 7\nheight: 2\n",
+      "exit": 0
+    }
+  ]
+}

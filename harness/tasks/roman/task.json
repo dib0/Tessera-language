@@ -1,0 +1,35 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "1",
+        "4",
+        "9",
+        "14",
+        "40",
+        "90",
+        "400",
+        "1994",
+        "3999"
+      ],
+      "stdout": "I\nIV\nIX\nXIV\nXL\nXC\nCD\nMCMXCIV\nMMMCMXCIX\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "58",
+        "0",
+        "abc",
+        "4000",
+        "12"
+      ],
+      "stdout": "LVIII\ninvalid\ninvalid\ninvalid\nXII\n",
+      "exit": 1
+    }
+  ]
+}

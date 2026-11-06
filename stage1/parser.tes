@@ -97,20 +97,20 @@ fn fail_parse(p: Parser, diagnostic: source.Diagnostic) -> Parser {
 
 fn unexpected(p: Parser, expected: Text) -> Parser {
     let found = current(p)
-    var d = source.error("E0110", found.span, "expected " + expected + ", found " + lexer.describe_token(found))
-    if found.kind == lexer.TokenKind.Comma {
+    var d = source.error("E0110", found.span, "expected \(expected), found \(lexer.describe_token(found))")
+    if found.kind == .Comma {
         set d = d with { help: "separate items here with a line break instead of a comma" }
     }
     fail_parse(p, d)
 }
 
 fn expect(p: Parser, kind: lexer.TokenKind) -> Parser {
-    if at(p, kind) { advance(p) } else { unexpected(p, "`" + lexer.symbol_text(kind) + "`") }
+    if at(p, kind) { advance(p) } else { unexpected(p, "`\(lexer.symbol_text(kind))`") }
 }
 
 fn skip_newlines(p: Parser) -> Parser {
     var q = p
-    while at(q, lexer.TokenKind.Newline) {
+    while at(q, .Newline) {
         set q = advance(q)
     }
     q
@@ -118,7 +118,7 @@ fn skip_newlines(p: Parser) -> Parser {
 
 fn identifier(p: Parser, what: Text) -> NameResult {
     let t = current(p)
-    if t.kind == lexer.TokenKind.Ident {
+    if t.kind == .Ident {
         return NameResult { parser: advance(p), name: t.text, span: t.span }
     }
     NameResult { parser: unexpected(p, what), name: "", span: t.span }
@@ -126,20 +126,20 @@ fn identifier(p: Parser, what: Text) -> NameResult {
 
 fn end_of_line(p: Parser, what: Text) -> Parser {
     match peek(p) {
-        lexer.TokenKind.Newline => advance(p)
-        lexer.TokenKind.RBrace => p
-        lexer.TokenKind.Eof => p
-        _ => unexpected(p, "end of line after " + what)
+        .Newline => advance(p)
+        .RBrace => p
+        .Eof => p
+        _ => unexpected(p, "end of line after \(what)")
     }
 }
 
-fn dummy_expr(p: Parser) -> ast.Expr = ast.make_expr(ast.ExprKind.UnitLiteral, current_span(p))
+fn dummy_expr(p: Parser) -> ast.Expr = ast.make_expr(.UnitLiteral, current_span(p))
 
 fn failed_expr(p: Parser) -> ExprResult = ExprResult { parser: p, expr: dummy_expr(p) }
 
 fn expr_result(p: Parser, kind: ast.ExprKind, span: source.Span) -> ExprResult = ExprResult { parser: p, expr: ast.make_expr(kind, span) }
 
-fn empty_block(p: Parser) -> ast.Block = ast.Block { statements: [], tail: Option.None, span: current_span(p) }
+fn empty_block(p: Parser) -> ast.Block = ast.Block { statements: [], tail: .None, span: current_span(p) }
 
 fn dummy_type(p: Parser) -> ast.TypeExpr = ast.TypeExpr { name: "", args: [], span: current_span(p) }
 
@@ -172,7 +172,7 @@ pub fn parse_file(tokens: List[lexer.Token]) -> ParsedFile {
     var items: List[ast.Item] = []
     while true {
         set p = skip_newlines(p)
-        if at(p, lexer.TokenKind.Eof) {
+        if at(p, .Eof) {
             break
         }
         let before = p.pos
@@ -191,19 +191,19 @@ pub fn parse_file(tokens: List[lexer.Token]) -> ParsedFile {
 }
 
 fn is_declaration_start(kind: lexer.TokenKind) -> Bool {
-    kind == lexer.TokenKind.Fn or kind == lexer.TokenKind.Type or kind == lexer.TokenKind.Enum or kind == lexer.TokenKind.Note
+    kind == .Fn or kind == .Type or kind == .Enum or kind == .Note
 }
 
 fn recover_top(start: Parser) -> Parser {
     var p = start
     var depth = 0
-    while not at(p, lexer.TokenKind.Eof) {
+    while not at(p, .Eof) {
         let kind = peek(p)
-        if kind == lexer.TokenKind.LBrace {
+        if kind == .LBrace {
             set depth = depth + 1
-        } else if kind == lexer.TokenKind.RBrace {
+        } else if kind == .RBrace {
             set depth = depth - 1
-        } else if kind == lexer.TokenKind.Newline and depth <= 0 and is_declaration_start(peek_at(p, 1)) {
+        } else if kind == .Newline and depth <= 0 and is_declaration_start(peek_at(p, 1)) {
             return advance(p)
         }
         set p = advance(p)
@@ -213,17 +213,17 @@ fn recover_top(start: Parser) -> Parser {
 
 fn dummy_item(p: Parser) -> ItemResult {
     let record = ast.RecordDecl { notes: [], public: false, name: "", name_span: current_span(p), fields: [] }
-    ItemResult { parser: p, item: ast.Item.RecordItem(record) }
+    ItemResult { parser: p, item: .RecordItem(record) }
 }
 
 fn parse_item(start: Parser) -> ItemResult {
     var p = start
     var notes: List[ast.Note] = []
-    while at(p, lexer.TokenKind.Note) {
+    while at(p, .Note) {
         let note_start = current_span(p)
         set p = advance(p)
         let text_token = current(p)
-        if text_token.kind != lexer.TokenKind.Text {
+        if text_token.kind != .Text {
             return dummy_item(unexpected(p, "a text literal after `note`"))
         }
         set notes = append(notes, ast.Note { text: text_token.text, span: source.span_to(note_start, text_token.span) })
@@ -231,37 +231,37 @@ fn parse_item(start: Parser) -> ItemResult {
         if p.failed {
             return dummy_item(p)
         }
-        if not at(p, lexer.TokenKind.Eof) and current_span(p).line > text_token.span.line + 1 {
+        if not at(p, .Eof) and current_span(p).line > text_token.span.line + 1 {
             let d = source.error_help("E0401", source.span_to(note_start, text_token.span), "a note must be directly above the declaration it describes", "remove the blank line between the note and the declaration")
             return dummy_item(fail_parse(p, d))
         }
     }
-    let public = at(p, lexer.TokenKind.Pub)
+    let public = at(p, .Pub)
     if public {
         set p = advance(p)
     }
     let kind = peek(p)
-    if kind == lexer.TokenKind.Fn {
+    if kind == .Fn {
         return parse_function(p, notes, public)
     }
-    if kind == lexer.TokenKind.Type {
+    if kind == .Type {
         return parse_record(p, notes, public)
     }
-    if kind == lexer.TokenKind.Enum {
+    if kind == .Enum {
         return parse_enum(p, notes, public)
     }
     if public {
         let d = source.error_help("E0110", current_span(p), "`pub` must be followed by `fn`, `type` or `enum`", "imports and other items cannot be public")
         return dummy_item(fail_parse(p, d))
     }
-    if kind == lexer.TokenKind.Import and length(notes) == 0 {
+    if kind == .Import and length(notes) == 0 {
         return parse_import(p)
     }
     if length(notes) > 0 {
         let d = source.error_help("E0401", notes[length(notes) - 1].span, "a note must be followed by a declaration", "place the note directly above a `fn`, `type` or `enum`, or remove it")
         return dummy_item(fail_parse(p, d))
     }
-    if kind == lexer.TokenKind.Let or kind == lexer.TokenKind.Var {
+    if kind == .Let or kind == .Var {
         let d = source.error_help("E0110", current_span(p), "bindings are only allowed inside functions", "Tessera has no global variables; use a function that returns the value")
         return dummy_item(fail_parse(p, d))
     }
@@ -277,7 +277,7 @@ fn parse_import(start: Parser) -> ItemResult {
     var p = first.parser
     var segments: List[Text] = [first.name]
     var last_span = first.span
-    while at(p, lexer.TokenKind.Slash) {
+    while at(p, .Slash) {
         let segment = identifier(advance(p), "a module name after `/`")
         if segment.parser.failed {
             return dummy_item(segment.parser)
@@ -288,10 +288,10 @@ fn parse_import(start: Parser) -> ItemResult {
     }
     var limited = false
     var allowed: List[Text] = []
-    if at(p, lexer.TokenKind.Uses) {
+    if at(p, .Uses) {
         set limited = true
         set p = advance(p)
-        if current(p).kind == lexer.TokenKind.Ident and current(p).text == "nothing" {
+        if current(p).kind == .Ident and current(p).text == "nothing" {
             set last_span = current_span(p)
             set p = advance(p)
         } else {
@@ -304,7 +304,7 @@ fn parse_import(start: Parser) -> ItemResult {
                 set allowed = append(allowed, effect.name)
                 set last_span = effect.span
                 set p = effect.parser
-                if at(p, lexer.TokenKind.Comma) {
+                if at(p, .Comma) {
                     set p = advance(p)
                 } else {
                     set more = false
@@ -314,32 +314,32 @@ fn parse_import(start: Parser) -> ItemResult {
     }
     let count = length(segments)
     let import_decl = ast.Import { path: join(segments, "/"), alias: segments[count - 1], span: source.span_to(keyword_span, last_span), limited: limited, allowed: allowed }
-    ItemResult { parser: end_of_line(p, "an import"), item: ast.Item.ImportItem(import_decl) }
+    ItemResult { parser: end_of_line(p, "an import"), item: .ImportItem(import_decl) }
 }
 
 fn parse_function(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult {
-    let name = identifier(expect(start, lexer.TokenKind.Fn), "a function name")
-    var p = expect(name.parser, lexer.TokenKind.LParen)
+    let name = identifier(expect(start, .Fn), "a function name")
+    var p = expect(name.parser, .LParen)
     if p.failed {
         return dummy_item(p)
     }
     var params: List[ast.Param] = []
-    while not at(p, lexer.TokenKind.RParen) {
+    while not at(p, .RParen) {
         let param_name = identifier(p, "a parameter name")
-        let param_type = parse_type(expect(param_name.parser, lexer.TokenKind.Colon))
+        let param_type = parse_type(expect(param_name.parser, .Colon))
         if param_type.parser.failed {
             return dummy_item(param_type.parser)
         }
         set params = append(params, ast.Param { name: param_name.name, span: param_name.span, type_expr: param_type.type_expr })
         set p = param_type.parser
-        if at(p, lexer.TokenKind.Comma) {
+        if at(p, .Comma) {
             set p = advance(p)
-        } else if not at(p, lexer.TokenKind.RParen) {
+        } else if not at(p, .RParen) {
             return dummy_item(unexpected(p, "`,` or `)`"))
         }
     }
     set p = advance(p)
-    if not at(p, lexer.TokenKind.Arrow) {
+    if not at(p, .Arrow) {
         return dummy_item(fail_parse(p, source.error_help("E0110", current_span(p), "missing return type", "write the return type after `->`, e.g. `-> Unit`")))
     }
     let return_type = parse_type(advance(p))
@@ -348,7 +348,7 @@ fn parse_function(start: Parser, notes: List[ast.Note], public: Bool) -> ItemRes
     }
     set p = return_type.parser
     var effects: List[ast.EffectName] = []
-    if at(p, lexer.TokenKind.Uses) {
+    if at(p, .Uses) {
         set p = advance(p)
         var more = true
         while more {
@@ -358,18 +358,18 @@ fn parse_function(start: Parser, notes: List[ast.Note], public: Bool) -> ItemRes
             }
             set effects = append(effects, ast.EffectName { name: effect.name, span: effect.span })
             set p = effect.parser
-            if at(p, lexer.TokenKind.Comma) {
+            if at(p, .Comma) {
                 set p = advance(p)
             } else {
                 set more = false
             }
         }
     }
-    let body = if at(p, lexer.TokenKind.Assign) {
+    let body = if at(p, .Assign) {
         parse_expr(advance(p), true)
-    } else if at(p, lexer.TokenKind.LBrace) {
+    } else if at(p, .LBrace) {
         let block = parse_block(p)
-        expr_result(block.parser, ast.ExprKind.BlockExpr(block.block), block.block.span)
+        expr_result(block.parser, .BlockExpr(block.block), block.block.span)
     } else {
         failed_expr(unexpected(p, "`=` or `{` to start the function body"))
     }
@@ -377,7 +377,7 @@ fn parse_function(start: Parser, notes: List[ast.Note], public: Bool) -> ItemRes
         return dummy_item(body.parser)
     }
     let function = ast.Function { notes: notes, public: public, name: name.name, name_span: name.span, params: params, return_type: return_type.type_expr, effects: effects, body: body.expr }
-    ItemResult { parser: body.parser, item: ast.Item.FunctionItem(function) }
+    ItemResult { parser: body.parser, item: .FunctionItem(function) }
 }
 
 fn parse_type(start: Parser) -> TypeResult {
@@ -390,17 +390,17 @@ fn parse_type(start: Parser) -> TypeResult {
         return TypeResult { parser: p, type_expr: dummy_type(p) }
     }
     var name = NameResult { parser: p, name: first.name, span: first.span }
-    if at(p, lexer.TokenKind.Dot) and not source.starts_with_upper(first.name) {
+    if at(p, .Dot) and not source.starts_with_upper(first.name) {
         let member = identifier(advance(p), "a type name after the module name")
         if member.parser.failed {
             return TypeResult { parser: member.parser, type_expr: dummy_type(member.parser) }
         }
-        set name = NameResult { parser: member.parser, name: first.name + "." + member.name, span: source.span_to(first.span, member.span) }
+        set name = NameResult { parser: member.parser, name: "\(first.name).\(member.name)", span: source.span_to(first.span, member.span) }
         set p = member.parser
     }
     var args: List[ast.TypeExpr] = []
     var finish = name.span
-    if at(p, lexer.TokenKind.LBracket) {
+    if at(p, .LBracket) {
         set p = advance(p)
         var more = true
         while more {
@@ -410,28 +410,28 @@ fn parse_type(start: Parser) -> TypeResult {
             }
             set args = append(args, arg.type_expr)
             set p = arg.parser
-            if at(p, lexer.TokenKind.Comma) {
+            if at(p, .Comma) {
                 set p = advance(p)
             } else {
                 set more = false
             }
         }
         set finish = current_span(p)
-        set p = expect(p, lexer.TokenKind.RBracket)
+        set p = expect(p, .RBracket)
     }
     TypeResult { parser: p, type_expr: ast.TypeExpr { name: name.name, args: args, span: source.span_to(name.span, finish) } }
 }
 
 fn parse_fields_block(start: Parser) -> FieldsResult {
-    var p = expect(start, lexer.TokenKind.LBrace)
+    var p = expect(start, .LBrace)
     var fields: List[ast.Field] = []
     while not p.failed {
         set p = skip_newlines(p)
-        if at(p, lexer.TokenKind.RBrace) {
+        if at(p, .RBrace) {
             return FieldsResult { parser: advance(p), fields: fields }
         }
         let field_name = identifier(p, "a field name")
-        let field_type = parse_type(expect(field_name.parser, lexer.TokenKind.Colon))
+        let field_type = parse_type(expect(field_name.parser, .Colon))
         if field_type.parser.failed {
             return FieldsResult { parser: field_type.parser, fields: fields }
         }
@@ -442,7 +442,7 @@ fn parse_fields_block(start: Parser) -> FieldsResult {
 }
 
 fn parse_record(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult {
-    let name = identifier(expect(start, lexer.TokenKind.Type), "a type name")
+    let name = identifier(expect(start, .Type), "a type name")
     if name.parser.failed {
         return dummy_item(name.parser)
     }
@@ -451,18 +451,18 @@ fn parse_record(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResul
         return dummy_item(fields.parser)
     }
     let record = ast.RecordDecl { notes: notes, public: public, name: name.name, name_span: name.span, fields: fields.fields }
-    ItemResult { parser: fields.parser, item: ast.Item.RecordItem(record) }
+    ItemResult { parser: fields.parser, item: .RecordItem(record) }
 }
 
 fn parse_enum(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult {
-    let name = identifier(expect(start, lexer.TokenKind.Enum), "an enum name")
-    var p = expect(name.parser, lexer.TokenKind.LBrace)
+    let name = identifier(expect(start, .Enum), "an enum name")
+    var p = expect(name.parser, .LBrace)
     var variants: List[ast.VariantDecl] = []
     while not p.failed {
         set p = skip_newlines(p)
-        if at(p, lexer.TokenKind.RBrace) {
+        if at(p, .RBrace) {
             let decl = ast.EnumDecl { notes: notes, public: public, name: name.name, name_span: name.span, variants: variants }
-            return ItemResult { parser: advance(p), item: ast.Item.EnumItem(decl) }
+            return ItemResult { parser: advance(p), item: .EnumItem(decl) }
         }
         let variant = identifier(p, "a variant name")
         set p = variant.parser
@@ -470,19 +470,19 @@ fn parse_enum(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult 
             return dummy_item(p)
         }
         var fields: List[ast.Field] = []
-        if at(p, lexer.TokenKind.LParen) {
+        if at(p, .LParen) {
             set p = advance(p)
-            while not at(p, lexer.TokenKind.RParen) {
+            while not at(p, .RParen) {
                 let field_name = identifier(p, "a field name")
-                let field_type = parse_type(expect(field_name.parser, lexer.TokenKind.Colon))
+                let field_type = parse_type(expect(field_name.parser, .Colon))
                 if field_type.parser.failed {
                     return dummy_item(field_type.parser)
                 }
                 set fields = append(fields, ast.Field { name: field_name.name, span: field_name.span, type_expr: field_type.type_expr })
                 set p = field_type.parser
-                if at(p, lexer.TokenKind.Comma) {
+                if at(p, .Comma) {
                     set p = advance(p)
-                } else if not at(p, lexer.TokenKind.RParen) {
+                } else if not at(p, .RParen) {
                     return dummy_item(unexpected(p, "`,` or `)`"))
                 }
             }
@@ -498,14 +498,14 @@ fn parse_enum(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult 
 
 fn parse_block(start: Parser) -> BlockResult {
     let open_span = current_span(start)
-    var p = expect(start, lexer.TokenKind.LBrace)
+    var p = expect(start, .LBrace)
     var statements: List[ast.Statement] = []
     while not p.failed {
         set p = skip_newlines(p)
-        if at(p, lexer.TokenKind.RBrace) {
+        if at(p, .RBrace) {
             break
         }
-        if at(p, lexer.TokenKind.Eof) {
+        if at(p, .Eof) {
             set p = unexpected(p, "`}`")
             break
         }
@@ -519,11 +519,11 @@ fn parse_block(start: Parser) -> BlockResult {
     let close_span = current_span(p)
     set p = advance(p)
     let count = length(statements)
-    var tail: Option[ast.Expr] = Option.None
+    var tail: Option[ast.Expr] = .None
     if count > 0 {
         match statements[count - 1] {
-            ast.Statement.ExprStatement(last) => {
-                set tail = Option.Some(last)
+            .ExprStatement(last) => {
+                set tail = .Some(last)
                 set statements = slice(statements, 0, count - 1)
             }
             _ => {}
@@ -532,68 +532,68 @@ fn parse_block(start: Parser) -> BlockResult {
     BlockResult { parser: p, block: ast.Block { statements: statements, tail: tail, span: source.span_to(open_span, close_span) } }
 }
 
-fn dummy_statement(p: Parser) -> StatementResult = StatementResult { parser: p, statement: ast.Statement.ExprStatement(dummy_expr(p)) }
+fn dummy_statement(p: Parser) -> StatementResult = StatementResult { parser: p, statement: .ExprStatement(dummy_expr(p)) }
 
 fn parse_statement(p: Parser) -> StatementResult {
     let kind = peek(p)
-    if kind == lexer.TokenKind.Let or kind == lexer.TokenKind.Var {
-        let mutable = kind == lexer.TokenKind.Var
+    if kind == .Let or kind == .Var {
+        let mutable = kind == .Var
         let after_keyword = advance(p)
         let name_token = current(after_keyword)
-        let name = if name_token.kind == lexer.TokenKind.Underscore {
+        let name = if name_token.kind == .Underscore {
             "_"
-        } else if name_token.kind == lexer.TokenKind.Ident {
+        } else if name_token.kind == .Ident {
             name_token.text
         } else {
             return dummy_statement(unexpected(after_keyword, "a name"))
         }
         var q = advance(after_keyword)
-        var declared: Option[ast.TypeExpr] = Option.None
-        if at(q, lexer.TokenKind.Colon) {
+        var declared: Option[ast.TypeExpr] = .None
+        if at(q, .Colon) {
             let annotation = parse_type(advance(q))
             if annotation.parser.failed {
                 return dummy_statement(annotation.parser)
             }
-            set declared = Option.Some(annotation.type_expr)
+            set declared = .Some(annotation.type_expr)
             set q = annotation.parser
         }
-        let value = parse_expr(expect(q, lexer.TokenKind.Assign), true)
-        return StatementResult { parser: value.parser, statement: ast.Statement.Let(name, name_token.span, declared, value.expr, mutable) }
+        let value = parse_expr(expect(q, .Assign), true)
+        return StatementResult { parser: value.parser, statement: .Let(name, name_token.span, declared, value.expr, mutable) }
     }
-    if kind == lexer.TokenKind.Set {
+    if kind == .Set {
         let name = identifier(advance(p), "the name of a `var`")
         if name.parser.failed {
             return dummy_statement(name.parser)
         }
-        if not at(name.parser, lexer.TokenKind.Assign) {
+        if not at(name.parser, .Assign) {
             return dummy_statement(unexpected(name.parser, "`=`"))
         }
         let value = parse_expr(advance(name.parser), true)
-        return StatementResult { parser: value.parser, statement: ast.Statement.Set(name.name, name.span, value.expr) }
+        return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, value.expr) }
     }
-    if kind == lexer.TokenKind.For {
+    if kind == .For {
         let variable = identifier(advance(p), "a loop variable name")
-        let iterable = parse_expr(expect(variable.parser, lexer.TokenKind.In), false)
+        let iterable = parse_expr(expect(variable.parser, .In), false)
         if iterable.parser.failed {
             return dummy_statement(iterable.parser)
         }
         let body = parse_block(iterable.parser)
-        return StatementResult { parser: body.parser, statement: ast.Statement.For(variable.name, variable.span, iterable.expr, body.block) }
+        return StatementResult { parser: body.parser, statement: .For(variable.name, variable.span, iterable.expr, body.block) }
     }
-    if kind == lexer.TokenKind.While {
+    if kind == .While {
         let condition = parse_expr(advance(p), false)
         if condition.parser.failed {
             return dummy_statement(condition.parser)
         }
         let body = parse_block(condition.parser)
-        return StatementResult { parser: body.parser, statement: ast.Statement.While(condition.expr, body.block) }
+        return StatementResult { parser: body.parser, statement: .While(condition.expr, body.block) }
     }
-    if kind == lexer.TokenKind.Ident and peek_at(p, 1) == lexer.TokenKind.Assign {
+    if kind == .Ident and peek_at(p, 1) == .Assign {
         let d = source.error_help("E0110", current_span(p), "assignment needs `set`", "declare the variable with `var` and change it with `set name = value`")
         return dummy_statement(fail_parse(p, d))
     }
     let expr = parse_expr(p, true)
-    StatementResult { parser: expr.parser, statement: ast.Statement.ExprStatement(expr.expr) }
+    StatementResult { parser: expr.parser, statement: .ExprStatement(expr.expr) }
 }
 
 // ---------- expressions ----------
@@ -612,7 +612,7 @@ fn parse_expr(p: Parser, allow_record: Bool) -> ExprResult {
 }
 
 fn binary(p: Parser, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> ExprResult {
-    expr_result(p, ast.ExprKind.Binary(op, op_span, left, right), source.span_to(left.span, right.span))
+    expr_result(p, .Binary(op, op_span, left, right), source.span_to(left.span, right.span))
 }
 
 fn parse_logical(p: Parser, allow_record: Bool) -> ExprResult {
@@ -621,11 +621,11 @@ fn parse_logical(p: Parser, allow_record: Bool) -> ExprResult {
         return first
     }
     let kind = peek(first.parser)
-    if kind != lexer.TokenKind.And and kind != lexer.TokenKind.Or {
+    if kind != .And and kind != .Or {
         return first
     }
-    let op = if kind == lexer.TokenKind.And { ast.BinaryOp.And } else { ast.BinaryOp.Or }
-    let other = if kind == lexer.TokenKind.And { lexer.TokenKind.Or } else { lexer.TokenKind.And }
+    let op = if kind == .And { ast.BinaryOp.And } else { ast.BinaryOp.Or }
+    let other = if kind == .And { lexer.TokenKind.Or } else { lexer.TokenKind.And }
     var result = first
     while at(result.parser, kind) {
         let op_span = current_span(result.parser)
@@ -644,25 +644,25 @@ fn parse_logical(p: Parser, allow_record: Bool) -> ExprResult {
 
 fn compare_op(kind: lexer.TokenKind) -> Option[ast.BinaryOp] {
     match kind {
-        lexer.TokenKind.EqEq => Option.Some(ast.BinaryOp.Equal)
-        lexer.TokenKind.NotEq => Option.Some(ast.BinaryOp.NotEqual)
-        lexer.TokenKind.Lt => Option.Some(ast.BinaryOp.Less)
-        lexer.TokenKind.LtEq => Option.Some(ast.BinaryOp.LessEqual)
-        lexer.TokenKind.Gt => Option.Some(ast.BinaryOp.Greater)
-        lexer.TokenKind.GtEq => Option.Some(ast.BinaryOp.GreaterEqual)
-        _ => Option.None
+        .EqEq => .Some(.Equal)
+        .NotEq => .Some(.NotEqual)
+        .Lt => .Some(.Less)
+        .LtEq => .Some(.LessEqual)
+        .Gt => .Some(.Greater)
+        .GtEq => .Some(.GreaterEqual)
+        _ => .None
     }
 }
 
 fn parse_comparison(p: Parser, allow_record: Bool) -> ExprResult {
-    let starts_with_not = at(p, lexer.TokenKind.Not)
+    let starts_with_not = at(p, .Not)
     let left = parse_additive(p, allow_record)
     if left.parser.failed {
         return left
     }
     let op = match compare_op(peek(left.parser)) {
-        Option.Some(found) => found
-        Option.None => return left
+        .Some(found) => found
+        .None => return left
     }
     if starts_with_not {
         let d = source.error_help("E0105", left.expr.span, "`not` before a comparison is ambiguous", "write `not (a == b)` or `(not a) == b`")
@@ -673,7 +673,7 @@ fn parse_comparison(p: Parser, allow_record: Bool) -> ExprResult {
     if right.parser.failed {
         return right
     }
-    if compare_op(peek(right.parser)) != Option.None {
+    if compare_op(peek(right.parser)) != .None {
         let d = source.error_help("E0104", current_span(right.parser), "comparisons cannot be chained", "combine separate comparisons with `and`, e.g. `a < b and b < c`")
         return failed_expr(fail_parse(right.parser, d))
     }
@@ -682,18 +682,18 @@ fn parse_comparison(p: Parser, allow_record: Bool) -> ExprResult {
 
 fn additive_op(kind: lexer.TokenKind) -> Option[ast.BinaryOp] {
     match kind {
-        lexer.TokenKind.Plus => Option.Some(ast.BinaryOp.Add)
-        lexer.TokenKind.Minus => Option.Some(ast.BinaryOp.Subtract)
-        _ => Option.None
+        .Plus => .Some(.Add)
+        .Minus => .Some(.Subtract)
+        _ => .None
     }
 }
 
 fn multiplicative_op(kind: lexer.TokenKind) -> Option[ast.BinaryOp] {
     match kind {
-        lexer.TokenKind.Star => Option.Some(ast.BinaryOp.Multiply)
-        lexer.TokenKind.Slash => Option.Some(ast.BinaryOp.Divide)
-        lexer.TokenKind.Percent => Option.Some(ast.BinaryOp.Remainder)
-        _ => Option.None
+        .Star => .Some(.Multiply)
+        .Slash => .Some(.Divide)
+        .Percent => .Some(.Remainder)
+        _ => .None
     }
 }
 
@@ -701,8 +701,8 @@ fn parse_additive(p: Parser, allow_record: Bool) -> ExprResult {
     var result = parse_multiplicative(p, allow_record)
     while not result.parser.failed {
         let op = match additive_op(peek(result.parser)) {
-            Option.Some(found) => found
-            Option.None => return result
+            .Some(found) => found
+            .None => return result
         }
         let op_span = current_span(result.parser)
         let right = parse_multiplicative(advance(result.parser), allow_record)
@@ -718,8 +718,8 @@ fn parse_multiplicative(p: Parser, allow_record: Bool) -> ExprResult {
     var result = parse_unary(p, allow_record)
     while not result.parser.failed {
         let op = match multiplicative_op(peek(result.parser)) {
-            Option.Some(found) => found
-            Option.None => return result
+            .Some(found) => found
+            .None => return result
         }
         let op_span = current_span(result.parser)
         let right = parse_unary(advance(result.parser), allow_record)
@@ -741,33 +741,33 @@ fn parse_unary(p: Parser, allow_record: Bool) -> ExprResult {
 
 fn parse_unary_inner(p: Parser, allow_record: Bool) -> ExprResult {
     let start = current_span(p)
-    if at(p, lexer.TokenKind.Minus) {
+    if at(p, .Minus) {
         let after_minus = advance(p)
         let number = current(after_minus)
-        if number.kind == lexer.TokenKind.Int {
+        if number.kind == .Int {
             let value = if number.text == min_int_digits() { min_int() } else { -parse_int_text(number.text) }
-            let literal = expr_result(advance(after_minus), ast.ExprKind.IntLiteral(value), source.span_to(start, number.span))
+            let literal = expr_result(advance(after_minus), .IntLiteral(value), source.span_to(start, number.span))
             return parse_postfix(literal)
         }
         let operand = parse_unary(after_minus, allow_record)
         if operand.parser.failed {
             return operand
         }
-        return expr_result(operand.parser, ast.ExprKind.Unary(ast.UnaryOp.Negate, operand.expr), source.span_to(start, operand.expr.span))
+        return expr_result(operand.parser, .Unary(.Negate, operand.expr), source.span_to(start, operand.expr.span))
     }
-    if at(p, lexer.TokenKind.Not) {
+    if at(p, .Not) {
         let operand = parse_unary(advance(p), allow_record)
         if operand.parser.failed {
             return operand
         }
-        return expr_result(operand.parser, ast.ExprKind.Unary(ast.UnaryOp.Not, operand.expr), source.span_to(start, operand.expr.span))
+        return expr_result(operand.parser, .Unary(.Not, operand.expr), source.span_to(start, operand.expr.span))
     }
-    if at(p, lexer.TokenKind.Try) {
+    if at(p, .Try) {
         let operand = parse_unary(advance(p), allow_record)
         if operand.parser.failed {
             return operand
         }
-        return expr_result(operand.parser, ast.ExprKind.Try(operand.expr), source.span_to(start, operand.expr.span))
+        return expr_result(operand.parser, .Try(operand.expr), source.span_to(start, operand.expr.span))
     }
     let primary = parse_primary(p, allow_record)
     if primary.parser.failed {
@@ -780,18 +780,18 @@ fn parse_postfix(start: ExprResult) -> ExprResult {
     var result = start
     while true {
         let p = result.parser
-        if at(p, lexer.TokenKind.LBracket) {
+        if at(p, .LBracket) {
             let index = parse_expr(advance(p), true)
             if index.parser.failed {
                 return index
             }
             let close = current_span(index.parser)
-            let after = expect(index.parser, lexer.TokenKind.RBracket)
+            let after = expect(index.parser, .RBracket)
             if after.failed {
                 return failed_expr(after)
             }
-            set result = expr_result(after, ast.ExprKind.Index(result.expr, index.expr), source.span_to(result.expr.span, close))
-        } else if at(p, lexer.TokenKind.With) {
+            set result = expr_result(after, .Index(result.expr, index.expr), source.span_to(result.expr.span, close))
+        } else if at(p, .With) {
             let update = parse_field_inits(advance(p))
             if update.parser.failed {
                 return failed_expr(update.parser)
@@ -800,17 +800,17 @@ fn parse_postfix(start: ExprResult) -> ExprResult {
                 let d = source.error_help("E0511", update.close, "`with` must change at least one field", "write e.g. `value with { name: new_name }`")
                 return failed_expr(fail_parse(update.parser, d))
             }
-            set result = expr_result(update.parser, ast.ExprKind.RecordUpdate(result.expr, update.fields), source.span_to(result.expr.span, update.close))
-        } else if at(p, lexer.TokenKind.Dot) {
+            set result = expr_result(update.parser, .RecordUpdate(result.expr, update.fields), source.span_to(result.expr.span, update.close))
+        } else if at(p, .Dot) {
             let field = identifier(advance(p), "a field name")
             if field.parser.failed {
                 return failed_expr(field.parser)
             }
-            if at(field.parser, lexer.TokenKind.LParen) {
-                let d = source.error_help("E0110", current_span(field.parser), "Tessera has no method calls", "call the function with the value as first argument, e.g. `" + field.name + "(value, ...)`")
+            if at(field.parser, .LParen) {
+                let d = source.error_help("E0110", current_span(field.parser), "Tessera has no method calls", "call the function with the value as first argument, e.g. `\(field.name)(value, ...)`")
                 return failed_expr(fail_parse(field.parser, d))
             }
-            set result = expr_result(field.parser, ast.ExprKind.FieldAccess(result.expr, field.name, field.span), source.span_to(result.expr.span, field.span))
+            set result = expr_result(field.parser, .FieldAccess(result.expr, field.name, field.span), source.span_to(result.expr.span, field.span))
         } else {
             return result
         }
@@ -828,10 +828,10 @@ fn parse_args(start: Parser, close: lexer.TokenKind) -> ArgsResult {
         }
         set args = append(args, arg.expr)
         set p = arg.parser
-        if at(p, lexer.TokenKind.Comma) {
+        if at(p, .Comma) {
             set p = advance(p)
         } else if not at(p, close) {
-            return ArgsResult { parser: unexpected(p, "`,` or `" + lexer.symbol_text(close) + "`"), args: args, end: current_span(p) }
+            return ArgsResult { parser: unexpected(p, "`,` or `\(lexer.symbol_text(close))`"), args: args, end: current_span(p) }
         }
     }
     let end = current_span(p)
@@ -840,12 +840,12 @@ fn parse_args(start: Parser, close: lexer.TokenKind) -> ArgsResult {
 
 fn ends_return(kind: lexer.TokenKind) -> Bool {
     match kind {
-        lexer.TokenKind.Newline => true
-        lexer.TokenKind.RBrace => true
-        lexer.TokenKind.RParen => true
-        lexer.TokenKind.RBracket => true
-        lexer.TokenKind.Comma => true
-        lexer.TokenKind.Eof => true
+        .Newline => true
+        .RBrace => true
+        .RParen => true
+        .RBracket => true
+        .Comma => true
+        .Eof => true
         _ => false
     }
 }
@@ -854,39 +854,39 @@ fn parse_primary(p: Parser, allow_record: Bool) -> ExprResult {
     let start = current_span(p)
     let t = current(p)
     match t.kind {
-        lexer.TokenKind.Int => {
+        .Int => {
             if t.text == min_int_digits() {
                 return failed_expr(fail_parse(p, source.error_help("E0106", start, "number does not fit in `Int`", "the largest `Int` is 9223372036854775807")))
             }
-            expr_result(advance(p), ast.ExprKind.IntLiteral(parse_int_text(t.text)), start)
+            expr_result(advance(p), .IntLiteral(parse_int_text(t.text)), start)
         }
-        lexer.TokenKind.Text => expr_result(advance(p), ast.ExprKind.TextLiteral(t.text), start)
-        lexer.TokenKind.True => expr_result(advance(p), ast.ExprKind.BoolLiteral(true), start)
-        lexer.TokenKind.False => expr_result(advance(p), ast.ExprKind.BoolLiteral(false), start)
-        lexer.TokenKind.LParen => {
+        .Text => expr_result(advance(p), .TextLiteral(t.text), start)
+        .True => expr_result(advance(p), .BoolLiteral(true), start)
+        .False => expr_result(advance(p), .BoolLiteral(false), start)
+        .LParen => {
             let inside = advance(p)
-            if at(inside, lexer.TokenKind.RParen) {
-                return expr_result(advance(inside), ast.ExprKind.UnitLiteral, source.span_to(start, current_span(inside)))
+            if at(inside, .RParen) {
+                return expr_result(advance(inside), .UnitLiteral, source.span_to(start, current_span(inside)))
             }
             let inner = parse_expr(inside, true)
             if inner.parser.failed {
                 return inner
             }
             let close = current_span(inner.parser)
-            let after = expect(inner.parser, lexer.TokenKind.RParen)
+            let after = expect(inner.parser, .RParen)
             if after.failed {
                 return failed_expr(after)
             }
             ExprResult { parser: after, expr: inner.expr with { span: source.span_to(start, close) } }
         }
-        lexer.TokenKind.LBracket => {
-            let items = parse_args(advance(p), lexer.TokenKind.RBracket)
+        .LBracket => {
+            let items = parse_args(advance(p), .RBracket)
             if items.parser.failed {
                 return failed_expr(items.parser)
             }
-            expr_result(items.parser, ast.ExprKind.ListLiteral(items.args), source.span_to(start, items.end))
+            expr_result(items.parser, .ListLiteral(items.args), source.span_to(start, items.end))
         }
-        lexer.TokenKind.LBrace => {
+        .LBrace => {
             if not allow_record {
                 return failed_expr(fail_parse(p, source.error_help("E0110", start, "a block cannot start here", "wrap the block in parentheses")))
             }
@@ -894,46 +894,47 @@ fn parse_primary(p: Parser, allow_record: Bool) -> ExprResult {
             if block.parser.failed {
                 return failed_expr(block.parser)
             }
-            expr_result(block.parser, ast.ExprKind.BlockExpr(block.block), block.block.span)
+            expr_result(block.parser, .BlockExpr(block.block), block.block.span)
         }
-        lexer.TokenKind.If => parse_if(p)
-        lexer.TokenKind.Match => parse_match(p)
-        lexer.TokenKind.Return => {
+        .If => parse_if(p)
+        .Match => parse_match(p)
+        .Return => {
             let after = advance(p)
             if ends_return(peek(after)) {
-                return expr_result(after, ast.ExprKind.Return(Option.None), start)
+                return expr_result(after, .Return(.None), start)
             }
             let value = parse_expr(after, allow_record)
             if value.parser.failed {
                 return value
             }
-            expr_result(value.parser, ast.ExprKind.Return(Option.Some(value.expr)), source.span_to(start, value.expr.span))
+            expr_result(value.parser, .Return(.Some(value.expr)), source.span_to(start, value.expr.span))
         }
-        lexer.TokenKind.Break => expr_result(advance(p), ast.ExprKind.Break, start)
-        lexer.TokenKind.Continue => expr_result(advance(p), ast.ExprKind.Continue, start)
-        lexer.TokenKind.Ident => parse_name(p, t, allow_record)
+        .Break => expr_result(advance(p), .Break, start)
+        .Dot => parse_shorthand_variant(p)
+        .Continue => expr_result(advance(p), .Continue, start)
+        .Ident => parse_name(p, t, allow_record)
         _ => failed_expr(unexpected(p, "an expression"))
     }
 }
 
 fn is_qualified_type(p: Parser) -> Bool {
-    peek(p) == lexer.TokenKind.Dot and peek_at(p, 1) == lexer.TokenKind.Ident and source.starts_with_upper(p.tokens[p.pos + 1].text)
+    peek(p) == .Dot and peek_at(p, 1) == .Ident and source.starts_with_upper(p.tokens[p.pos + 1].text)
 }
 
 fn parse_name(p: Parser, t: lexer.Token, allow_record: Bool) -> ExprResult {
     let after_name = advance(p)
     if not source.starts_with_upper(t.text) and is_qualified_type(after_name) {
         let member = after_name.tokens[after_name.pos + 1]
-        let qualified = lexer.Token { kind: lexer.TokenKind.Ident, text: t.text + "." + member.text, span: source.span_to(t.span, member.span) }
+        let qualified = lexer.Token { kind: .Ident, text: "\(t.text).\(member.text)", span: source.span_to(t.span, member.span) }
         return parse_type_use(after_name with { pos: after_name.pos + 1 }, qualified, allow_record)
     }
-    if not source.starts_with_upper(t.text) and peek(after_name) == lexer.TokenKind.Dot and peek_at(after_name, 1) == lexer.TokenKind.Ident and peek_at(after_name, 2) == lexer.TokenKind.LParen {
+    if not source.starts_with_upper(t.text) and peek(after_name) == .Dot and peek_at(after_name, 1) == .Ident and peek_at(after_name, 2) == .LParen {
         let member = after_name.tokens[after_name.pos + 1]
-        let args = parse_args(after_name with { pos: after_name.pos + 3 }, lexer.TokenKind.RParen)
+        let args = parse_args(after_name with { pos: after_name.pos + 3 }, .RParen)
         if args.parser.failed {
             return failed_expr(args.parser)
         }
-        return expr_result(args.parser, ast.ExprKind.Call(t.text + "." + member.text, source.span_to(t.span, member.span), args.args), source.span_to(t.span, args.end))
+        return expr_result(args.parser, .Call("\(t.text).\(member.text)", source.span_to(t.span, member.span), args.args), source.span_to(t.span, args.end))
     }
     parse_type_use(p, t, allow_record)
 }
@@ -943,38 +944,38 @@ fn parse_type_use(p: Parser, t: lexer.Token, allow_record: Bool) -> ExprResult {
     let start = t.span
     let after = advance(p)
     if source.starts_with_upper(t.text) or not is_snake_case_name(t.text) {
-        if at(after, lexer.TokenKind.Dot) {
+        if at(after, .Dot) {
             let variant = identifier(advance(after), "a variant name")
             if variant.parser.failed {
                 return failed_expr(variant.parser)
             }
-            if at(variant.parser, lexer.TokenKind.LParen) {
-                let args = parse_args(advance(variant.parser), lexer.TokenKind.RParen)
+            if at(variant.parser, .LParen) {
+                let args = parse_args(advance(variant.parser), .RParen)
                 if args.parser.failed {
                     return failed_expr(args.parser)
                 }
-                return expr_result(args.parser, ast.ExprKind.VariantLiteral(t.text, variant.name, variant.span, args.args), source.span_to(start, args.end))
+                return expr_result(args.parser, .VariantLiteral(t.text, variant.name, variant.span, args.args), source.span_to(start, args.end))
             }
-            return expr_result(variant.parser, ast.ExprKind.VariantLiteral(t.text, variant.name, variant.span, []), source.span_to(start, variant.span))
+            return expr_result(variant.parser, .VariantLiteral(t.text, variant.name, variant.span, []), source.span_to(start, variant.span))
         }
-        if at(after, lexer.TokenKind.LBrace) and allow_record {
+        if at(after, .LBrace) and allow_record {
             return parse_record_literal(after, t.text, start)
         }
-        if at(after, lexer.TokenKind.LBrace) {
-            let d = source.error_help("E0110", start, "a record literal cannot appear here without parentheses", "in `if`, `while`, `for` and `match` headers `{` starts the body; write `(" + t.text + " { ... })`")
+        if at(after, .LBrace) {
+            let d = source.error_help("E0110", start, "a record literal cannot appear here without parentheses", "in `if`, `while`, `for` and `match` headers `{` starts the body; write `(\(t.text) { ... })`")
             return failed_expr(fail_parse(after, d))
         }
-        let d = source.error_help("E0110", start, "type name `" + t.text + "` cannot be used as a value", "build a record with `" + t.text + " { field: value }` or an enum value with `" + t.text + ".Variant`")
+        let d = source.error_help("E0110", start, "type name `\(t.text)` cannot be used as a value", "build a record with `\(t.text) { field: value }` or an enum value with `\(t.text).Variant`")
         return failed_expr(fail_parse(after, d))
     }
-    if at(after, lexer.TokenKind.LParen) {
-        let args = parse_args(advance(after), lexer.TokenKind.RParen)
+    if at(after, .LParen) {
+        let args = parse_args(advance(after), .RParen)
         if args.parser.failed {
             return failed_expr(args.parser)
         }
-        return expr_result(args.parser, ast.ExprKind.Call(t.text, start, args.args), source.span_to(start, args.end))
+        return expr_result(args.parser, .Call(t.text, start, args.args), source.span_to(start, args.end))
     }
-    expr_result(after, ast.ExprKind.Name(t.text), start)
+    expr_result(after, .Name(t.text), start)
 }
 
 type FieldInitsResult {
@@ -985,23 +986,23 @@ type FieldInitsResult {
 
 note "Parses `{ name: value, ... }`, as used by record literals and `with` updates."
 fn parse_field_inits(start: Parser) -> FieldInitsResult {
-    var p = expect(start, lexer.TokenKind.LBrace)
+    var p = expect(start, .LBrace)
     var fields: List[ast.FieldInit] = []
     while not p.failed {
         set p = skip_newlines(p)
-        if at(p, lexer.TokenKind.RBrace) {
+        if at(p, .RBrace) {
             break
         }
         let field = identifier(p, "a field name")
-        let value = parse_expr(expect(field.parser, lexer.TokenKind.Colon), true)
+        let value = parse_expr(expect(field.parser, .Colon), true)
         if value.parser.failed {
             return FieldInitsResult { parser: value.parser, fields: fields, close: current_span(value.parser) }
         }
         set fields = append(fields, ast.FieldInit { name: field.name, span: field.span, value: value.expr })
         set p = skip_newlines(value.parser)
-        if at(p, lexer.TokenKind.Comma) {
+        if at(p, .Comma) {
             set p = advance(p)
-        } else if not at(p, lexer.TokenKind.RBrace) {
+        } else if not at(p, .RBrace) {
             set p = unexpected(p, "`,` or `}`")
         }
     }
@@ -1011,24 +1012,41 @@ fn parse_field_inits(start: Parser) -> FieldInitsResult {
     FieldInitsResult { parser: advance(p), fields: fields, close: current_span(p) }
 }
 
+note "`.Variant` or `.Variant(args)`: the checker finds the type from the context."
+fn parse_shorthand_variant(p: Parser) -> ExprResult {
+    let start = current_span(p)
+    let variant = identifier(advance(p), "a variant name after `.`")
+    if variant.parser.failed {
+        return failed_expr(variant.parser)
+    }
+    if at(variant.parser, .LParen) {
+        let args = parse_args(advance(variant.parser), .RParen)
+        if args.parser.failed {
+            return failed_expr(args.parser)
+        }
+        return expr_result(args.parser, .VariantLiteral("", variant.name, variant.span, args.args), source.span_to(start, args.end))
+    }
+    expr_result(variant.parser, .VariantLiteral("", variant.name, variant.span, []), source.span_to(start, variant.span))
+}
+
 fn parse_record_literal(start: Parser, type_name: Text, type_span: source.Span) -> ExprResult {
-    var p = expect(start, lexer.TokenKind.LBrace)
+    var p = expect(start, .LBrace)
     var fields: List[ast.FieldInit] = []
     while not p.failed {
         set p = skip_newlines(p)
-        if at(p, lexer.TokenKind.RBrace) {
+        if at(p, .RBrace) {
             break
         }
         let field = identifier(p, "a field name")
-        let value = parse_expr(expect(field.parser, lexer.TokenKind.Colon), true)
+        let value = parse_expr(expect(field.parser, .Colon), true)
         if value.parser.failed {
             return value
         }
         set fields = append(fields, ast.FieldInit { name: field.name, span: field.span, value: value.expr })
         set p = skip_newlines(value.parser)
-        if at(p, lexer.TokenKind.Comma) {
+        if at(p, .Comma) {
             set p = advance(p)
-        } else if not at(p, lexer.TokenKind.RBrace) {
+        } else if not at(p, .RBrace) {
             set p = unexpected(p, "`,` or `}`")
         }
     }
@@ -1036,7 +1054,7 @@ fn parse_record_literal(start: Parser, type_name: Text, type_span: source.Span) 
         return failed_expr(p)
     }
     let close = current_span(p)
-    expr_result(advance(p), ast.ExprKind.RecordLiteral(type_name, type_span, fields), source.span_to(type_span, close))
+    expr_result(advance(p), .RecordLiteral(type_name, type_span, fields), source.span_to(type_span, close))
 }
 
 fn parse_if(p: Parser) -> ExprResult {
@@ -1050,13 +1068,13 @@ fn parse_if(p: Parser) -> ExprResult {
         return failed_expr(then_block.parser)
     }
     let after = then_block.parser
-    if at(after, lexer.TokenKind.Else) {
+    if at(after, .Else) {
         let else_start = advance(after)
-        let else_branch = if at(else_start, lexer.TokenKind.If) {
+        let else_branch = if at(else_start, .If) {
             parse_if(else_start)
         } else {
             let else_block = parse_block(else_start)
-            expr_result(else_block.parser, ast.ExprKind.BlockExpr(else_block.block), else_block.block.span)
+            expr_result(else_block.parser, .BlockExpr(else_block.block), else_block.block.span)
         }
         if else_branch.parser.failed {
             return else_branch
@@ -1064,25 +1082,25 @@ fn parse_if(p: Parser) -> ExprResult {
         let kind = ast.ExprKind.If(condition.expr, then_block.block, Option.Some(else_branch.expr))
         return expr_result(else_branch.parser, kind, source.span_to(start, else_branch.expr.span))
     }
-    if at(after, lexer.TokenKind.Newline) and peek_at(after, 1) == lexer.TokenKind.Else {
+    if at(after, .Newline) and peek_at(after, 1) == .Else {
         let d = source.error_help("E0111", after.tokens[after.pos + 1].span, "`else` must be on the same line as the closing `}`", "write `} else {`")
         return failed_expr(fail_parse(after, d))
     }
-    expr_result(after, ast.ExprKind.If(condition.expr, then_block.block, Option.None), source.span_to(start, then_block.block.span))
+    expr_result(after, .If(condition.expr, then_block.block, .None), source.span_to(start, then_block.block.span))
 }
 
 fn parse_match(p: Parser) -> ExprResult {
     let start = current_span(p)
     let scrutinee = parse_expr(advance(p), false)
-    var q = expect(scrutinee.parser, lexer.TokenKind.LBrace)
+    var q = expect(scrutinee.parser, .LBrace)
     var arms: List[ast.Arm] = []
     while not q.failed {
         set q = skip_newlines(q)
-        if at(q, lexer.TokenKind.RBrace) {
+        if at(q, .RBrace) {
             break
         }
         let pattern = parse_pattern(q)
-        let body = parse_expr(expect(pattern.parser, lexer.TokenKind.FatArrow), true)
+        let body = parse_expr(expect(pattern.parser, .FatArrow), true)
         if body.parser.failed {
             return body
         }
@@ -1093,14 +1111,14 @@ fn parse_match(p: Parser) -> ExprResult {
         return failed_expr(q)
     }
     let close = current_span(q)
-    expr_result(advance(q), ast.ExprKind.Match(scrutinee.expr, arms), source.span_to(start, close))
+    expr_result(advance(q), .Match(scrutinee.expr, arms), source.span_to(start, close))
 }
 
 fn pattern_result(p: Parser, kind: ast.PatternKind, start: source.Span) -> PatternResult {
     PatternResult { parser: p, pattern: ast.Pattern { kind: kind, span: source.span_to(start, previous_span(p)) } }
 }
 
-fn failed_pattern(p: Parser) -> PatternResult = PatternResult { parser: p, pattern: ast.Pattern { kind: ast.PatternKind.Wildcard, span: current_span(p) } }
+fn failed_pattern(p: Parser) -> PatternResult = PatternResult { parser: p, pattern: ast.Pattern { kind: .Wildcard, span: current_span(p) } }
 
 fn parse_pattern(p: Parser) -> PatternResult {
     if p.failed {
@@ -1109,62 +1127,68 @@ fn parse_pattern(p: Parser) -> PatternResult {
     let start = current_span(p)
     let t = current(p)
     match t.kind {
-        lexer.TokenKind.Underscore => pattern_result(advance(p), ast.PatternKind.Wildcard, start)
-        lexer.TokenKind.Int => {
+        .Underscore => pattern_result(advance(p), .Wildcard, start)
+        .Int => {
             if t.text == min_int_digits() {
                 return failed_pattern(fail_parse(p, source.error("E0106", start, "number does not fit in `Int`")))
             }
-            pattern_result(advance(p), ast.PatternKind.IntPattern(parse_int_text(t.text)), start)
+            pattern_result(advance(p), .IntPattern(parse_int_text(t.text)), start)
         }
-        lexer.TokenKind.Minus => {
+        .Minus => {
             let number = current(advance(p))
-            if number.kind != lexer.TokenKind.Int {
+            if number.kind != .Int {
                 return failed_pattern(unexpected(advance(p), "a number"))
             }
             let value = if number.text == min_int_digits() { min_int() } else { -parse_int_text(number.text) }
-            pattern_result(advance(advance(p)), ast.PatternKind.IntPattern(value), start)
+            pattern_result(advance(advance(p)), .IntPattern(value), start)
         }
-        lexer.TokenKind.Text => pattern_result(advance(p), ast.PatternKind.TextPattern(t.text), start)
-        lexer.TokenKind.True => pattern_result(advance(p), ast.PatternKind.BoolPattern(true), start)
-        lexer.TokenKind.False => pattern_result(advance(p), ast.PatternKind.BoolPattern(false), start)
-        lexer.TokenKind.Ident => {
+        .Text => pattern_result(advance(p), .TextPattern(t.text), start)
+        .True => pattern_result(advance(p), .BoolPattern(true), start)
+        .False => pattern_result(advance(p), .BoolPattern(false), start)
+        .Dot => parse_variant_pattern(p, "", start)
+        .Ident => {
             var type_name = t.text
             var after_type = advance(p)
             if not source.starts_with_upper(t.text) {
                 if not is_qualified_type(after_type) {
                     return failed_pattern(unexpected(p, "a pattern (`_`, a literal, or `Type.Variant`)"))
                 }
-                set type_name = t.text + "." + after_type.tokens[after_type.pos + 1].text
+                set type_name = "\(t.text).\(after_type.tokens[after_type.pos + 1].text)"
                 set after_type = after_type with { pos: after_type.pos + 2 }
             }
-            let variant = identifier(expect(after_type, lexer.TokenKind.Dot), "a variant name")
-            if variant.parser.failed {
-                return failed_pattern(variant.parser)
-            }
-            var q = variant.parser
-            var bindings: List[ast.Binding] = []
-            if at(q, lexer.TokenKind.LParen) {
-                set q = advance(q)
-                while not at(q, lexer.TokenKind.RParen) {
-                    let b = current(q)
-                    if b.kind == lexer.TokenKind.Underscore {
-                        set bindings = append(bindings, ast.Binding { name: "_", span: b.span })
-                    } else if b.kind == lexer.TokenKind.Ident {
-                        set bindings = append(bindings, ast.Binding { name: b.text, span: b.span })
-                    } else {
-                        return failed_pattern(unexpected(q, "a binding name or `_`"))
-                    }
-                    set q = advance(q)
-                    if at(q, lexer.TokenKind.Comma) {
-                        set q = advance(q)
-                    } else if not at(q, lexer.TokenKind.RParen) {
-                        return failed_pattern(unexpected(q, "`,` or `)`"))
-                    }
-                }
-                set q = advance(q)
-            }
-            pattern_result(q, ast.PatternKind.VariantPattern(type_name, variant.name, bindings), start)
+            parse_variant_pattern(after_type, type_name, start)
         }
         _ => failed_pattern(unexpected(p, "a pattern (`_`, a literal, or `Type.Variant`)"))
     }
+}
+
+note "From the `.` before the variant name; `type_name` is empty for the `.Variant` shorthand."
+fn parse_variant_pattern(after_type: Parser, type_name: Text, start: source.Span) -> PatternResult {
+    let variant = identifier(expect(after_type, .Dot), "a variant name")
+    if variant.parser.failed {
+        return failed_pattern(variant.parser)
+    }
+    var q = variant.parser
+    var bindings: List[ast.Binding] = []
+    if at(q, .LParen) {
+        set q = advance(q)
+        while not at(q, .RParen) {
+            let b = current(q)
+            if b.kind == .Underscore {
+                set bindings = append(bindings, ast.Binding { name: "_", span: b.span })
+            } else if b.kind == .Ident {
+                set bindings = append(bindings, ast.Binding { name: b.text, span: b.span })
+            } else {
+                return failed_pattern(unexpected(q, "a binding name or `_`"))
+            }
+            set q = advance(q)
+            if at(q, .Comma) {
+                set q = advance(q)
+            } else if not at(q, .RParen) {
+                return failed_pattern(unexpected(q, "`,` or `)`"))
+            }
+        }
+        set q = advance(q)
+    }
+    pattern_result(q, .VariantPattern(type_name, variant.name, bindings), start)
 }

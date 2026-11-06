@@ -1,0 +1,61 @@
+enum Tree {
+    Leaf
+    Node(left: Tree, value: Int, right: Tree)
+}
+
+fn parse(text: Text) -> Int {
+    let codes = code_points(text)
+    var sign = 1
+    var start = 0
+    if codes[0] == 45 {
+        set sign = -1
+        set start = 1
+    }
+    var value = 0
+    for index in range(start, length(codes)) {
+        set value = value * 10 + (codes[index] - 48)
+    }
+    sign * value
+}
+
+fn insert(tree: Tree, value: Int) -> Tree {
+    match tree {
+        Tree.Leaf => Tree.Node(Tree.Leaf, value, Tree.Leaf)
+        Tree.Node(left, current, right) => {
+            if value < current {
+                Tree.Node(insert(left, value), current, right)
+            } else if value > current {
+                Tree.Node(left, current, insert(right, value))
+            } else {
+                tree
+            }
+        }
+    }
+}
+
+fn in_order(tree: Tree) -> List[Text] {
+    match tree {
+        Tree.Leaf => []
+        Tree.Node(left, value, right) => concat(append(in_order(left), to_text(value)), in_order(right))
+    }
+}
+
+fn height(tree: Tree) -> Int {
+    match tree {
+        Tree.Leaf => 0
+        Tree.Node(left, _, right) => {
+            let a = height(left)
+            let b = height(right)
+            1 + (if a > b { a } else { b })
+        }
+    }
+}
+
+fn main() -> Unit uses io, env {
+    var tree = Tree.Leaf
+    for argument in args() {
+        set tree = insert(tree, parse(argument))
+    }
+    print(join(in_order(tree), " "))
+    print("height: " + to_text(height(tree)))
+}

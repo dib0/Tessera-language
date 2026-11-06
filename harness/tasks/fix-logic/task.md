@@ -1,0 +1,1 @@
+The program below compiles but is wrong. For each command-line argument it should print the word, a colon, a space and the number of vowels in it (`a`, `e`, `i`, `o`, `u`, upper or lower case), for example `Banana: 3`. At the end it should print `total: T` with the total number of vowels. Find and fix the bugs.

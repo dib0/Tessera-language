@@ -1,0 +1,46 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "deposit:100",
+        "withdraw:30",
+        "deposit:5"
+      ],
+      "stdout": "balance: 75\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "deposit:10",
+        "withdraw:11"
+      ],
+      "stdout": "error: insufficient funds at transaction 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:10",
+        "steal:5"
+      ],
+      "stdout": "error: invalid transaction at 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:x"
+      ],
+      "stdout": "error: invalid transaction at 1\n",
+      "exit": 1
+    },
+    {
+      "args": [],
+      "stdout": "balance: 0\n",
+      "exit": 0
+    }
+  ]
+}

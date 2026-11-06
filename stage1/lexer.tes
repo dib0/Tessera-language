@@ -72,76 +72,78 @@ pub type LexResult {
     diagnostics: List[source.Diagnostic]
 }
 
+note "`expansion` replaces `token` when not empty (text literals with `\\(...)` interpolation)."
 type Scan {
     token: Token
     end: Int
     diagnostics: List[source.Diagnostic]
     emit: Bool
+    expansion: List[Token]
 }
 
 pub fn symbol_text(kind: TokenKind) -> Text {
     match kind {
-        TokenKind.Fn => "fn"
-        TokenKind.Let => "let"
-        TokenKind.Var => "var"
-        TokenKind.Set => "set"
-        TokenKind.If => "if"
-        TokenKind.Else => "else"
-        TokenKind.For => "for"
-        TokenKind.In => "in"
-        TokenKind.While => "while"
-        TokenKind.Note => "note"
-        TokenKind.Uses => "uses"
-        TokenKind.And => "and"
-        TokenKind.Or => "or"
-        TokenKind.Not => "not"
-        TokenKind.True => "true"
-        TokenKind.False => "false"
-        TokenKind.Type => "type"
-        TokenKind.Enum => "enum"
-        TokenKind.Match => "match"
-        TokenKind.Return => "return"
-        TokenKind.Break => "break"
-        TokenKind.Continue => "continue"
-        TokenKind.Import => "import"
-        TokenKind.Pub => "pub"
-        TokenKind.With => "with"
-        TokenKind.Try => "try"
-        TokenKind.Underscore => "_"
-        TokenKind.LParen => "("
-        TokenKind.RParen => ")"
-        TokenKind.LBracket => "["
-        TokenKind.RBracket => "]"
-        TokenKind.LBrace => "{"
-        TokenKind.RBrace => "}"
-        TokenKind.Comma => ","
-        TokenKind.Colon => ":"
-        TokenKind.Dot => "."
-        TokenKind.Arrow => "->"
-        TokenKind.FatArrow => "=>"
-        TokenKind.Assign => "="
-        TokenKind.EqEq => "=="
-        TokenKind.NotEq => "!="
-        TokenKind.Lt => "<"
-        TokenKind.LtEq => "<="
-        TokenKind.Gt => ">"
-        TokenKind.GtEq => ">="
-        TokenKind.Plus => "+"
-        TokenKind.Minus => "-"
-        TokenKind.Star => "*"
-        TokenKind.Slash => "/"
-        TokenKind.Percent => "%"
+        .Fn => "fn"
+        .Let => "let"
+        .Var => "var"
+        .Set => "set"
+        .If => "if"
+        .Else => "else"
+        .For => "for"
+        .In => "in"
+        .While => "while"
+        .Note => "note"
+        .Uses => "uses"
+        .And => "and"
+        .Or => "or"
+        .Not => "not"
+        .True => "true"
+        .False => "false"
+        .Type => "type"
+        .Enum => "enum"
+        .Match => "match"
+        .Return => "return"
+        .Break => "break"
+        .Continue => "continue"
+        .Import => "import"
+        .Pub => "pub"
+        .With => "with"
+        .Try => "try"
+        .Underscore => "_"
+        .LParen => "("
+        .RParen => ")"
+        .LBracket => "["
+        .RBracket => "]"
+        .LBrace => "{"
+        .RBrace => "}"
+        .Comma => ","
+        .Colon => ":"
+        .Dot => "."
+        .Arrow => "->"
+        .FatArrow => "=>"
+        .Assign => "="
+        .EqEq => "=="
+        .NotEq => "!="
+        .Lt => "<"
+        .LtEq => "<="
+        .Gt => ">"
+        .GtEq => ">="
+        .Plus => "+"
+        .Minus => "-"
+        .Star => "*"
+        .Slash => "/"
+        .Percent => "%"
         _ => "?"
     }
 }
 
 pub fn describe_token(token: Token) -> Text {
     match token.kind {
-        TokenKind.Int => "number `" + token.text + "`"
-        TokenKind.Text => "text literal"
-        TokenKind.Ident => "name `" + token.text + "`"
-        TokenKind.Newline => "end of line"
-        TokenKind.Eof => "end of file"
+        .Int => "number `" + token.text + "`"
+        .Text => "text literal"
+        .Ident => "name `" + token.text + "`"
+        .Newline => "end of line"
+        .Eof => "end of file"
         _ => "`" + symbol_text(token.kind) + "`"
     }
 }
@@ -149,61 +151,61 @@ pub fn describe_token(token: Token) -> Text {
 note "A line ending in one of these tokens continues on the next line (spec 4.6)."
 fn continues_line(kind: TokenKind) -> Bool {
     match kind {
-        TokenKind.Comma => true
-        TokenKind.Assign => true
-        TokenKind.Arrow => true
-        TokenKind.FatArrow => true
-        TokenKind.EqEq => true
-        TokenKind.NotEq => true
-        TokenKind.Lt => true
-        TokenKind.LtEq => true
-        TokenKind.Gt => true
-        TokenKind.GtEq => true
-        TokenKind.Plus => true
-        TokenKind.Minus => true
-        TokenKind.Star => true
-        TokenKind.Slash => true
-        TokenKind.Percent => true
-        TokenKind.And => true
-        TokenKind.Or => true
-        TokenKind.Not => true
-        TokenKind.Dot => true
-        TokenKind.LParen => true
-        TokenKind.LBracket => true
-        TokenKind.LBrace => true
+        .Comma => true
+        .Assign => true
+        .Arrow => true
+        .FatArrow => true
+        .EqEq => true
+        .NotEq => true
+        .Lt => true
+        .LtEq => true
+        .Gt => true
+        .GtEq => true
+        .Plus => true
+        .Minus => true
+        .Star => true
+        .Slash => true
+        .Percent => true
+        .And => true
+        .Or => true
+        .Not => true
+        .Dot => true
+        .LParen => true
+        .LBracket => true
+        .LBrace => true
         _ => false
     }
 }
 
 fn keyword_kind(word: Text) -> TokenKind {
     match word {
-        "fn" => TokenKind.Fn
-        "let" => TokenKind.Let
-        "var" => TokenKind.Var
-        "set" => TokenKind.Set
-        "if" => TokenKind.If
-        "else" => TokenKind.Else
-        "for" => TokenKind.For
-        "in" => TokenKind.In
-        "while" => TokenKind.While
-        "note" => TokenKind.Note
-        "uses" => TokenKind.Uses
-        "and" => TokenKind.And
-        "or" => TokenKind.Or
-        "not" => TokenKind.Not
-        "true" => TokenKind.True
-        "false" => TokenKind.False
-        "type" => TokenKind.Type
-        "enum" => TokenKind.Enum
-        "match" => TokenKind.Match
-        "return" => TokenKind.Return
-        "break" => TokenKind.Break
-        "continue" => TokenKind.Continue
-        "import" => TokenKind.Import
-        "pub" => TokenKind.Pub
-        "with" => TokenKind.With
-        "try" => TokenKind.Try
-        _ => TokenKind.Ident
+        "fn" => .Fn
+        "let" => .Let
+        "var" => .Var
+        "set" => .Set
+        "if" => .If
+        "else" => .Else
+        "for" => .For
+        "in" => .In
+        "while" => .While
+        "note" => .Note
+        "uses" => .Uses
+        "and" => .And
+        "or" => .Or
+        "not" => .Not
+        "true" => .True
+        "false" => .False
+        "type" => .Type
+        "enum" => .Enum
+        "match" => .Match
+        "return" => .Return
+        "break" => .Break
+        "continue" => .Continue
+        "import" => .Import
+        "pub" => .Pub
+        "with" => .With
+        "try" => .Try
+        _ => .Ident
     }
 }
 
@@ -224,11 +226,11 @@ fn newline_allowed(tokens: List[Token], open_kinds: List[Int]) -> Bool {
         return false
     }
     let last = tokens[count - 1].kind
-    not (last == TokenKind.Newline or continues_line(last))
+    not (last == .Newline or continues_line(last))
 }
 
 fn non_ascii_letter(code: Int, span: source.Span) -> source.Diagnostic {
-    source.error_help("E0103", span, "non-ASCII letter `" + from_code_point(code) + "` in a name", "names use ASCII letters, digits and `_` only; this prevents look-alike characters (homoglyphs)")
+    source.error_help("E0103", span, "non-ASCII letter `\(from_code_point(code))` in a name", "names use ASCII letters, digits and `_` only; this prevents look-alike characters (homoglyphs)")
 }
 
 fn scan_word(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> Scan {
@@ -248,10 +250,10 @@ fn scan_word(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> Sc
     let word = from_code_points(name)
     let span = source.span_of(file, line, col, col + index - start)
     let kind = keyword_kind(word)
-    if kind == TokenKind.Ident and source.contains_text(reserved_words(), word) {
-        set diagnostics = append(diagnostics, source.error_help("E0108", span, "`" + word + "` is a reserved word", "choose a different name"))
+    if kind == .Ident and source.contains_text(reserved_words(), word) {
+        set diagnostics = append(diagnostics, source.error_help("E0108", span, "`\(word)` is a reserved word", "choose a different name"))
     }
-    Scan { token: token(kind, word, span), end: index, diagnostics: diagnostics, emit: true }
+    Scan { token: token(kind, word, span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
 }
 
 note "Digits compared as text: `a` is larger than `b` when both have the same length."
@@ -285,8 +287,8 @@ fn scan_number(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> 
     let raw = from_code_points(raw_codes)
     let span = source.span_of(file, line, col, col + index - start)
     if bad_suffix {
-        let d = source.error_help("E0106", span, "invalid number `" + raw + "`", "numbers are decimal digits only, optionally separated by `_`")
-        return Scan { token: token(TokenKind.Int, "0", span), end: index, diagnostics: [d], emit: true }
+        let d = source.error_help("E0106", span, "invalid number `\(raw)`", "numbers are decimal digits only, optionally separated by `_`")
+        return Scan { token: token(.Int, "0", span), end: index, diagnostics: [d], emit: true, expansion: [] }
     }
     var diagnostics: List[source.Diagnostic] = []
     let raw_count = length(raw_codes)
@@ -297,24 +299,83 @@ fn scan_number(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> 
         }
     }
     if raw_codes[raw_count - 1] == 95 or double_underscore {
-        set diagnostics = append(diagnostics, source.error_help("E0106", span, "invalid number `" + raw + "`", "`_` may only appear between digits, e.g. `1_000_000`"))
+        set diagnostics = append(diagnostics, source.error_help("E0106", span, "invalid number `\(raw)`", "`_` may only appear between digits, e.g. `1_000_000`"))
     }
     if length(digits) > 1 and digits[0] == 48 {
-        set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `" + raw + "` has a leading zero", "leading zeros are not allowed; write the number without them"))
+        set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `\(raw)` has a leading zero", "leading zeros are not allowed; write the number without them"))
     }
     var text = from_code_points(digits)
     if digits_greater(digits, code_points("9223372036854775808")) {
-        set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `" + raw + "` does not fit in `Int`", "`Int` is a signed 64-bit integer: -9223372036854775808 to 9223372036854775807"))
+        set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `\(raw)` does not fit in `Int`", "`Int` is a signed 64-bit integer: -9223372036854775808 to 9223372036854775807"))
         set text = "0"
     }
-    Scan { token: token(TokenKind.Int, text, span), end: index, diagnostics: diagnostics, emit: true }
+    Scan { token: token(.Int, text, span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
 }
 
+note "Index of the `)` that closes an interpolation whose code starts at `start`, or -1 if the line ends first."
+fn interpolation_end(codes: List[Int], start: Int) -> Int {
+    var depth = 1
+    var index = start
+    while index < length(codes) {
+        let code = codes[index]
+        if code == 10 {
+            return -1
+        }
+        if code == 34 {
+            set index = text_end(codes, index)
+            if index < 0 {
+                return -1
+            }
+            continue
+        }
+        if code == 40 {
+            set depth = depth + 1
+        } else if code == 41 {
+            set depth = depth - 1
+            if depth == 0 {
+                return index
+            }
+        }
+        set index = index + 1
+    }
+    -1
+}
+
+note "Index just after the closing quote of the text literal that starts at `start`, or -1."
+fn text_end(codes: List[Int], start: Int) -> Int {
+    var index = start + 1
+    while index < length(codes) {
+        let code = codes[index]
+        if code == 10 {
+            return -1
+        }
+        if code == 34 {
+            return index + 1
+        }
+        if code == 92 and index + 1 < length(codes) and codes[index + 1] == 40 {
+            let close = interpolation_end(codes, index + 2)
+            if close < 0 {
+                return -1
+            }
+            set index = close + 1
+        } else if code == 92 {
+            set index = index + 2
+        } else {
+            set index = index + 1
+        }
+    }
+    -1
+}
+
+note "`\\(expr)` in a text literal becomes `(\"before\" + to_text(expr) + \"after\")`."
 fn scan_text(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> Scan {
     var index = start + 1
     var value: List[Int] = []
     var diagnostics: List[source.Diagnostic] = []
     var closed = false
+    var pieces: List[Token] = []
+    var interpolated = false
+    var segment_col = col
     while not closed {
         if index >= length(codes) or codes[index] == 10 {
             let open_span = source.span_of(file, line, col, col + index - start)
@@ -326,6 +387,30 @@ fn scan_text(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> Sc
         if code == 34 {
             set index = index + 1
             set closed = true
+        } else if code == 92 and index + 1 < length(codes) and codes[index + 1] == 40 {
+            let here_span = source.span_of(file, line, here, here + 2)
+            let close = interpolation_end(codes, index + 2)
+            if close < 0 {
+                set diagnostics = append(diagnostics, source.error_help("E0109", here_span, "`\\(` is not closed on this line", "write `\\(expression)`; the expression ends at the matching `)`"))
+                set index = length(codes)
+                break
+            }
+            if close == index + 2 {
+                set diagnostics = append(diagnostics, source.error_help("E0109", here_span, "empty interpolation `\\()`", "put an expression between the parentheses, e.g. `\\(count)`"))
+            } else {
+                let inner = tokenize_range(codes, index + 2, close, file, line, here + 2, true)
+                set diagnostics = concat(diagnostics, inner.diagnostics)
+                if length(pieces) > 0 or length(value) > 0 {
+                    set pieces = add_piece(pieces, token(.Text, from_code_points(value), source.span_of(file, line, segment_col, here)))
+                }
+                set pieces = add_plus(pieces, here_span)
+                set pieces = concat(pieces, [token(.Ident, "to_text", here_span), token(.LParen, "", here_span)])
+                set pieces = append(concat(pieces, inner.tokens), token(.RParen, "", here_span))
+            }
+            set interpolated = true
+            set value = []
+            set index = close + 1
+            set segment_col = col + index - start
         } else if code == 92 {
             let escape_span = source.span_of(file, line, here, here + 1)
             let next = if index + 1 < length(codes) { codes[index + 1] } else { -1 }
@@ -367,14 +452,14 @@ fn scan_text(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> Sc
                 if valid {
                     set value = append(value, scalar)
                 } else {
-                    set diagnostics = append(diagnostics, source.error("E0109", escape_span, "`\\u{" + from_code_points(hex) + "}` is not a valid unicode scalar value"))
+                    set diagnostics = append(diagnostics, source.error("E0109", escape_span, "`\\u{\(from_code_points(hex))}` is not a valid unicode scalar value"))
                 }
             } else {
                 let shown = if next < 0 or next == 10 { "" } else { from_code_point(next) }
                 if next == 10 {
                     set index = index - 1
                 }
-                set diagnostics = append(diagnostics, source.error_help("E0109", escape_span, "unknown escape `\\" + shown + "`", "valid escapes are `\\n`, `\\t`, `\\\\`, `\\\"` and `\\u{...}`"))
+                set diagnostics = append(diagnostics, source.error_help("E0109", escape_span, "unknown escape `\\\(shown)`", "valid escapes are `\\n`, `\\t`, `\\\\`, `\\\"` and `\\u{...}`"))
             }
         } else if source.is_control(code) {
             set diagnostics = append(diagnostics, source.error_help("E0109", source.span_of(file, line, here, here + 1), "control character inside a text literal", "use an escape such as `\\t` or `\\u{...}`"))
@@ -385,47 +470,63 @@ fn scan_text(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> Sc
         }
     }
     let span = source.span_of(file, line, col, col + index - start)
-    Scan { token: token(TokenKind.Text, from_code_points(value), span), end: index, diagnostics: diagnostics, emit: true }
+    if not interpolated {
+        return Scan { token: token(.Text, from_code_points(value), span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
+    }
+    if length(value) > 0 {
+        set pieces = add_piece(pieces, token(.Text, from_code_points(value), source.span_of(file, line, segment_col, col + index - start)))
+    }
+    if length(pieces) == 0 {
+        set pieces = [token(.Text, "", span)]
+    }
+    let expansion = append(concat([token(.LParen, "", span)], pieces), token(.RParen, "", span))
+    Scan { token: token(.Text, "", span), end: index, diagnostics: diagnostics, emit: true, expansion: expansion }
 }
+
+fn add_plus(pieces: List[Token], span: source.Span) -> List[Token] {
+    if length(pieces) == 0 { pieces } else { append(pieces, token(.Plus, "", span)) }
+}
+
+fn add_piece(pieces: List[Token], piece: Token) -> List[Token] = append(add_plus(pieces, piece.span), piece)
 
 fn two_char_kind(first: Int, second: Int) -> TokenKind {
     if first == 45 and second == 62 {
-        TokenKind.Arrow
+        .Arrow
     } else if first == 61 and second == 62 {
-        TokenKind.FatArrow
+        .FatArrow
     } else if first == 61 and second == 61 {
-        TokenKind.EqEq
+        .EqEq
     } else if first == 33 and second == 61 {
-        TokenKind.NotEq
+        .NotEq
     } else if first == 60 and second == 61 {
-        TokenKind.LtEq
+        .LtEq
     } else if first == 62 and second == 61 {
-        TokenKind.GtEq
+        .GtEq
     } else {
-        TokenKind.Eof
+        .Eof
     }
 }
 
 fn one_char_kind(code: Int) -> TokenKind {
     match code {
-        40 => TokenKind.LParen
-        41 => TokenKind.RParen
-        91 => TokenKind.LBracket
-        93 => TokenKind.RBracket
-        123 => TokenKind.LBrace
-        125 => TokenKind.RBrace
-        44 => TokenKind.Comma
-        58 => TokenKind.Colon
-        46 => TokenKind.Dot
-        61 => TokenKind.Assign
-        60 => TokenKind.Lt
-        62 => TokenKind.Gt
-        43 => TokenKind.Plus
-        45 => TokenKind.Minus
-        42 => TokenKind.Star
-        47 => TokenKind.Slash
-        37 => TokenKind.Percent
-        _ => TokenKind.Eof
+        40 => .LParen
+        41 => .RParen
+        91 => .LBracket
+        93 => .RBracket
+        123 => .LBrace
+        125 => .RBrace
+        44 => .Comma
+        58 => .Colon
+        46 => .Dot
+        61 => .Assign
+        60 => .Lt
+        62 => .Gt
+        43 => .Plus
+        45 => .Minus
+        42 => .Star
+        47 => .Slash
+        37 => .Percent
+        _ => .Eof
     }
 }
 
@@ -444,45 +545,50 @@ fn scan_symbol(codes: List[Int], start: Int, file: Int, line: Int, col: Int) -> 
     let code = codes[start]
     let next = if start + 1 < length(codes) { codes[start + 1] } else { -1 }
     let pair = two_char_kind(code, next)
-    if pair != TokenKind.Eof {
-        return Scan { token: token(pair, "", source.span_of(file, line, col, col + 2)), end: start + 2, diagnostics: [], emit: true }
+    if pair != .Eof {
+        return Scan { token: token(pair, "", source.span_of(file, line, col, col + 2)), end: start + 2, diagnostics: [], emit: true, expansion: [] }
     }
     let span = source.span_of(file, line, col, col + 1)
     let single = one_char_kind(code)
-    if single == TokenKind.Eof {
-        let d = source.error_help("E0103", span, "unexpected character `" + from_code_point(code) + "`", unexpected_character_help(code))
-        return Scan { token: token(TokenKind.Eof, "", span), end: start + 1, diagnostics: [d], emit: false }
+    if single == .Eof {
+        let d = source.error_help("E0103", span, "unexpected character `\(from_code_point(code))`", unexpected_character_help(code))
+        return Scan { token: token(.Eof, "", span), end: start + 1, diagnostics: [d], emit: false, expansion: [] }
     }
-    Scan { token: token(single, "", span), end: start + 1, diagnostics: [], emit: true }
+    Scan { token: token(single, "", span), end: start + 1, diagnostics: [], emit: true, expansion: [] }
 }
 
 fn bracket_code(kind: TokenKind) -> Int {
     match kind {
-        TokenKind.LParen => 40
-        TokenKind.RParen => 40
-        TokenKind.LBracket => 91
-        TokenKind.RBracket => 91
-        TokenKind.LBrace => 123
-        TokenKind.RBrace => 123
+        .LParen => 40
+        .RParen => 40
+        .LBracket => 91
+        .RBracket => 91
+        .LBrace => 123
+        .RBrace => 123
         _ => 0
     }
 }
 
-fn is_opening(kind: TokenKind) -> Bool = kind == TokenKind.LParen or kind == TokenKind.LBracket or kind == TokenKind.LBrace
+fn is_opening(kind: TokenKind) -> Bool = kind == .LParen or kind == .LBracket or kind == .LBrace
 
-fn is_closing(kind: TokenKind) -> Bool = kind == TokenKind.RParen or kind == TokenKind.RBracket or kind == TokenKind.RBrace
+fn is_closing(kind: TokenKind) -> Bool = kind == .RParen or kind == .RBracket or kind == .RBrace
 
 pub fn tokenize(text: Text, file: Int) -> LexResult {
     let codes = code_points(text)
-    let count = length(codes)
+    tokenize_range(codes, 0, length(codes), file, 1, 1, false)
+}
+
+note "Tokenizes `codes[start..end]`. `nested` is true for the code inside a text interpolation: no end-of-file tokens then."
+fn tokenize_range(codes: List[Int], start: Int, end: Int, file: Int, first_line: Int, first_col: Int, nested: Bool) -> LexResult {
+    let count = end
     var tokens: List[Token] = []
     var diagnostics: List[source.Diagnostic] = []
     var open_kinds: List[Int] = []
     var open_spans: List[source.Span] = []
-    var index = 0
-    var line = 1
-    var col = 1
-    if count > 0 and codes[0] == 65279 {
+    var index = start
+    var line = first_line
+    var col = first_col
+    if not nested and count > 0 and codes[0] == 65279 {
         set diagnostics = append(diagnostics, source.error_help("E0101", source.span_of(file, 1, 1, 2), "file starts with a byte order mark", "save the file as UTF-8 without BOM"))
         set index = 1
         set col = 2
@@ -492,7 +598,7 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
         let here = source.span_of(file, line, col, col + 1)
         if code == 10 {
             if newline_allowed(tokens, open_kinds) {
-                set tokens = append(tokens, token(TokenKind.Newline, "", here))
+                set tokens = append(tokens, token(.Newline, "", here))
             }
             set index = index + 1
             set line = line + 1
@@ -527,7 +633,7 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
             continue
         }
         if code == 95 and not (index + 1 < count and (source.is_alphanumeric(codes[index + 1]) or codes[index + 1] == 95)) {
-            set tokens = append(tokens, token(TokenKind.Underscore, "", here))
+            set tokens = append(tokens, token(.Underscore, "", here))
             set index = index + 1
             set col = col + 1
             continue
@@ -543,7 +649,7 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
             continue
         }
         if code >= 128 {
-            set diagnostics = append(diagnostics, source.error_help("E0103", here, "unexpected character `" + from_code_point(code) + "`", "names use ASCII letters, digits and `_` only; text belongs inside double quotes"))
+            set diagnostics = append(diagnostics, source.error_help("E0103", here, "unexpected character `\(from_code_point(code))`", "names use ASCII letters, digits and `_` only; text belongs inside double quotes"))
             set index = index + 1
             set col = col + 1
             continue
@@ -563,6 +669,10 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
         if not scan.emit {
             continue
         }
+        if length(scan.expansion) > 0 {
+            set tokens = concat(tokens, scan.expansion)
+            continue
+        }
         let kind = scan.token.kind
         let span = scan.token.span
         if is_opening(kind) {
@@ -573,12 +683,12 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
             let depth = length(open_kinds)
             let shown = symbol_text(kind)
             if depth == 0 {
-                set diagnostics = append(diagnostics, source.error("E0102", span, "`" + shown + "` has no matching opening bracket"))
+                set diagnostics = append(diagnostics, source.error("E0102", span, "`\(shown)` has no matching opening bracket"))
             } else {
                 let top = open_kinds[depth - 1]
                 if top != expected {
                     let open_text = from_code_point(top)
-                    set diagnostics = append(diagnostics, source.error_help("E0102", span, "`" + shown + "` does not match the open `" + open_text + "`", "the `" + open_text + "` was opened on line " + to_text(open_spans[depth - 1].line)))
+                    set diagnostics = append(diagnostics, source.error_help("E0102", span, "`\(shown)` does not match the open `\(open_text)`", "the `\(open_text)` was opened on line \(open_spans[depth - 1].line)"))
                 }
                 set open_kinds = slice(open_kinds, 0, depth - 1)
                 set open_spans = slice(open_spans, 0, depth - 1)
@@ -587,19 +697,22 @@ pub fn tokenize(text: Text, file: Int) -> LexResult {
         set tokens = append(tokens, scan.token)
     }
     let end_span = source.span_of(file, line, col, col + 1)
+    if nested {
+        return LexResult { tokens: tokens, diagnostics: diagnostics }
+    }
     var remaining = length(open_kinds) - 1
     while remaining >= 0 {
-        let d = source.error("E0102", open_spans[remaining], "`" + from_code_point(open_kinds[remaining]) + "` is never closed")
+        let d = source.error("E0102", open_spans[remaining], "`\(from_code_point(open_kinds[remaining]))` is never closed")
         set diagnostics = append(diagnostics, d with { label: "opened here" })
         set remaining = remaining - 1
     }
     if newline_allowed(tokens, []) {
-        set tokens = append(tokens, token(TokenKind.Newline, "", end_span))
+        set tokens = append(tokens, token(.Newline, "", end_span))
     }
     let token_count = length(tokens)
-    if token_count > 0 and tokens[token_count - 1].kind != TokenKind.Newline {
-        set tokens = append(tokens, token(TokenKind.Newline, "", end_span))
+    if token_count > 0 and tokens[token_count - 1].kind != .Newline {
+        set tokens = append(tokens, token(.Newline, "", end_span))
     }
-    set tokens = append(tokens, token(TokenKind.Eof, "", end_span))
+    set tokens = append(tokens, token(.Eof, "", end_span))
     LexResult { tokens: tokens, diagnostics: diagnostics }
 }

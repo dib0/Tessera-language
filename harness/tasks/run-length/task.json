@@ -1,0 +1,41 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "encode",
+        "aaabcc"
+      ],
+      "stdout": "3a1b2c\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "decode",
+        "12x2y"
+      ],
+      "stdout": "xxxxxxxxxxxxyy\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "encode",
+        "abc"
+      ],
+      "stdout": "1a1b1c\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "encode",
+        ""
+      ],
+      "stdout": "\n",
+      "exit": 0
+    }
+  ]
+}

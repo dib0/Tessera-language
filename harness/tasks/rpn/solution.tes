@@ -1,0 +1,58 @@
+fn parse_number(text: Text) -> Option[Int] {
+    let codes = code_points(text)
+    if length(codes) == 0 {
+        return Option.None
+    }
+    var value = 0
+    for code in codes {
+        if code < 48 or code > 57 {
+            return Option.None
+        }
+        set value = value * 10 + (code - 48)
+    }
+    Option.Some(value)
+}
+
+fn apply(operator: Text, a: Int, b: Int) -> Result[Int, Text] {
+    match operator {
+        "+" => Result.Ok(a + b)
+        "-" => Result.Ok(a - b)
+        "*" => Result.Ok(a * b)
+        _ => if b == 0 { Result.Error("division by zero") } else { Result.Ok(a / b) }
+    }
+}
+
+fn evaluate(tokens: List[Text]) -> Result[Int, Text] {
+    var stack: List[Int] = []
+    for token in tokens {
+        if token == "+" or token == "-" or token == "*" or token == "/" {
+            let depth = length(stack)
+            if depth < 2 {
+                return Result.Error("stack underflow")
+            }
+            let value = try apply(token, stack[depth - 2], stack[depth - 1])
+            set stack = append(slice(stack, 0, depth - 2), value)
+        } else {
+            match parse_number(token) {
+                Option.Some(number) => {
+                    set stack = append(stack, number)
+                }
+                Option.None => return Result.Error("invalid token " + token)
+            }
+        }
+    }
+    if length(stack) != 1 {
+        return Result.Error("expected one result")
+    }
+    Result.Ok(stack[0])
+}
+
+fn main() -> Unit uses io, env {
+    match evaluate(args()) {
+        Result.Ok(value) => print(to_text(value))
+        Result.Error(message) => {
+            print("error: " + message)
+            exit(1)
+        }
+    }
+}

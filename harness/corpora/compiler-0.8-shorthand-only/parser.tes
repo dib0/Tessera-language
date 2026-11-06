@@ -1,0 +1,1194 @@
+// Recursive-descent parser (spec section 15). A syntax error stops the current
+// declaration; parsing resumes at the next top-level `fn`, `type`, `enum` or `note`.
+
+import source uses nothing
+import lexer uses nothing
+import ast uses nothing
+
+type Parser {
+    tokens: List[lexer.Token]
+    pos: Int
+    diagnostics: List[source.Diagnostic]
+    failed: Bool
+    depth: Int
+}
+
+type ExprResult {
+    parser: Parser
+    expr: ast.Expr
+}
+
+type BlockResult {
+    parser: Parser
+    block: ast.Block
+}
+
+type TypeResult {
+    parser: Parser
+    type_expr: ast.TypeExpr
+}
+
+type StatementResult {
+    parser: Parser
+    statement: ast.Statement
+}
+
+type PatternResult {
+    parser: Parser
+    pattern: ast.Pattern
+}
+
+type ItemResult {
+    parser: Parser
+    item: ast.Item
+}
+
+type ArgsResult {
+    parser: Parser
+    args: List[ast.Expr]
+    end: source.Span
+}
+
+type NameResult {
+    parser: Parser
+    name: Text
+    span: source.Span
+}
+
+type FieldsResult {
+    parser: Parser
+    fields: List[ast.Field]
+}
+
+pub type ParsedFile {
+    items: List[ast.Item]
+    diagnostics: List[source.Diagnostic]
+}
+
+fn max_depth() -> Int = 200
+
+// ---------- parser state ----------
+
+fn peek(p: Parser) -> lexer.TokenKind = p.tokens[p.pos].kind
+
+fn peek_at(p: Parser, offset: Int) -> lexer.TokenKind {
+    let last = length(p.tokens) - 1
+    let index = if p.pos + offset > last { last } else { p.pos + offset }
+    p.tokens[index].kind
+}
+
+fn current(p: Parser) -> lexer.Token = p.tokens[p.pos]
+
+fn current_span(p: Parser) -> source.Span = p.tokens[p.pos].span
+
+fn previous_span(p: Parser) -> source.Span = if p.pos == 0 { p.tokens[0].span } else { p.tokens[p.pos - 1].span }
+
+fn at(p: Parser, kind: lexer.TokenKind) -> Bool = p.tokens[p.pos].kind == kind
+
+fn advance(p: Parser) -> Parser = if p.pos < length(p.tokens) - 1 { p with { pos: p.pos + 1 } } else { p }
+
+note "Only the first error of a declaration is kept; later ones are follow-up noise."
+fn fail_parse(p: Parser, diagnostic: source.Diagnostic) -> Parser {
+    if p.failed {
+        return p
+    }
+    p with { diagnostics: append(p.diagnostics, diagnostic), failed: true }
+}
+
+fn unexpected(p: Parser, expected: Text) -> Parser {
+    let found = current(p)
+    var d = source.error("E0110", found.span, "expected " + expected + ", found " + lexer.describe_token(found))
+    if found.kind == .Comma {
+        set d = d with { help: "separate items here with a line break instead of a comma" }
+    }
+    fail_parse(p, d)
+}
+
+fn expect(p: Parser, kind: lexer.TokenKind) -> Parser {
+    if at(p, kind) { advance(p) } else { unexpected(p, "`" + lexer.symbol_text(kind) + "`") }
+}
+
+fn skip_newlines(p: Parser) -> Parser {
+    var q = p
+    while at(q, .Newline) {
+        set q = advance(q)
+    }
+    q
+}
+
+fn identifier(p: Parser, what: Text) -> NameResult {
+    let t = current(p)
+    if t.kind == .Ident {
+        return NameResult { parser: advance(p), name: t.text, span: t.span }
+    }
+    NameResult { parser: unexpected(p, what), name: "", span: t.span }
+}
+
+fn end_of_line(p: Parser, what: Text) -> Parser {
+    match peek(p) {
+        .Newline => advance(p)
+        .RBrace => p
+        .Eof => p
+        _ => unexpected(p, "end of line after " + what)
+    }
+}
+
+fn dummy_expr(p: Parser) -> ast.Expr = ast.make_expr(.UnitLiteral, current_span(p))
+
+fn failed_expr(p: Parser) -> ExprResult = ExprResult { parser: p, expr: dummy_expr(p) }
+
+fn expr_result(p: Parser, kind: ast.ExprKind, span: source.Span) -> ExprResult = ExprResult { parser: p, expr: ast.make_expr(kind, span) }
+
+fn empty_block(p: Parser) -> ast.Block = ast.Block { statements: [], tail: .None, span: current_span(p) }
+
+fn dummy_type(p: Parser) -> ast.TypeExpr = ast.TypeExpr { name: "", args: [], span: current_span(p) }
+
+fn parse_int_text(digits: Text) -> Int {
+    var value = 0
+    for code in code_points(digits) {
+        set value = value * 10 + (code - 48)
+    }
+    value
+}
+
+fn min_int_digits() -> Text = "9223372036854775808"
+
+note "True for plain names; qualified names such as `shapes.Shape` contain a dot."
+fn is_snake_case_name(text: Text) -> Bool {
+    for code in code_points(text) {
+        if code == 46 {
+            return false
+        }
+    }
+    true
+}
+
+pub fn min_int() -> Int = -9223372036854775807 - 1
+
+// ---------- top level ----------
+
+pub fn parse_file(tokens: List[lexer.Token]) -> ParsedFile {
+    var p = Parser { tokens: tokens, pos: 0, diagnostics: [], failed: false, depth: 0 }
+    var items: List[ast.Item] = []
+    while true {
+        set p = skip_newlines(p)
+        if at(p, .Eof) {
+            break
+        }
+        let before = p.pos
+        let result = parse_item(p)
+        if result.parser.failed {
+            set p = recover_top(result.parser) with { failed: false, depth: 0 }
+            if p.pos == before {
+                set p = advance(p)
+            }
+        } else {
+            set p = result.parser
+            set items = append(items, result.item)
+        }
+    }
+    ParsedFile { items: items, diagnostics: p.diagnostics }
+}
+
+fn is_declaration_start(kind: lexer.TokenKind) -> Bool {
+    kind == .Fn or kind == .Type or kind == .Enum or kind == .Note
+}
+
+fn recover_top(start: Parser) -> Parser {
+    var p = start
+    var depth = 0
+    while not at(p, .Eof) {
+        let kind = peek(p)
+        if kind == .LBrace {
+            set depth = depth + 1
+        } else if kind == .RBrace {
+            set depth = depth - 1
+        } else if kind == .Newline and depth <= 0 and is_declaration_start(peek_at(p, 1)) {
+            return advance(p)
+        }
+        set p = advance(p)
+    }
+    p
+}
+
+fn dummy_item(p: Parser) -> ItemResult {
+    let record = ast.RecordDecl { notes: [], public: false, name: "", name_span: current_span(p), fields: [] }
+    ItemResult { parser: p, item: .RecordItem(record) }
+}
+
+fn parse_item(start: Parser) -> ItemResult {
+    var p = start
+    var notes: List[ast.Note] = []
+    while at(p, .Note) {
+        let note_start = current_span(p)
+        set p = advance(p)
+        let text_token = current(p)
+        if text_token.kind != .Text {
+            return dummy_item(unexpected(p, "a text literal after `note`"))
+        }
+        set notes = append(notes, ast.Note { text: text_token.text, span: source.span_to(note_start, text_token.span) })
+        set p = end_of_line(advance(p), "a note")
+        if p.failed {
+            return dummy_item(p)
+        }
+        if not at(p, .Eof) and current_span(p).line > text_token.span.line + 1 {
+            let d = source.error_help("E0401", source.span_to(note_start, text_token.span), "a note must be directly above the declaration it describes", "remove the blank line between the note and the declaration")
+            return dummy_item(fail_parse(p, d))
+        }
+    }
+    let public = at(p, .Pub)
+    if public {
+        set p = advance(p)
+    }
+    let kind = peek(p)
+    if kind == .Fn {
+        return parse_function(p, notes, public)
+    }
+    if kind == .Type {
+        return parse_record(p, notes, public)
+    }
+    if kind == .Enum {
+        return parse_enum(p, notes, public)
+    }
+    if public {
+        let d = source.error_help("E0110", current_span(p), "`pub` must be followed by `fn`, `type` or `enum`", "imports and other items cannot be public")
+        return dummy_item(fail_parse(p, d))
+    }
+    if kind == .Import and length(notes) == 0 {
+        return parse_import(p)
+    }
+    if length(notes) > 0 {
+        let d = source.error_help("E0401", notes[length(notes) - 1].span, "a note must be followed by a declaration", "place the note directly above a `fn`, `type` or `enum`, or remove it")
+        return dummy_item(fail_parse(p, d))
+    }
+    if kind == .Let or kind == .Var {
+        let d = source.error_help("E0110", current_span(p), "bindings are only allowed inside functions", "Tessera has no global variables; use a function that returns the value")
+        return dummy_item(fail_parse(p, d))
+    }
+    dummy_item(unexpected(p, "`fn`, `type`, `enum`, `import` or `note`"))
+}
+
+fn parse_import(start: Parser) -> ItemResult {
+    let keyword_span = current_span(start)
+    let first = identifier(advance(start), "a module path such as `geometry/shapes`")
+    if first.parser.failed {
+        return dummy_item(first.parser)
+    }
+    var p = first.parser
+    var segments: List[Text] = [first.name]
+    var last_span = first.span
+    while at(p, .Slash) {
+        let segment = identifier(advance(p), "a module name after `/`")
+        if segment.parser.failed {
+            return dummy_item(segment.parser)
+        }
+        set segments = append(segments, segment.name)
+        set last_span = segment.span
+        set p = segment.parser
+    }
+    var limited = false
+    var allowed: List[Text] = []
+    if at(p, .Uses) {
+        set limited = true
+        set p = advance(p)
+        if current(p).kind == .Ident and current(p).text == "nothing" {
+            set last_span = current_span(p)
+            set p = advance(p)
+        } else {
+            var more = true
+            while more {
+                let effect = identifier(p, "an effect name or `nothing`")
+                if effect.parser.failed {
+                    return dummy_item(effect.parser)
+                }
+                set allowed = append(allowed, effect.name)
+                set last_span = effect.span
+                set p = effect.parser
+                if at(p, .Comma) {
+                    set p = advance(p)
+                } else {
+                    set more = false
+                }
+            }
+        }
+    }
+    let count = length(segments)
+    let import_decl = ast.Import { path: join(segments, "/"), alias: segments[count - 1], span: source.span_to(keyword_span, last_span), limited: limited, allowed: allowed }
+    ItemResult { parser: end_of_line(p, "an import"), item: .ImportItem(import_decl) }
+}
+
+fn parse_function(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult {
+    let name = identifier(expect(start, .Fn), "a function name")
+    var p = expect(name.parser, .LParen)
+    if p.failed {
+        return dummy_item(p)
+    }
+    var params: List[ast.Param] = []
+    while not at(p, .RParen) {
+        let param_name = identifier(p, "a parameter name")
+        let param_type = parse_type(expect(param_name.parser, .Colon))
+        if param_type.parser.failed {
+            return dummy_item(param_type.parser)
+        }
+        set params = append(params, ast.Param { name: param_name.name, span: param_name.span, type_expr: param_type.type_expr })
+        set p = param_type.parser
+        if at(p, .Comma) {
+            set p = advance(p)
+        } else if not at(p, .RParen) {
+            return dummy_item(unexpected(p, "`,` or `)`"))
+        }
+    }
+    set p = advance(p)
+    if not at(p, .Arrow) {
+        return dummy_item(fail_parse(p, source.error_help("E0110", current_span(p), "missing return type", "write the return type after `->`, e.g. `-> Unit`")))
+    }
+    let return_type = parse_type(advance(p))
+    if return_type.parser.failed {
+        return dummy_item(return_type.parser)
+    }
+    set p = return_type.parser
+    var effects: List[ast.EffectName] = []
+    if at(p, .Uses) {
+        set p = advance(p)
+        var more = true
+        while more {
+            let effect = identifier(p, "an effect name")
+            if effect.parser.failed {
+                return dummy_item(effect.parser)
+            }
+            set effects = append(effects, ast.EffectName { name: effect.name, span: effect.span })
+            set p = effect.parser
+            if at(p, .Comma) {
+                set p = advance(p)
+            } else {
+                set more = false
+            }
+        }
+    }
+    let body = if at(p, .Assign) {
+        parse_expr(advance(p), true)
+    } else if at(p, .LBrace) {
+        let block = parse_block(p)
+        expr_result(block.parser, .BlockExpr(block.block), block.block.span)
+    } else {
+        failed_expr(unexpected(p, "`=` or `{` to start the function body"))
+    }
+    if body.parser.failed {
+        return dummy_item(body.parser)
+    }
+    let function = ast.Function { notes: notes, public: public, name: name.name, name_span: name.span, params: params, return_type: return_type.type_expr, effects: effects, body: body.expr }
+    ItemResult { parser: body.parser, item: .FunctionItem(function) }
+}
+
+fn parse_type(start: Parser) -> TypeResult {
+    if start.failed {
+        return TypeResult { parser: start, type_expr: dummy_type(start) }
+    }
+    let first = identifier(start, "a type")
+    var p = first.parser
+    if p.failed {
+        return TypeResult { parser: p, type_expr: dummy_type(p) }
+    }
+    var name = NameResult { parser: p, name: first.name, span: first.span }
+    if at(p, .Dot) and not source.starts_with_upper(first.name) {
+        let member = identifier(advance(p), "a type name after the module name")
+        if member.parser.failed {
+            return TypeResult { parser: member.parser, type_expr: dummy_type(member.parser) }
+        }
+        set name = NameResult { parser: member.parser, name: first.name + "." + member.name, span: source.span_to(first.span, member.span) }
+        set p = member.parser
+    }
+    var args: List[ast.TypeExpr] = []
+    var finish = name.span
+    if at(p, .LBracket) {
+        set p = advance(p)
+        var more = true
+        while more {
+            let arg = parse_type(p)
+            if arg.parser.failed {
+                return arg
+            }
+            set args = append(args, arg.type_expr)
+            set p = arg.parser
+            if at(p, .Comma) {
+                set p = advance(p)
+            } else {
+                set more = false
+            }
+        }
+        set finish = current_span(p)
+        set p = expect(p, .RBracket)
+    }
+    TypeResult { parser: p, type_expr: ast.TypeExpr { name: name.name, args: args, span: source.span_to(name.span, finish) } }
+}
+
+fn parse_fields_block(start: Parser) -> FieldsResult {
+    var p = expect(start, .LBrace)
+    var fields: List[ast.Field] = []
+    while not p.failed {
+        set p = skip_newlines(p)
+        if at(p, .RBrace) {
+            return FieldsResult { parser: advance(p), fields: fields }
+        }
+        let field_name = identifier(p, "a field name")
+        let field_type = parse_type(expect(field_name.parser, .Colon))
+        if field_type.parser.failed {
+            return FieldsResult { parser: field_type.parser, fields: fields }
+        }
+        set fields = append(fields, ast.Field { name: field_name.name, span: field_name.span, type_expr: field_type.type_expr })
+        set p = end_of_line(field_type.parser, "a field")
+    }
+    FieldsResult { parser: p, fields: fields }
+}
+
+fn parse_record(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult {
+    let name = identifier(expect(start, .Type), "a type name")
+    if name.parser.failed {
+        return dummy_item(name.parser)
+    }
+    let fields = parse_fields_block(name.parser)
+    if fields.parser.failed {
+        return dummy_item(fields.parser)
+    }
+    let record = ast.RecordDecl { notes: notes, public: public, name: name.name, name_span: name.span, fields: fields.fields }
+    ItemResult { parser: fields.parser, item: .RecordItem(record) }
+}
+
+fn parse_enum(start: Parser, notes: List[ast.Note], public: Bool) -> ItemResult {
+    let name = identifier(expect(start, .Enum), "an enum name")
+    var p = expect(name.parser, .LBrace)
+    var variants: List[ast.VariantDecl] = []
+    while not p.failed {
+        set p = skip_newlines(p)
+        if at(p, .RBrace) {
+            let decl = ast.EnumDecl { notes: notes, public: public, name: name.name, name_span: name.span, variants: variants }
+            return ItemResult { parser: advance(p), item: .EnumItem(decl) }
+        }
+        let variant = identifier(p, "a variant name")
+        set p = variant.parser
+        if p.failed {
+            return dummy_item(p)
+        }
+        var fields: List[ast.Field] = []
+        if at(p, .LParen) {
+            set p = advance(p)
+            while not at(p, .RParen) {
+                let field_name = identifier(p, "a field name")
+                let field_type = parse_type(expect(field_name.parser, .Colon))
+                if field_type.parser.failed {
+                    return dummy_item(field_type.parser)
+                }
+                set fields = append(fields, ast.Field { name: field_name.name, span: field_name.span, type_expr: field_type.type_expr })
+                set p = field_type.parser
+                if at(p, .Comma) {
+                    set p = advance(p)
+                } else if not at(p, .RParen) {
+                    return dummy_item(unexpected(p, "`,` or `)`"))
+                }
+            }
+            set p = advance(p)
+        }
+        set variants = append(variants, ast.VariantDecl { name: variant.name, span: variant.span, fields: fields })
+        set p = end_of_line(p, "a variant")
+    }
+    dummy_item(p)
+}
+
+// ---------- statements ----------
+
+fn parse_block(start: Parser) -> BlockResult {
+    let open_span = current_span(start)
+    var p = expect(start, .LBrace)
+    var statements: List[ast.Statement] = []
+    while not p.failed {
+        set p = skip_newlines(p)
+        if at(p, .RBrace) {
+            break
+        }
+        if at(p, .Eof) {
+            set p = unexpected(p, "`}`")
+            break
+        }
+        let statement = parse_statement(p)
+        set statements = append(statements, statement.statement)
+        set p = end_of_line(statement.parser, "a statement")
+    }
+    if p.failed {
+        return BlockResult { parser: p, block: empty_block(p) }
+    }
+    let close_span = current_span(p)
+    set p = advance(p)
+    let count = length(statements)
+    var tail: Option[ast.Expr] = .None
+    if count > 0 {
+        match statements[count - 1] {
+            .ExprStatement(last) => {
+                set tail = .Some(last)
+                set statements = slice(statements, 0, count - 1)
+            }
+            _ => {}
+        }
+    }
+    BlockResult { parser: p, block: ast.Block { statements: statements, tail: tail, span: source.span_to(open_span, close_span) } }
+}
+
+fn dummy_statement(p: Parser) -> StatementResult = StatementResult { parser: p, statement: .ExprStatement(dummy_expr(p)) }
+
+fn parse_statement(p: Parser) -> StatementResult {
+    let kind = peek(p)
+    if kind == .Let or kind == .Var {
+        let mutable = kind == .Var
+        let after_keyword = advance(p)
+        let name_token = current(after_keyword)
+        let name = if name_token.kind == .Underscore {
+            "_"
+        } else if name_token.kind == .Ident {
+            name_token.text
+        } else {
+            return dummy_statement(unexpected(after_keyword, "a name"))
+        }
+        var q = advance(after_keyword)
+        var declared: Option[ast.TypeExpr] = .None
+        if at(q, .Colon) {
+            let annotation = parse_type(advance(q))
+            if annotation.parser.failed {
+                return dummy_statement(annotation.parser)
+            }
+            set declared = .Some(annotation.type_expr)
+            set q = annotation.parser
+        }
+        let value = parse_expr(expect(q, .Assign), true)
+        return StatementResult { parser: value.parser, statement: .Let(name, name_token.span, declared, value.expr, mutable) }
+    }
+    if kind == .Set {
+        let name = identifier(advance(p), "the name of a `var`")
+        if name.parser.failed {
+            return dummy_statement(name.parser)
+        }
+        if not at(name.parser, .Assign) {
+            return dummy_statement(unexpected(name.parser, "`=`"))
+        }
+        let value = parse_expr(advance(name.parser), true)
+        return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, value.expr) }
+    }
+    if kind == .For {
+        let variable = identifier(advance(p), "a loop variable name")
+        let iterable = parse_expr(expect(variable.parser, .In), false)
+        if iterable.parser.failed {
+            return dummy_statement(iterable.parser)
+        }
+        let body = parse_block(iterable.parser)
+        return StatementResult { parser: body.parser, statement: .For(variable.name, variable.span, iterable.expr, body.block) }
+    }
+    if kind == .While {
+        let condition = parse_expr(advance(p), false)
+        if condition.parser.failed {
+            return dummy_statement(condition.parser)
+        }
+        let body = parse_block(condition.parser)
+        return StatementResult { parser: body.parser, statement: .While(condition.expr, body.block) }
+    }
+    if kind == .Ident and peek_at(p, 1) == .Assign {
+        let d = source.error_help("E0110", current_span(p), "assignment needs `set`", "declare the variable with `var` and change it with `set name = value`")
+        return dummy_statement(fail_parse(p, d))
+    }
+    let expr = parse_expr(p, true)
+    StatementResult { parser: expr.parser, statement: .ExprStatement(expr.expr) }
+}
+
+// ---------- expressions ----------
+
+note "`allow_record` is false in `if`/`while`/`for`/`match` headers, where `{` starts the body."
+fn parse_expr(p: Parser, allow_record: Bool) -> ExprResult {
+    if p.failed {
+        return failed_expr(p)
+    }
+    if p.depth + 1 > max_depth() {
+        let d = source.error_help("E0107", current_span(p), "expression is nested too deeply", "split it into smaller functions or `let` bindings")
+        return failed_expr(fail_parse(p, d))
+    }
+    let result = parse_logical(p with { depth: p.depth + 1 }, allow_record)
+    ExprResult { parser: result.parser with { depth: p.depth }, expr: result.expr }
+}
+
+fn binary(p: Parser, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> ExprResult {
+    expr_result(p, .Binary(op, op_span, left, right), source.span_to(left.span, right.span))
+}
+
+fn parse_logical(p: Parser, allow_record: Bool) -> ExprResult {
+    let first = parse_comparison(p, allow_record)
+    if first.parser.failed {
+        return first
+    }
+    let kind = peek(first.parser)
+    if kind != .And and kind != .Or {
+        return first
+    }
+    let op = if kind == .And { ast.BinaryOp.And } else { ast.BinaryOp.Or }
+    let other = if kind == .And { lexer.TokenKind.Or } else { lexer.TokenKind.And }
+    var result = first
+    while at(result.parser, kind) {
+        let op_span = current_span(result.parser)
+        let right = parse_comparison(advance(result.parser), allow_record)
+        if right.parser.failed {
+            return right
+        }
+        set result = binary(right.parser, op, op_span, result.expr, right.expr)
+    }
+    if at(result.parser, other) {
+        let d = source.error_help("E0105", current_span(result.parser), "`and` and `or` cannot be mixed without parentheses", "add parentheses to show the intended grouping, e.g. `(a and b) or c`")
+        return failed_expr(fail_parse(result.parser, d))
+    }
+    result
+}
+
+fn compare_op(kind: lexer.TokenKind) -> Option[ast.BinaryOp] {
+    match kind {
+        .EqEq => .Some(.Equal)
+        .NotEq => .Some(.NotEqual)
+        .Lt => .Some(.Less)
+        .LtEq => .Some(.LessEqual)
+        .Gt => .Some(.Greater)
+        .GtEq => .Some(.GreaterEqual)
+        _ => .None
+    }
+}
+
+fn parse_comparison(p: Parser, allow_record: Bool) -> ExprResult {
+    let starts_with_not = at(p, .Not)
+    let left = parse_additive(p, allow_record)
+    if left.parser.failed {
+        return left
+    }
+    let op = match compare_op(peek(left.parser)) {
+        .Some(found) => found
+        .None => return left
+    }
+    if starts_with_not {
+        let d = source.error_help("E0105", left.expr.span, "`not` before a comparison is ambiguous", "write `not (a == b)` or `(not a) == b`")
+        return failed_expr(fail_parse(left.parser, d))
+    }
+    let op_span = current_span(left.parser)
+    let right = parse_additive(advance(left.parser), allow_record)
+    if right.parser.failed {
+        return right
+    }
+    if compare_op(peek(right.parser)) != .None {
+        let d = source.error_help("E0104", current_span(right.parser), "comparisons cannot be chained", "combine separate comparisons with `and`, e.g. `a < b and b < c`")
+        return failed_expr(fail_parse(right.parser, d))
+    }
+    binary(right.parser, op, op_span, left.expr, right.expr)
+}
+
+fn additive_op(kind: lexer.TokenKind) -> Option[ast.BinaryOp] {
+    match kind {
+        .Plus => .Some(.Add)
+        .Minus => .Some(.Subtract)
+        _ => .None
+    }
+}
+
+fn multiplicative_op(kind: lexer.TokenKind) -> Option[ast.BinaryOp] {
+    match kind {
+        .Star => .Some(.Multiply)
+        .Slash => .Some(.Divide)
+        .Percent => .Some(.Remainder)
+        _ => .None
+    }
+}
+
+fn parse_additive(p: Parser, allow_record: Bool) -> ExprResult {
+    var result = parse_multiplicative(p, allow_record)
+    while not result.parser.failed {
+        let op = match additive_op(peek(result.parser)) {
+            .Some(found) => found
+            .None => return result
+        }
+        let op_span = current_span(result.parser)
+        let right = parse_multiplicative(advance(result.parser), allow_record)
+        if right.parser.failed {
+            return right
+        }
+        set result = binary(right.parser, op, op_span, result.expr, right.expr)
+    }
+    result
+}
+
+fn parse_multiplicative(p: Parser, allow_record: Bool) -> ExprResult {
+    var result = parse_unary(p, allow_record)
+    while not result.parser.failed {
+        let op = match multiplicative_op(peek(result.parser)) {
+            .Some(found) => found
+            .None => return result
+        }
+        let op_span = current_span(result.parser)
+        let right = parse_unary(advance(result.parser), allow_record)
+        if right.parser.failed {
+            return right
+        }
+        set result = binary(right.parser, op, op_span, result.expr, right.expr)
+    }
+    result
+}
+
+fn parse_unary(p: Parser, allow_record: Bool) -> ExprResult {
+    if p.depth + 1 > max_depth() {
+        return failed_expr(fail_parse(p, source.error("E0107", current_span(p), "expression is nested too deeply")))
+    }
+    let result = parse_unary_inner(p with { depth: p.depth + 1 }, allow_record)
+    ExprResult { parser: result.parser with { depth: p.depth }, expr: result.expr }
+}
+
+fn parse_unary_inner(p: Parser, allow_record: Bool) -> ExprResult {
+    let start = current_span(p)
+    if at(p, .Minus) {
+        let after_minus = advance(p)
+        let number = current(after_minus)
+        if number.kind == .Int {
+            let value = if number.text == min_int_digits() { min_int() } else { -parse_int_text(number.text) }
+            let literal = expr_result(advance(after_minus), .IntLiteral(value), source.span_to(start, number.span))
+            return parse_postfix(literal)
+        }
+        let operand = parse_unary(after_minus, allow_record)
+        if operand.parser.failed {
+            return operand
+        }
+        return expr_result(operand.parser, .Unary(.Negate, operand.expr), source.span_to(start, operand.expr.span))
+    }
+    if at(p, .Not) {
+        let operand = parse_unary(advance(p), allow_record)
+        if operand.parser.failed {
+            return operand
+        }
+        return expr_result(operand.parser, .Unary(.Not, operand.expr), source.span_to(start, operand.expr.span))
+    }
+    if at(p, .Try) {
+        let operand = parse_unary(advance(p), allow_record)
+        if operand.parser.failed {
+            return operand
+        }
+        return expr_result(operand.parser, .Try(operand.expr), source.span_to(start, operand.expr.span))
+    }
+    let primary = parse_primary(p, allow_record)
+    if primary.parser.failed {
+        return primary
+    }
+    parse_postfix(primary)
+}
+
+fn parse_postfix(start: ExprResult) -> ExprResult {
+    var result = start
+    while true {
+        let p = result.parser
+        if at(p, .LBracket) {
+            let index = parse_expr(advance(p), true)
+            if index.parser.failed {
+                return index
+            }
+            let close = current_span(index.parser)
+            let after = expect(index.parser, .RBracket)
+            if after.failed {
+                return failed_expr(after)
+            }
+            set result = expr_result(after, .Index(result.expr, index.expr), source.span_to(result.expr.span, close))
+        } else if at(p, .With) {
+            let update = parse_field_inits(advance(p))
+            if update.parser.failed {
+                return failed_expr(update.parser)
+            }
+            if length(update.fields) == 0 {
+                let d = source.error_help("E0511", update.close, "`with` must change at least one field", "write e.g. `value with { name: new_name }`")
+                return failed_expr(fail_parse(update.parser, d))
+            }
+            set result = expr_result(update.parser, .RecordUpdate(result.expr, update.fields), source.span_to(result.expr.span, update.close))
+        } else if at(p, .Dot) {
+            let field = identifier(advance(p), "a field name")
+            if field.parser.failed {
+                return failed_expr(field.parser)
+            }
+            if at(field.parser, .LParen) {
+                let d = source.error_help("E0110", current_span(field.parser), "Tessera has no method calls", "call the function with the value as first argument, e.g. `" + field.name + "(value, ...)`")
+                return failed_expr(fail_parse(field.parser, d))
+            }
+            set result = expr_result(field.parser, .FieldAccess(result.expr, field.name, field.span), source.span_to(result.expr.span, field.span))
+        } else {
+            return result
+        }
+    }
+    result
+}
+
+fn parse_args(start: Parser, close: lexer.TokenKind) -> ArgsResult {
+    var p = start
+    var args: List[ast.Expr] = []
+    while not at(p, close) {
+        let arg = parse_expr(p, true)
+        if arg.parser.failed {
+            return ArgsResult { parser: arg.parser, args: args, end: current_span(arg.parser) }
+        }
+        set args = append(args, arg.expr)
+        set p = arg.parser
+        if at(p, .Comma) {
+            set p = advance(p)
+        } else if not at(p, close) {
+            return ArgsResult { parser: unexpected(p, "`,` or `" + lexer.symbol_text(close) + "`"), args: args, end: current_span(p) }
+        }
+    }
+    let end = current_span(p)
+    ArgsResult { parser: advance(p), args: args, end: end }
+}
+
+fn ends_return(kind: lexer.TokenKind) -> Bool {
+    match kind {
+        .Newline => true
+        .RBrace => true
+        .RParen => true
+        .RBracket => true
+        .Comma => true
+        .Eof => true
+        _ => false
+    }
+}
+
+fn parse_primary(p: Parser, allow_record: Bool) -> ExprResult {
+    let start = current_span(p)
+    let t = current(p)
+    match t.kind {
+        .Int => {
+            if t.text == min_int_digits() {
+                return failed_expr(fail_parse(p, source.error_help("E0106", start, "number does not fit in `Int`", "the largest `Int` is 9223372036854775807")))
+            }
+            expr_result(advance(p), .IntLiteral(parse_int_text(t.text)), start)
+        }
+        .Text => expr_result(advance(p), .TextLiteral(t.text), start)
+        .True => expr_result(advance(p), .BoolLiteral(true), start)
+        .False => expr_result(advance(p), .BoolLiteral(false), start)
+        .LParen => {
+            let inside = advance(p)
+            if at(inside, .RParen) {
+                return expr_result(advance(inside), .UnitLiteral, source.span_to(start, current_span(inside)))
+            }
+            let inner = parse_expr(inside, true)
+            if inner.parser.failed {
+                return inner
+            }
+            let close = current_span(inner.parser)
+            let after = expect(inner.parser, .RParen)
+            if after.failed {
+                return failed_expr(after)
+            }
+            ExprResult { parser: after, expr: inner.expr with { span: source.span_to(start, close) } }
+        }
+        .LBracket => {
+            let items = parse_args(advance(p), .RBracket)
+            if items.parser.failed {
+                return failed_expr(items.parser)
+            }
+            expr_result(items.parser, .ListLiteral(items.args), source.span_to(start, items.end))
+        }
+        .LBrace => {
+            if not allow_record {
+                return failed_expr(fail_parse(p, source.error_help("E0110", start, "a block cannot start here", "wrap the block in parentheses")))
+            }
+            let block = parse_block(p)
+            if block.parser.failed {
+                return failed_expr(block.parser)
+            }
+            expr_result(block.parser, .BlockExpr(block.block), block.block.span)
+        }
+        .If => parse_if(p)
+        .Match => parse_match(p)
+        .Return => {
+            let after = advance(p)
+            if ends_return(peek(after)) {
+                return expr_result(after, .Return(.None), start)
+            }
+            let value = parse_expr(after, allow_record)
+            if value.parser.failed {
+                return value
+            }
+            expr_result(value.parser, .Return(.Some(value.expr)), source.span_to(start, value.expr.span))
+        }
+        .Break => expr_result(advance(p), .Break, start)
+        .Dot => parse_shorthand_variant(p)
+        .Continue => expr_result(advance(p), .Continue, start)
+        .Ident => parse_name(p, t, allow_record)
+        _ => failed_expr(unexpected(p, "an expression"))
+    }
+}
+
+fn is_qualified_type(p: Parser) -> Bool {
+    peek(p) == .Dot and peek_at(p, 1) == .Ident and source.starts_with_upper(p.tokens[p.pos + 1].text)
+}
+
+fn parse_name(p: Parser, t: lexer.Token, allow_record: Bool) -> ExprResult {
+    let after_name = advance(p)
+    if not source.starts_with_upper(t.text) and is_qualified_type(after_name) {
+        let member = after_name.tokens[after_name.pos + 1]
+        let qualified = lexer.Token { kind: .Ident, text: t.text + "." + member.text, span: source.span_to(t.span, member.span) }
+        return parse_type_use(after_name with { pos: after_name.pos + 1 }, qualified, allow_record)
+    }
+    if not source.starts_with_upper(t.text) and peek(after_name) == .Dot and peek_at(after_name, 1) == .Ident and peek_at(after_name, 2) == .LParen {
+        let member = after_name.tokens[after_name.pos + 1]
+        let args = parse_args(after_name with { pos: after_name.pos + 3 }, .RParen)
+        if args.parser.failed {
+            return failed_expr(args.parser)
+        }
+        return expr_result(args.parser, .Call(t.text + "." + member.text, source.span_to(t.span, member.span), args.args), source.span_to(t.span, args.end))
+    }
+    parse_type_use(p, t, allow_record)
+}
+
+note "Continues after a name token; `t.text` may be qualified (`shapes.Shape`), then `p` points at its last part."
+fn parse_type_use(p: Parser, t: lexer.Token, allow_record: Bool) -> ExprResult {
+    let start = t.span
+    let after = advance(p)
+    if source.starts_with_upper(t.text) or not is_snake_case_name(t.text) {
+        if at(after, .Dot) {
+            let variant = identifier(advance(after), "a variant name")
+            if variant.parser.failed {
+                return failed_expr(variant.parser)
+            }
+            if at(variant.parser, .LParen) {
+                let args = parse_args(advance(variant.parser), .RParen)
+                if args.parser.failed {
+                    return failed_expr(args.parser)
+                }
+                return expr_result(args.parser, .VariantLiteral(t.text, variant.name, variant.span, args.args), source.span_to(start, args.end))
+            }
+            return expr_result(variant.parser, .VariantLiteral(t.text, variant.name, variant.span, []), source.span_to(start, variant.span))
+        }
+        if at(after, .LBrace) and allow_record {
+            return parse_record_literal(after, t.text, start)
+        }
+        if at(after, .LBrace) {
+            let d = source.error_help("E0110", start, "a record literal cannot appear here without parentheses", "in `if`, `while`, `for` and `match` headers `{` starts the body; write `(" + t.text + " { ... })`")
+            return failed_expr(fail_parse(after, d))
+        }
+        let d = source.error_help("E0110", start, "type name `" + t.text + "` cannot be used as a value", "build a record with `" + t.text + " { field: value }` or an enum value with `" + t.text + ".Variant`")
+        return failed_expr(fail_parse(after, d))
+    }
+    if at(after, .LParen) {
+        let args = parse_args(advance(after), .RParen)
+        if args.parser.failed {
+            return failed_expr(args.parser)
+        }
+        return expr_result(args.parser, .Call(t.text, start, args.args), source.span_to(start, args.end))
+    }
+    expr_result(after, .Name(t.text), start)
+}
+
+type FieldInitsResult {
+    parser: Parser
+    fields: List[ast.FieldInit]
+    close: source.Span
+}
+
+note "Parses `{ name: value, ... }`, as used by record literals and `with` updates."
+fn parse_field_inits(start: Parser) -> FieldInitsResult {
+    var p = expect(start, .LBrace)
+    var fields: List[ast.FieldInit] = []
+    while not p.failed {
+        set p = skip_newlines(p)
+        if at(p, .RBrace) {
+            break
+        }
+        let field = identifier(p, "a field name")
+        let value = parse_expr(expect(field.parser, .Colon), true)
+        if value.parser.failed {
+            return FieldInitsResult { parser: value.parser, fields: fields, close: current_span(value.parser) }
+        }
+        set fields = append(fields, ast.FieldInit { name: field.name, span: field.span, value: value.expr })
+        set p = skip_newlines(value.parser)
+        if at(p, .Comma) {
+            set p = advance(p)
+        } else if not at(p, .RBrace) {
+            set p = unexpected(p, "`,` or `}`")
+        }
+    }
+    if p.failed {
+        return FieldInitsResult { parser: p, fields: fields, close: current_span(p) }
+    }
+    FieldInitsResult { parser: advance(p), fields: fields, close: current_span(p) }
+}
+
+note "`.Variant` or `.Variant(args)`: the checker finds the type from the context."
+fn parse_shorthand_variant(p: Parser) -> ExprResult {
+    let start = current_span(p)
+    let variant = identifier(advance(p), "a variant name after `.`")
+    if variant.parser.failed {
+        return failed_expr(variant.parser)
+    }
+    if at(variant.parser, .LParen) {
+        let args = parse_args(advance(variant.parser), .RParen)
+        if args.parser.failed {
+            return failed_expr(args.parser)
+        }
+        return expr_result(args.parser, .VariantLiteral("", variant.name, variant.span, args.args), source.span_to(start, args.end))
+    }
+    expr_result(variant.parser, .VariantLiteral("", variant.name, variant.span, []), source.span_to(start, variant.span))
+}
+
+fn parse_record_literal(start: Parser, type_name: Text, type_span: source.Span) -> ExprResult {
+    var p = expect(start, .LBrace)
+    var fields: List[ast.FieldInit] = []
+    while not p.failed {
+        set p = skip_newlines(p)
+        if at(p, .RBrace) {
+            break
+        }
+        let field = identifier(p, "a field name")
+        let value = parse_expr(expect(field.parser, .Colon), true)
+        if value.parser.failed {
+            return value
+        }
+        set fields = append(fields, ast.FieldInit { name: field.name, span: field.span, value: value.expr })
+        set p = skip_newlines(value.parser)
+        if at(p, .Comma) {
+            set p = advance(p)
+        } else if not at(p, .RBrace) {
+            set p = unexpected(p, "`,` or `}`")
+        }
+    }
+    if p.failed {
+        return failed_expr(p)
+    }
+    let close = current_span(p)
+    expr_result(advance(p), .RecordLiteral(type_name, type_span, fields), source.span_to(type_span, close))
+}
+
+fn parse_if(p: Parser) -> ExprResult {
+    let start = current_span(p)
+    let condition = parse_expr(advance(p), false)
+    if condition.parser.failed {
+        return condition
+    }
+    let then_block = parse_block(condition.parser)
+    if then_block.parser.failed {
+        return failed_expr(then_block.parser)
+    }
+    let after = then_block.parser
+    if at(after, .Else) {
+        let else_start = advance(after)
+        let else_branch = if at(else_start, .If) {
+            parse_if(else_start)
+        } else {
+            let else_block = parse_block(else_start)
+            expr_result(else_block.parser, .BlockExpr(else_block.block), else_block.block.span)
+        }
+        if else_branch.parser.failed {
+            return else_branch
+        }
+        let kind = ast.ExprKind.If(condition.expr, then_block.block, Option.Some(else_branch.expr))
+        return expr_result(else_branch.parser, kind, source.span_to(start, else_branch.expr.span))
+    }
+    if at(after, .Newline) and peek_at(after, 1) == .Else {
+        let d = source.error_help("E0111", after.tokens[after.pos + 1].span, "`else` must be on the same line as the closing `}`", "write `} else {`")
+        return failed_expr(fail_parse(after, d))
+    }
+    expr_result(after, .If(condition.expr, then_block.block, .None), source.span_to(start, then_block.block.span))
+}
+
+fn parse_match(p: Parser) -> ExprResult {
+    let start = current_span(p)
+    let scrutinee = parse_expr(advance(p), false)
+    var q = expect(scrutinee.parser, .LBrace)
+    var arms: List[ast.Arm] = []
+    while not q.failed {
+        set q = skip_newlines(q)
+        if at(q, .RBrace) {
+            break
+        }
+        let pattern = parse_pattern(q)
+        let body = parse_expr(expect(pattern.parser, .FatArrow), true)
+        if body.parser.failed {
+            return body
+        }
+        set arms = append(arms, ast.Arm { pattern: pattern.pattern, body: body.expr })
+        set q = end_of_line(body.parser, "a match arm")
+    }
+    if q.failed {
+        return failed_expr(q)
+    }
+    let close = current_span(q)
+    expr_result(advance(q), .Match(scrutinee.expr, arms), source.span_to(start, close))
+}
+
+fn pattern_result(p: Parser, kind: ast.PatternKind, start: source.Span) -> PatternResult {
+    PatternResult { parser: p, pattern: ast.Pattern { kind: kind, span: source.span_to(start, previous_span(p)) } }
+}
+
+fn failed_pattern(p: Parser) -> PatternResult = PatternResult { parser: p, pattern: ast.Pattern { kind: .Wildcard, span: current_span(p) } }
+
+fn parse_pattern(p: Parser) -> PatternResult {
+    if p.failed {
+        return failed_pattern(p)
+    }
+    let start = current_span(p)
+    let t = current(p)
+    match t.kind {
+        .Underscore => pattern_result(advance(p), .Wildcard, start)
+        .Int => {
+            if t.text == min_int_digits() {
+                return failed_pattern(fail_parse(p, source.error("E0106", start, "number does not fit in `Int`")))
+            }
+            pattern_result(advance(p), .IntPattern(parse_int_text(t.text)), start)
+        }
+        .Minus => {
+            let number = current(advance(p))
+            if number.kind != .Int {
+                return failed_pattern(unexpected(advance(p), "a number"))
+            }
+            let value = if number.text == min_int_digits() { min_int() } else { -parse_int_text(number.text) }
+            pattern_result(advance(advance(p)), .IntPattern(value), start)
+        }
+        .Text => pattern_result(advance(p), .TextPattern(t.text), start)
+        .True => pattern_result(advance(p), .BoolPattern(true), start)
+        .False => pattern_result(advance(p), .BoolPattern(false), start)
+        .Dot => parse_variant_pattern(p, "", start)
+        .Ident => {
+            var type_name = t.text
+            var after_type = advance(p)
+            if not source.starts_with_upper(t.text) {
+                if not is_qualified_type(after_type) {
+                    return failed_pattern(unexpected(p, "a pattern (`_`, a literal, or `Type.Variant`)"))
+                }
+                set type_name = t.text + "." + after_type.tokens[after_type.pos + 1].text
+                set after_type = after_type with { pos: after_type.pos + 2 }
+            }
+            parse_variant_pattern(after_type, type_name, start)
+        }
+        _ => failed_pattern(unexpected(p, "a pattern (`_`, a literal, or `Type.Variant`)"))
+    }
+}
+
+note "From the `.` before the variant name; `type_name` is empty for the `.Variant` shorthand."
+fn parse_variant_pattern(after_type: Parser, type_name: Text, start: source.Span) -> PatternResult {
+    let variant = identifier(expect(after_type, .Dot), "a variant name")
+    if variant.parser.failed {
+        return failed_pattern(variant.parser)
+    }
+    var q = variant.parser
+    var bindings: List[ast.Binding] = []
+    if at(q, .LParen) {
+        set q = advance(q)
+        while not at(q, .RParen) {
+            let b = current(q)
+            if b.kind == .Underscore {
+                set bindings = append(bindings, ast.Binding { name: "_", span: b.span })
+            } else if b.kind == .Ident {
+                set bindings = append(bindings, ast.Binding { name: b.text, span: b.span })
+            } else {
+                return failed_pattern(unexpected(q, "a binding name or `_`"))
+            }
+            set q = advance(q)
+            if at(q, .Comma) {
+                set q = advance(q)
+            } else if not at(q, .RParen) {
+                return failed_pattern(unexpected(q, "`,` or `)`"))
+            }
+        }
+        set q = advance(q)
+    }
+    pattern_result(q, .VariantPattern(type_name, variant.name, bindings), start)
+}

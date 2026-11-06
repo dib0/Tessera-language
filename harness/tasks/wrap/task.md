@@ -1,0 +1,1 @@
+Write a program that word-wraps text. The first command-line argument is the maximum line width W (a positive integer). The remaining arguments are the words, in order. Fill lines greedily: put as many words on a line as fit, separated by single spaces, so that the line is at most W characters long. A word longer than W goes on a line by itself. Print the lines.

@@ -1,0 +1,65 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "3",
+        "4",
+        "+",
+        "2",
+        "*"
+      ],
+      "stdout": "14\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "7",
+        "2",
+        "-",
+        "10",
+        "/"
+      ],
+      "stdout": "0\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "+"
+      ],
+      "stdout": "error: stack underflow\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "4",
+        "0",
+        "/"
+      ],
+      "stdout": "error: division by zero\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "2",
+        "x",
+        "+"
+      ],
+      "stdout": "error: invalid token x\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "1",
+        "2"
+      ],
+      "stdout": "error: expected one result\n",
+      "exit": 1
+    }
+  ]
+}

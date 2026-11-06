@@ -1,0 +1,36 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "10",
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "over",
+        "the",
+        "lazy",
+        "dog"
+      ],
+      "stdout": "the quick\nbrown fox\njumps over\nthe lazy\ndog\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "3",
+        "a",
+        "abcdef",
+        "b",
+        "c"
+      ],
+      "stdout": "a\nabcdef\nb c\n",
+      "exit": 0
+    }
+  ]
+}

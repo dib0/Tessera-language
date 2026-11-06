@@ -1,0 +1,36 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "3",
+        "Hello,",
+        "World!"
+      ],
+      "stdout": "Khoor, Zruog!\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "-1",
+        "abc",
+        "XYZ",
+        "a1"
+      ],
+      "stdout": "zab WXY z1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "27",
+        "zZ"
+      ],
+      "stdout": "aA\n",
+      "exit": 0
+    }
+  ]
+}

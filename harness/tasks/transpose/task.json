@@ -1,0 +1,32 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "1,2,3",
+        "4,5,6"
+      ],
+      "stdout": "1,4\n2,5\n3,6\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "a,b",
+        "c"
+      ],
+      "stdout": "error: ragged matrix\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "x"
+      ],
+      "stdout": "x\n",
+      "exit": 0
+    }
+  ]
+}

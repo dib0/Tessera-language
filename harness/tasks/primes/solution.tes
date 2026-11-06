@@ -1,0 +1,27 @@
+fn parse(text: Text) -> Int {
+    var value = 0
+    for code in code_points(text) {
+        set value = value * 10 + (code - 48)
+    }
+    value
+}
+
+fn main() -> Unit uses io, env {
+    let limit = parse(args()[0])
+    var composite: List[Bool] = []
+    for step in range(0, limit + 1) {
+        set composite = append(composite, false)
+    }
+    var primes: List[Text] = []
+    for n in range(2, limit + 1) {
+        if not composite[n] {
+            set primes = append(primes, to_text(n))
+            var multiple = n * n
+            while multiple <= limit {
+                set composite = replace_at(composite, multiple, true)
+                set multiple = multiple + n
+            }
+        }
+    }
+    print(join(primes, " "))
+}

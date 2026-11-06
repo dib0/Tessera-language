@@ -1,0 +1,312 @@
+// Source positions, diagnostics, and text helpers shared by all compiler phases.
+
+pub type Span {
+    file: Int
+    line: Int
+    col: Int
+    end_line: Int
+    end_col: Int
+}
+
+pub type SourceFile {
+    path: Text
+    text: Text
+}
+
+note "Empty `label` or `help` means the diagnostic has none."
+pub type Diagnostic {
+    code: Text
+    message: Text
+    span: Span
+    label: Text
+    help: Text
+}
+
+pub fn span_of(file: Int, line: Int, col: Int, end_col: Int) -> Span {
+    Span { file: file, line: line, col: col, end_line: line, end_col: end_col }
+}
+
+pub fn span_to(start: Span, finish: Span) -> Span {
+    Span { file: start.file, line: start.line, col: start.col, end_line: finish.end_line, end_col: finish.end_col }
+}
+
+pub fn error(code: Text, span: Span, message: Text) -> Diagnostic {
+    Diagnostic { code: code, message: message, span: span, label: "", help: "" }
+}
+
+pub fn error_help(code: Text, span: Span, message: Text, help: Text) -> Diagnostic {
+    Diagnostic { code: code, message: message, span: span, label: "", help: help }
+}
+
+// ---------- character classes (code points) ----------
+
+pub fn is_digit(code: Int) -> Bool = code >= 48 and code <= 57
+
+pub fn is_upper(code: Int) -> Bool = code >= 65 and code <= 90
+
+pub fn is_lower(code: Int) -> Bool = code >= 97 and code <= 122
+
+pub fn is_letter(code: Int) -> Bool = is_upper(code) or is_lower(code)
+
+pub fn is_alphanumeric(code: Int) -> Bool = is_letter(code) or is_digit(code)
+
+pub fn is_hex_digit(code: Int) -> Bool = is_digit(code) or (code >= 97 and code <= 102) or (code >= 65 and code <= 70)
+
+pub fn is_control(code: Int) -> Bool = code < 32 or (code >= 127 and code < 160)
+
+pub fn hex_value(code: Int) -> Int {
+    if is_digit(code) {
+        code - 48
+    } else if code >= 97 {
+        code - 87
+    } else {
+        code - 55
+    }
+}
+
+// ---------- text helpers ----------
+
+pub fn repeat_text(text: Text, count: Int) -> Text {
+    var out = ""
+    var index = 0
+    while index < count {
+        set out = out + text
+        set index = index + 1
+    }
+    out
+}
+
+pub fn starts_with_upper(text: Text) -> Bool {
+    let codes = code_points(text)
+    length(codes) > 0 and is_upper(codes[0])
+}
+
+pub fn contains_text(items: List[Text], item: Text) -> Bool {
+    for candidate in items {
+        if candidate == item {
+            return true
+        }
+    }
+    false
+}
+
+pub fn ends_with_text(text: Text, suffix: Text) -> Bool {
+    let codes = code_points(text)
+    let suffix_codes = code_points(suffix)
+    if length(suffix_codes) > length(codes) {
+        return false
+    }
+    slice(codes, length(codes) - length(suffix_codes), length(codes)) == suffix_codes
+}
+
+pub fn starts_with_text(text: Text, prefix: Text) -> Bool {
+    let codes = code_points(text)
+    let prefix_codes = code_points(prefix)
+    if length(prefix_codes) > length(codes) {
+        return false
+    }
+    slice(codes, 0, length(prefix_codes)) == prefix_codes
+}
+
+note "Same contract as Rust `str::lines` for LF-only text: no empty last line after a final newline."
+fn split_lines(text: Text) -> List[Text] {
+    let codes = code_points(text)
+    var lines: List[Text] = []
+    var start = 0
+    var index = 0
+    while index < length(codes) {
+        if codes[index] == 10 {
+            set lines = append(lines, from_code_points(slice(codes, start, index)))
+            set start = index + 1
+        }
+        set index = index + 1
+    }
+    if start < length(codes) {
+        set lines = append(lines, from_code_points(slice(codes, start, length(codes))))
+    }
+    lines
+}
+
+pub fn split_on(text: Text, separator: Int) -> List[Text] {
+    let codes = code_points(text)
+    var parts: List[Text] = []
+    var start = 0
+    var index = 0
+    while index < length(codes) {
+        if codes[index] == separator {
+            set parts = append(parts, from_code_points(slice(codes, start, index)))
+            set start = index + 1
+        }
+        set index = index + 1
+    }
+    append(parts, from_code_points(slice(codes, start, length(codes))))
+}
+
+pub fn split_on_text(text: Text, separator: Text) -> List[Text] {
+    let codes = code_points(text)
+    let sep = code_points(separator)
+    let width = length(sep)
+    var parts: List[Text] = []
+    var start = 0
+    var index = 0
+    while index + width <= length(codes) {
+        if slice(codes, index, index + width) == sep {
+            set parts = append(parts, from_code_points(slice(codes, start, index)))
+            set index = index + width
+            set start = index
+        } else {
+            set index = index + 1
+        }
+    }
+    append(parts, from_code_points(slice(codes, start, length(codes))))
+}
+
+fn hex_text(value: Int) -> Text {
+    if value == 0 {
+        return "0"
+    }
+    let digits = code_points("0123456789abcdef")
+    var remaining = value
+    var reversed: List[Int] = []
+    while remaining > 0 {
+        set reversed = append(reversed, digits[remaining % 16])
+        set remaining = remaining / 16
+    }
+    var out: List[Int] = []
+    var index = length(reversed) - 1
+    while index >= 0 {
+        set out = append(out, reversed[index])
+        set index = index - 1
+    }
+    from_code_points(out)
+}
+
+fn pad_left(text: Text, width: Int, fill: Text) -> Text {
+    let missing = width - length(text)
+    if missing > 0 { repeat_text(fill, missing) + text } else { text }
+}
+
+note "Must match `rust_string` in the stage 0 compiler exactly, or generated code differs."
+pub fn rust_string(text: Text) -> Text {
+    var out: List[Text] = ["\""]
+    for code in code_points(text) {
+        let piece = match code {
+            34 => "\\\""
+            92 => "\\\\"
+            10 => "\\n"
+            13 => "\\r"
+            9 => "\\t"
+            _ => if code >= 32 and code <= 126 { from_code_point(code) } else { "\\u{" + hex_text(code) + "}" }
+        }
+        set out = append(out, piece)
+    }
+    join(append(out, "\""), "")
+}
+
+pub fn json_string(text: Text) -> Text {
+    var out: List[Text] = ["\""]
+    for code in code_points(text) {
+        let piece = match code {
+            34 => "\\\""
+            92 => "\\\\"
+            10 => "\\n"
+            13 => "\\r"
+            9 => "\\t"
+            _ => if code < 32 { "\\u" + pad_left(hex_text(code), 4, "0") } else { from_code_point(code) }
+        }
+        set out = append(out, piece)
+    }
+    join(append(out, "\""), "")
+}
+
+// ---------- rendering ----------
+
+pub fn render(diagnostic: Diagnostic, files: List[SourceFile]) -> Text {
+    let file = files[diagnostic.span.file]
+    let span = diagnostic.span
+    var out = "error[" + diagnostic.code + "]: " + diagnostic.message + "\n"
+    set out = out + "  --> " + file.path + ":" + to_text(span.line) + ":" + to_text(span.col) + "\n"
+    let lines = split_lines(file.text)
+    if span.line >= 1 and span.line <= length(lines) {
+        let line_text = lines[span.line - 1]
+        let number = to_text(span.line)
+        let pad = repeat_text(" ", length(number))
+        set out = out + pad + " |\n"
+        set out = out + number + " | " + line_text + "\n"
+        let start = if span.col < 1 { 1 } else { span.col }
+        let finish = if span.end_line == span.line { span.end_col } else { length(line_text) + 1 }
+        let width = if finish - start < 1 { 1 } else { finish - start }
+        var marker = pad + " | " + repeat_text(" ", start - 1) + repeat_text("^", width)
+        if diagnostic.label != "" {
+            set marker = marker + " " + diagnostic.label
+        }
+        set out = out + marker + "\n"
+        set out = out + pad + " |\n"
+    }
+    if diagnostic.help != "" {
+        set out = out + "help: " + diagnostic.help + "\n"
+    }
+    out
+}
+
+fn json_or_null(text: Text) -> Text = if text == "" { "null" } else { json_string(text) }
+
+pub fn render_json(diagnostics: List[Diagnostic], files: List[SourceFile]) -> Text {
+    var parts: List[Text] = []
+    for d in diagnostics {
+        let s = d.span
+        set parts = append(parts, "{\"severity\":\"error\",\"code\":" + json_string(d.code) + ",\"message\":" + json_string(d.message) + ",\"file\":" + json_string(files[s.file].path) + ",\"line\":" + to_text(s.line) + ",\"column\":" + to_text(s.col) + ",\"end_line\":" + to_text(s.end_line) + ",\"end_column\":" + to_text(s.end_col) + ",\"label\":" + json_or_null(d.label) + ",\"help\":" + json_or_null(d.help) + "}")
+    }
+    "{\"diagnostics\":[" + join(parts, ",") + "]}"
+}
+
+// ---------- ordering ----------
+
+fn comes_before(a: Diagnostic, b: Diagnostic) -> Bool {
+    if a.span.file != b.span.file {
+        return a.span.file < b.span.file
+    }
+    if a.span.line != b.span.line {
+        return a.span.line < b.span.line
+    }
+    a.span.col <= b.span.col
+}
+
+note "Stable merge sort by (file, line, column), matching the stage 0 order."
+pub fn sort_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
+    if length(items) <= 1 {
+        return items
+    }
+    let middle = length(items) / 2
+    let left = sort_diagnostics(slice(items, 0, middle))
+    let right = sort_diagnostics(slice(items, middle, length(items)))
+    var merged: List[Diagnostic] = []
+    var i = 0
+    var j = 0
+    while i < length(left) and j < length(right) {
+        if comes_before(left[i], right[j]) {
+            set merged = append(merged, left[i])
+            set i = i + 1
+        } else {
+            set merged = append(merged, right[j])
+            set j = j + 1
+        }
+    }
+    concat(concat(merged, slice(left, i, length(left))), slice(right, j, length(right)))
+}
+
+pub fn dedup_diagnostics(items: List[Diagnostic]) -> List[Diagnostic] {
+    var out: List[Diagnostic] = []
+    for d in items {
+        let count = length(out)
+        if count == 0 {
+            set out = append(out, d)
+        } else {
+            let previous = out[count - 1]
+            if not (previous.span == d.span and previous.code == d.code and previous.message == d.message) {
+                set out = append(out, d)
+            }
+        }
+    }
+    out
+}

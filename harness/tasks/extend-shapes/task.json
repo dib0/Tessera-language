@@ -1,0 +1,25 @@
+{
+  "kind": "extend",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "circle:2",
+        "square:3",
+        "rect:2x5"
+      ],
+      "stdout": "12\n9\n10\ntotal: 31\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "rect:10x1"
+      ],
+      "stdout": "10\ntotal: 10\n",
+      "exit": 0
+    }
+  ]
+}

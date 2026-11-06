@@ -1,0 +1,8 @@
+- 3 apples
+- 1 pear
+total: 4, even: true
+4
+nested: inner 5!
+braces stay literal: {x} and \(not interpolated)
+joined: a, b
+empty end

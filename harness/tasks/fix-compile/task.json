@@ -1,0 +1,30 @@
+{
+  "kind": "fix",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "1",
+        "2",
+        "4"
+      ],
+      "stdout": "average: 2\n",
+      "exit": 0
+    },
+    {
+      "args": [],
+      "stdout": "no numbers\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "10"
+      ],
+      "stdout": "average: 10\n",
+      "exit": 0
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "kind": "fix",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "Banana",
+        "sky",
+        "AEIOU"
+      ],
+      "stdout": "Banana: 3\nsky: 0\nAEIOU: 5\ntotal: 8\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "a"
+      ],
+      "stdout": "a: 1\ntotal: 1\n",
+      "exit": 0
+    }
+  ]
+}

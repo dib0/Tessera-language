@@ -172,7 +172,6 @@ struct T_Options {
     f_output: Rc<String>,
     f_json: bool,
     f_opt: Rc<String>,
-    f_error: Rc<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -303,6 +302,7 @@ struct T_lexer__Scan {
     f_end: i64,
     f_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>>,
     f_emit: bool,
+    f_expansion: Rc<Vec<Rc<T_lexer__Token>>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -706,11 +706,22 @@ struct T_checker__CheckedProgram {
 }
 
 #[derive(Clone, PartialEq)]
+enum T_checker__Unresolved {
+    V_NotDeclared,
+    V_Reported,
+}
+
+#[derive(Clone, PartialEq)]
 struct T_checker__NameLookup {
     f_checker: Rc<T_checker__Checker>,
-    f_canonical: Rc<String>,
-    f_found: bool,
-    f_reported: bool,
+    f_result: Result<Rc<String>, Rc<T_checker__Unresolved>>,
+}
+
+#[derive(Clone, PartialEq)]
+enum T_checker__LookupFailure {
+    V_UnknownModule,
+    V_Missing(Rc<String>),
+    V_Private(Rc<String>, Rc<String>),
 }
 
 #[derive(Clone, PartialEq)]
@@ -757,44 +768,49 @@ fn f_usage() -> Rc<String> {
     t_join(&Rc::new(vec![t_text("Tessera stage 1 compiler (written in Tessera)"), t_text(""), t_text("Usage:"), t_text("  tessera1 check <files...> [--json]           Check for errors without generating code"), t_text("  tessera1 build <files...> -o <output>        Compile to a native executable"), t_text("        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)"), t_text("  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code"), t_text("  tessera1 notes <files...>                    Export notes as JSON"), t_text(""), t_text("The first file is the entry module (with `main`); imported modules are found"), t_text("relative to its directory. Further files given on the command line are part of"), t_text("the entry module."), t_text("Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure."), t_text("Set TESSERA_RUSTC to choose the rustc binary.")]), &t_text("\n"))
 }
 
-fn f_parse_options(v_arguments: Rc<Vec<Rc<String>>>) -> Rc<T_Options> {
-    if (t_list_length(&v_arguments.clone()) == 0i64) {
-        return Rc::new(T_Options { f_command: t_text(""), f_files: Rc::new(Vec::<Rc<String>>::new()), f_output: t_text(""), f_json: false, f_opt: t_text("2"), f_error: t_text("missing command") })
+fn f_value_after(v_arguments: Rc<Vec<Rc<String>>>, v_index: i64) -> Result<Rc<String>, Rc<String>> {
+    if (t_add(v_index.clone(), 1i64, "stage1/main.tes:39:14 in function `value_after`") >= t_list_length(&v_arguments.clone())) {
+        return Result::<Rc<String>, Rc<String>>::Err(t_concat(t_concat(t_text("`"), t_index(&v_arguments.clone(), v_index.clone(), "stage1/main.tes:40:35 in function `value_after`")), t_text("` needs a value")))
     };
-    let mut v_files: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
-    let mut v_output: Rc<String> = t_text("");
-    let mut v_json: bool = false;
-    let mut v_opt: Rc<String> = t_text("2");
-    let mut v_problem: Rc<String> = t_text("");
+    Result::<Rc<String>, Rc<String>>::Ok(t_index(&v_arguments.clone(), t_add(v_index.clone(), 1i64, "stage1/main.tes:42:31 in function `value_after`"), "stage1/main.tes:42:15 in function `value_after`"))
+}
+
+// note: The error is a message for the user; `main` prints it with the usage text.
+fn f_parse_options(v_arguments: Rc<Vec<Rc<String>>>) -> Result<Rc<T_Options>, Rc<String>> {
+    if (t_list_length(&v_arguments.clone()) == 0i64) {
+        return Result::<Rc<T_Options>, Rc<String>>::Err(t_text("missing command"))
+    };
+    let mut v_options: Rc<T_Options> = Rc::new(T_Options { f_command: t_index(&v_arguments.clone(), 0i64, "stage1/main.tes:50:38 in function `parse_options`"), f_files: Rc::new(Vec::<Rc<String>>::new()), f_output: t_text(""), f_json: false, f_opt: t_text("2") });
+    if (((v_options.clone()).f_command.clone() == t_text("help")) || ((v_options.clone()).f_command.clone() == t_text("--help"))) {
+        return Result::<Rc<T_Options>, Rc<String>>::Ok(v_options.clone())
+    };
     let mut v_index: i64 = 1i64;
-    while ((v_index.clone() < t_list_length(&v_arguments.clone())) && (v_problem.clone() == t_text(""))) {
-        let v_argument: Rc<String> = t_index(&v_arguments.clone(), v_index.clone(), "stage1/main.tes:50:24 in function `parse_options`");
-        if ((v_argument.clone() == t_text("-o")) || (v_argument.clone() == t_text("--opt"))) {
-            if (t_add(v_index.clone(), 1i64, "stage1/main.tes:52:22 in function `parse_options`") >= t_list_length(&v_arguments.clone())) {
-                v_problem = t_concat(t_concat(t_text("`"), v_argument.clone()), t_text("` needs a value"));
-            } else if (v_argument.clone() == t_text("-o")) {
-                v_output = t_index(&v_arguments.clone(), t_add(v_index.clone(), 1i64, "stage1/main.tes:55:46 in function `parse_options`"), "stage1/main.tes:55:30 in function `parse_options`");
-            } else if f_source__contains_text(Rc::new(vec![t_text("0"), t_text("1"), t_text("2"), t_text("3")]), t_index(&v_arguments.clone(), t_add(v_index.clone(), 1i64, "stage1/main.tes:56:82 in function `parse_options`"), "stage1/main.tes:56:66 in function `parse_options`")) {
-                v_opt = t_index(&v_arguments.clone(), t_add(v_index.clone(), 1i64, "stage1/main.tes:57:43 in function `parse_options`"), "stage1/main.tes:57:27 in function `parse_options`");
-            } else {
-                v_problem = t_concat(t_concat(t_text("invalid optimization level `"), t_index(&v_arguments.clone(), t_add(v_index.clone(), 1i64, "stage1/main.tes:59:80 in function `parse_options`"), "stage1/main.tes:59:64 in function `parse_options`")), t_text("`"));
+    while (v_index.clone() < t_list_length(&v_arguments.clone())) {
+        let v_argument: Rc<String> = t_index(&v_arguments.clone(), v_index.clone(), "stage1/main.tes:56:24 in function `parse_options`");
+        if (v_argument.clone() == t_text("-o")) {
+            v_options = { let mut t1 = Rc::unwrap_or_clone(v_options.clone()); t1.f_output = match f_value_after(v_arguments.clone(), v_index.clone()) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) }; Rc::new(t1) };
+            v_index = t_add(v_index.clone(), 2i64, "stage1/main.tes:59:31 in function `parse_options`");
+        } else if (v_argument.clone() == t_text("--opt")) {
+            let v_level: Rc<String> = match f_value_after(v_arguments.clone(), v_index.clone()) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) };
+            if (!f_source__contains_text(Rc::new(vec![t_text("0"), t_text("1"), t_text("2"), t_text("3")]), v_level.clone())) {
+                return Result::<Rc<T_Options>, Rc<String>>::Err(t_concat(t_concat(t_text("invalid optimization level `"), v_level.clone()), t_text("`")))
             };
-            v_index = t_add(v_index.clone(), 2i64, "stage1/main.tes:61:31 in function `parse_options`");
+            v_options = { let mut t2 = Rc::unwrap_or_clone(v_options.clone()); t2.f_opt = v_level.clone(); Rc::new(t2) };
+            v_index = t_add(v_index.clone(), 2i64, "stage1/main.tes:66:31 in function `parse_options`");
         } else if (v_argument.clone() == t_text("--json")) {
-            v_json = true;
-            v_index = t_add(v_index.clone(), 1i64, "stage1/main.tes:64:31 in function `parse_options`");
-        } else if f_source__starts_with_text(v_argument.clone(), t_text("-")) {
-            v_problem = t_concat(t_concat(t_text("unknown option `"), v_argument.clone()), t_text("`"));
-        } else {
-            v_files = t_append(std::mem::take(&mut v_files), v_argument.clone());
+            v_options = { let mut t3 = Rc::unwrap_or_clone(v_options.clone()); t3.f_json = true; Rc::new(t3) };
             v_index = t_add(v_index.clone(), 1i64, "stage1/main.tes:69:31 in function `parse_options`");
+        } else if f_source__starts_with_text(v_argument.clone(), t_text("-")) {
+            return Result::<Rc<T_Options>, Rc<String>>::Err(t_concat(t_concat(t_text("unknown option `"), v_argument.clone()), t_text("`")))
+        } else {
+            v_options = { let mut t4 = Rc::unwrap_or_clone(v_options.clone()); t4.f_files = t_append((v_options.clone()).f_files.clone(), v_argument.clone()); Rc::new(t4) };
+            v_index = t_add(v_index.clone(), 1i64, "stage1/main.tes:74:31 in function `parse_options`");
         }
     }
-    let v_command: Rc<String> = t_index(&v_arguments.clone(), 0i64, "stage1/main.tes:72:19 in function `parse_options`");
-    if ((((v_problem.clone() == t_text("")) && (t_list_length(&v_files.clone()) == 0i64)) && (v_command.clone() != t_text("help"))) && (v_command.clone() != t_text("--help"))) {
-        v_problem = t_text("no source files given");
+    if (t_list_length(&(v_options.clone()).f_files.clone()) == 0i64) {
+        return Result::<Rc<T_Options>, Rc<String>>::Err(t_text("no source files given"))
     };
-    Rc::new(T_Options { f_command: v_command.clone(), f_files: v_files.clone(), f_output: v_output.clone(), f_json: v_json.clone(), f_opt: v_opt.clone(), f_error: v_problem.clone() })
+    Result::<Rc<T_Options>, Rc<String>>::Ok(v_options.clone())
 }
 
 fn f_parse_source(v_text: Rc<String>, v_file: i64) -> Rc<T_ParsedSource> {
@@ -808,12 +824,12 @@ fn f_parse_source(v_text: Rc<String>, v_file: i64) -> Rc<T_ParsedSource> {
 
 fn f_directory_of(v_path: Rc<String>) -> Rc<String> {
     let v_codes: Rc<Vec<i64>> = t_code_points(&v_path.clone());
-    let mut v_index: i64 = t_sub(t_list_length(&v_codes.clone()), 1i64, "stage1/main.tes:107:31 in function `directory_of`");
+    let mut v_index: i64 = t_sub(t_list_length(&v_codes.clone()), 1i64, "stage1/main.tes:111:31 in function `directory_of`");
     while (v_index.clone() >= 0i64) {
-        if (t_index(&v_codes.clone(), v_index.clone(), "stage1/main.tes:109:12 in function `directory_of`") == 47i64) {
-            return t_from_code_points(&t_slice(v_codes.clone(), 0i64, v_index.clone(), "stage1/main.tes:110:37 in function `directory_of`"), "stage1/main.tes:110:20 in function `directory_of`")
+        if (t_index(&v_codes.clone(), v_index.clone(), "stage1/main.tes:113:12 in function `directory_of`") == 47i64) {
+            return t_from_code_points(&t_slice(v_codes.clone(), 0i64, v_index.clone(), "stage1/main.tes:114:37 in function `directory_of`"), "stage1/main.tes:114:20 in function `directory_of`")
         };
-        v_index = t_sub(v_index.clone(), 1i64, "stage1/main.tes:112:27 in function `directory_of`");
+        v_index = t_sub(v_index.clone(), 1i64, "stage1/main.tes:116:27 in function `directory_of`");
     }
     t_text(".")
 }
@@ -823,7 +839,7 @@ fn f_base_name(v_path: Rc<String>) -> Rc<String> {
     if ((v_directory.clone() == t_text(".")) && (!f_source__starts_with_text(v_path.clone(), t_text("./")))) {
         return v_path.clone()
     };
-    t_from_code_points(&t_slice(t_code_points(&v_path.clone()), t_add(t_list_length(&t_code_points(&v_directory.clone())), 1i64, "stage1/main.tes:122:78 in function `base_name`"), t_list_length(&t_code_points(&v_path.clone())), "stage1/main.tes:122:22 in function `base_name`"), "stage1/main.tes:122:5 in function `base_name`")
+    t_from_code_points(&t_slice(t_code_points(&v_path.clone()), t_add(t_list_length(&t_code_points(&v_directory.clone())), 1i64, "stage1/main.tes:126:78 in function `base_name`"), t_list_length(&t_code_points(&v_path.clone())), "stage1/main.tes:126:22 in function `base_name`"), "stage1/main.tes:126:5 in function `base_name`")
 }
 
 fn f_join_path(v_directory: Rc<String>, v_relative: Rc<String>) -> Rc<String> {
@@ -845,14 +861,14 @@ fn f_valid_module_path(v_path: Rc<String>) -> bool {
 
 // note: Loads the entry files and, following `import`s, every module they need. Module files are found relative to the directory of the first entry file.
 fn f_load_program(v_entry_paths: Rc<Vec<Rc<String>>>) -> Rc<T_Loaded> {
-    let v_root: Rc<String> = f_directory_of(t_index(&v_entry_paths.clone(), 0i64, "stage1/main.tes:138:29 in function `load_program`"));
+    let v_root: Rc<String> = f_directory_of(t_index(&v_entry_paths.clone(), 0i64, "stage1/main.tes:142:29 in function `load_program`"));
     let mut v_files: Rc<Vec<Rc<T_source__SourceFile>>> = Rc::new(Vec::<Rc<T_source__SourceFile>>::new());
     let mut v_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>> = Rc::new(Vec::<Rc<T_source__Diagnostic>>::new());
     let mut v_entry_items: Rc<Vec<Rc<T_ast__Item>>> = Rc::new(Vec::<Rc<T_ast__Item>>::new());
     let mut v_entry_files: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
     for v_path in t_iter(v_entry_paths.clone()) {
         let v_file: i64 = t_list_length(&v_files.clone());
-        let v_text: Rc<String> = t_read_file(v_path.clone(), "stage1/main.tes:145:20 in function `load_program`");
+        let v_text: Rc<String> = t_read_file(v_path.clone(), "stage1/main.tes:149:20 in function `load_program`");
         v_files = t_append(std::mem::take(&mut v_files), Rc::new(T_source__SourceFile { f_path: v_path.clone(), f_text: v_text.clone() }));
         v_entry_files = t_append(std::mem::take(&mut v_entry_files), f_join_path(f_directory_of(v_path.clone()), f_base_name(v_path.clone())));
         let v_parsed: Rc<T_ParsedSource> = f_parse_source(v_text.clone(), v_file.clone());
@@ -863,7 +879,7 @@ fn f_load_program(v_entry_paths: Rc<Vec<Rc<String>>>) -> Rc<T_Loaded> {
     let mut v_loaded: Rc<Vec<Rc<String>>> = Rc::new(vec![t_text("")]);
     let mut v_next: i64 = 0i64;
     while (v_next.clone() < t_list_length(&v_modules.clone())) {
-        for v_i in t_iter(f_checker__imports_of(t_index(&v_modules.clone(), v_next.clone(), "stage1/main.tes:156:37 in function `load_program`"))) {
+        for v_i in t_iter(f_checker__imports_of(t_index(&v_modules.clone(), v_next.clone(), "stage1/main.tes:160:37 in function `load_program`"))) {
             if (f_source__contains_text(v_loaded.clone(), (v_i.clone()).f_path.clone()) || (!f_valid_module_path((v_i.clone()).f_path.clone()))) {
                 continue
             };
@@ -878,20 +894,20 @@ fn f_load_program(v_entry_paths: Rc<Vec<Rc<String>>>) -> Rc<T_Loaded> {
                 continue
             };
             let v_file: i64 = t_list_length(&v_files.clone());
-            let v_text: Rc<String> = t_read_file(v_file_path.clone(), "stage1/main.tes:171:24 in function `load_program`");
+            let v_text: Rc<String> = t_read_file(v_file_path.clone(), "stage1/main.tes:175:24 in function `load_program`");
             v_files = t_append(std::mem::take(&mut v_files), Rc::new(T_source__SourceFile { f_path: v_file_path.clone(), f_text: v_text.clone() }));
             let v_parsed: Rc<T_ParsedSource> = f_parse_source(v_text.clone(), v_file.clone());
             v_diagnostics = t_concat_lists(std::mem::take(&mut v_diagnostics), (v_parsed.clone()).f_diagnostics.clone());
             v_modules = t_append(std::mem::take(&mut v_modules), Rc::new(T_ast__Module { f_path: (v_i.clone()).f_path.clone(), f_prefix: f_ast__module_prefix((v_i.clone()).f_path.clone()), f_items: (v_parsed.clone()).f_items.clone(), f_is_entry: false }));
         }
-        v_next = t_add(v_next.clone(), 1i64, "stage1/main.tes:177:25 in function `load_program`");
+        v_next = t_add(v_next.clone(), 1i64, "stage1/main.tes:181:25 in function `load_program`");
     }
     Rc::new(T_Loaded { f_files: v_files.clone(), f_modules: v_modules.clone(), f_diagnostics: t_concat_lists(v_diagnostics.clone(), f_find_cycles(v_modules.clone())) })
 }
 
 fn f_module_index(v_modules: Rc<Vec<Rc<T_ast__Module>>>, v_path: Rc<String>) -> i64 {
-    for v_index in t_iter(t_range(0i64, t_list_length(&v_modules.clone()), "stage1/main.tes:188:18 in function `module_index`")) {
-        if ((t_index(&v_modules.clone(), v_index.clone(), "stage1/main.tes:189:12 in function `module_index`")).f_path.clone() == v_path.clone()) {
+    for v_index in t_iter(t_range(0i64, t_list_length(&v_modules.clone()), "stage1/main.tes:192:18 in function `module_index`")) {
+        if ((t_index(&v_modules.clone(), v_index.clone(), "stage1/main.tes:193:12 in function `module_index`")).f_path.clone() == v_path.clone()) {
             return v_index.clone()
         }
     }
@@ -908,15 +924,15 @@ fn f_module_label(v_m: Rc<T_ast__Module>) -> Rc<String> {
 
 // note: Depth-first search; `states` holds 0 (not seen), 1 (on the current path) or 2 (done).
 fn f_visit_module(v_node: i64, v_modules: Rc<Vec<Rc<T_ast__Module>>>, v_start: Rc<T_Visit>, v_path_stack: Rc<Vec<i64>>) -> Rc<T_Visit> {
-    let mut v_states: Rc<Vec<i64>> = t_replace_at((v_start.clone()).f_states.clone(), v_node.clone(), 1i64, "stage1/main.tes:200:18 in function `visit_module`");
+    let mut v_states: Rc<Vec<i64>> = t_replace_at((v_start.clone()).f_states.clone(), v_node.clone(), 1i64, "stage1/main.tes:204:18 in function `visit_module`");
     let mut v_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>> = (v_start.clone()).f_diagnostics.clone();
     let v_stack: Rc<Vec<i64>> = t_append(v_path_stack.clone(), v_node.clone());
-    for v_i in t_iter(f_checker__imports_of(t_index(&v_modules.clone(), v_node.clone(), "stage1/main.tes:203:33 in function `visit_module`"))) {
+    for v_i in t_iter(f_checker__imports_of(t_index(&v_modules.clone(), v_node.clone(), "stage1/main.tes:207:33 in function `visit_module`"))) {
         let v_target: i64 = f_module_index(v_modules.clone(), (v_i.clone()).f_path.clone());
         if (v_target.clone() < 0i64) {
             continue
         };
-        if (t_index(&v_states.clone(), v_target.clone(), "stage1/main.tes:208:12 in function `visit_module`") == 1i64) {
+        if (t_index(&v_states.clone(), v_target.clone(), "stage1/main.tes:212:12 in function `visit_module`") == 1i64) {
             let mut v_names: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
             let mut v_on_cycle: bool = false;
             for v_member in t_iter(v_stack.clone()) {
@@ -924,18 +940,18 @@ fn f_visit_module(v_node: i64, v_modules: Rc<Vec<Rc<T_ast__Module>>>, v_start: R
                     v_on_cycle = true;
                 };
                 if v_on_cycle.clone() {
-                    v_names = t_append(std::mem::take(&mut v_names), f_module_label(t_index(&v_modules.clone(), v_member.clone(), "stage1/main.tes:216:60 in function `visit_module`")));
+                    v_names = t_append(std::mem::take(&mut v_names), f_module_label(t_index(&v_modules.clone(), v_member.clone(), "stage1/main.tes:220:60 in function `visit_module`")));
                 }
             }
-            v_names = t_append(std::mem::take(&mut v_names), f_module_label(t_index(&v_modules.clone(), v_target.clone(), "stage1/main.tes:219:52 in function `visit_module`")));
+            v_names = t_append(std::mem::take(&mut v_names), f_module_label(t_index(&v_modules.clone(), v_target.clone(), "stage1/main.tes:223:52 in function `visit_module`")));
             v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0603"), (v_i.clone()).f_span.clone(), t_concat(t_text("import cycle: "), t_join(&v_names.clone(), &t_text(" -> "))), t_text("modules must form layers; move the shared part into a module that both can import")));
-        } else if (t_index(&v_states.clone(), v_target.clone(), "stage1/main.tes:221:19 in function `visit_module`") == 0i64) {
+        } else if (t_index(&v_states.clone(), v_target.clone(), "stage1/main.tes:225:19 in function `visit_module`") == 0i64) {
             let v_result: Rc<T_Visit> = f_visit_module(v_target.clone(), v_modules.clone(), Rc::new(T_Visit { f_states: v_states.clone(), f_diagnostics: v_diagnostics.clone() }), v_stack.clone());
             v_states = (v_result.clone()).f_states.clone();
             v_diagnostics = (v_result.clone()).f_diagnostics.clone();
         }
     }
-    Rc::new(T_Visit { f_states: t_replace_at(v_states.clone(), v_node.clone(), 2i64, "stage1/main.tes:227:21 in function `visit_module`"), f_diagnostics: v_diagnostics.clone() })
+    Rc::new(T_Visit { f_states: t_replace_at(v_states.clone(), v_node.clone(), 2i64, "stage1/main.tes:231:21 in function `visit_module`"), f_diagnostics: v_diagnostics.clone() })
 }
 
 fn f_find_cycles(v_modules: Rc<Vec<Rc<T_ast__Module>>>) -> Rc<Vec<Rc<T_source__Diagnostic>>> {
@@ -984,8 +1000,8 @@ fn f_paths_of(v_files: Rc<Vec<Rc<T_source__SourceFile>>>) -> Rc<Vec<Rc<String>>>
 fn f_without_final_newline(v_text: Rc<String>) -> Rc<String> {
     let v_codes: Rc<Vec<i64>> = t_code_points(&v_text.clone());
     let v_count: i64 = t_list_length(&v_codes.clone());
-    if ((v_count.clone() > 0i64) && (t_index(&v_codes.clone(), t_sub(v_count.clone(), 1i64, "stage1/main.tes:276:34 in function `without_final_newline`"), "stage1/main.tes:276:22 in function `without_final_newline`") == 10i64)) {
-        t_from_code_points(&t_slice(v_codes.clone(), 0i64, t_sub(v_count.clone(), 1i64, "stage1/main.tes:276:86 in function `without_final_newline`"), "stage1/main.tes:276:64 in function `without_final_newline`"), "stage1/main.tes:276:47 in function `without_final_newline`")
+    if ((v_count.clone() > 0i64) && (t_index(&v_codes.clone(), t_sub(v_count.clone(), 1i64, "stage1/main.tes:280:34 in function `without_final_newline`"), "stage1/main.tes:280:22 in function `without_final_newline`") == 10i64)) {
+        t_from_code_points(&t_slice(v_codes.clone(), 0i64, t_sub(v_count.clone(), 1i64, "stage1/main.tes:280:86 in function `without_final_newline`"), "stage1/main.tes:280:64 in function `without_final_newline`"), "stage1/main.tes:280:47 in function `without_final_newline`")
     } else {
         v_text.clone()
     }
@@ -1018,7 +1034,7 @@ fn f_note_entry(v_kind: Rc<String>, v_name: Rc<String>, v_span: Rc<T_source__Spa
     for v_n in t_iter(v_notes.clone()) {
         v_texts = t_append(std::mem::take(&mut v_texts), f_source__json_string((v_n.clone()).f_text.clone()));
     }
-    t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("    {\"file\": "), f_source__json_string((t_index(&v_files.clone(), (v_span.clone()).f_file.clone(), "stage1/main.tes:306:44 in function `note_entry`")).f_path.clone())), t_text(", \"item\": ")), f_source__json_string(v_name.clone())), t_text(", \"kind\": ")), f_source__json_string(v_kind.clone())), t_text(", \"line\": ")), t_int_to_text((v_span.clone()).f_line.clone())), t_text(", \"text\": [")), t_join(&v_texts.clone(), &t_text(", "))), t_text("]}"))
+    t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("    {\"file\": "), f_source__json_string((t_index(&v_files.clone(), (v_span.clone()).f_file.clone(), "stage1/main.tes:310:44 in function `note_entry`")).f_path.clone())), t_text(", \"item\": ")), f_source__json_string(v_name.clone())), t_text(", \"kind\": ")), f_source__json_string(v_kind.clone())), t_text(", \"line\": ")), t_int_to_text((v_span.clone()).f_line.clone())), t_text(", \"text\": [")), t_join(&v_texts.clone(), &t_text(", "))), t_text("]}"))
 }
 
 fn f_run_rustc(v_options: Rc<T_Options>, v_rust_path: Rc<String>) -> i64 {
@@ -1035,29 +1051,31 @@ fn f_run_rustc(v_options: Rc<T_Options>, v_rust_path: Rc<String>) -> i64 {
 }
 
 fn f_main() -> () {
-    let v_options: Rc<T_Options> = f_parse_options(t_args("stage1/main.tes:323:33 in function `main`"));
+    let v_options: Rc<T_Options> = match &(f_parse_options(t_args("stage1/main.tes:327:39 in function `main`"))) {
+        Ok(t1) => { let v_parsed = t1.clone(); v_parsed.clone() }
+        Err(t2) => { let v_problem = t2.clone(); {
+            t_print_error(t_concat(t_concat(t_concat(t_text("error: "), v_problem.clone()), t_text("\n\n")), f_usage()));
+            t_exit(2i64, "stage1/main.tes:331:13 in function `main`")
+        } }
+    };
     if (((v_options.clone()).f_command.clone() == t_text("help")) || ((v_options.clone()).f_command.clone() == t_text("--help"))) {
         t_print(f_usage());
-        t_exit(0i64, "stage1/main.tes:326:9 in function `main`")
-    };
-    if ((v_options.clone()).f_error.clone() != t_text("")) {
-        t_print_error(t_concat(t_concat(t_concat(t_text("error: "), (v_options.clone()).f_error.clone()), t_text("\n\n")), f_usage()));
-        t_exit(2i64, "stage1/main.tes:330:9 in function `main`")
+        t_exit(0i64, "stage1/main.tes:336:9 in function `main`")
     };
     for v_path in t_iter((v_options.clone()).f_files.clone()) {
         if (!f_source__ends_with_text(v_path.clone(), t_text(".tes"))) {
             t_print_error(t_concat(t_concat(t_text("error: `"), v_path.clone()), t_text("` is not a Tessera source file (expected the `.tes` extension)")));
-            t_exit(2i64, "stage1/main.tes:335:13 in function `main`")
+            t_exit(2i64, "stage1/main.tes:341:13 in function `main`")
         };
         if (!t_file_exists(v_path.clone())) {
             t_print_error(t_concat(t_concat(t_text("error: cannot read `"), v_path.clone()), t_text("`")));
-            t_exit(2i64, "stage1/main.tes:339:13 in function `main`")
+            t_exit(2i64, "stage1/main.tes:345:13 in function `main`")
         }
     }
     let v_command: Rc<String> = (v_options.clone()).f_command.clone();
     if (!f_source__contains_text(Rc::new(vec![t_text("check"), t_text("build"), t_text("emit-rust"), t_text("notes")]), v_command.clone())) {
         t_print_error(t_concat(t_concat(t_text("error: unknown command `"), v_command.clone()), t_text("`")));
-        t_exit(2i64, "stage1/main.tes:345:9 in function `main`")
+        t_exit(2i64, "stage1/main.tes:351:9 in function `main`")
     };
     let v_frontend: Rc<T_Frontend> = f_run_frontend((v_options.clone()).f_files.clone());
     let v_files: Rc<Vec<Rc<T_source__SourceFile>>> = (v_frontend.clone()).f_files.clone();
@@ -1067,39 +1085,39 @@ fn f_main() -> () {
             0i64
         } else {
             1i64
-        }, "stage1/main.tes:351:9 in function `main`")
+        }, "stage1/main.tes:357:9 in function `main`")
     };
     if (t_list_length(&(v_frontend.clone()).f_diagnostics.clone()) > 0i64) {
         f_report_diagnostics((v_frontend.clone()).f_diagnostics.clone(), v_files.clone(), (v_options.clone()).f_json.clone(), t_text("; no code was generated"));
-        t_exit(1i64, "stage1/main.tes:355:9 in function `main`")
+        t_exit(1i64, "stage1/main.tes:361:9 in function `main`")
     };
     if (v_command.clone() == t_text("notes")) {
         t_print(f_without_final_newline(f_notes_json(((v_frontend.clone()).f_program.clone()).f_items.clone(), v_files.clone())));
-        t_exit(0i64, "stage1/main.tes:359:9 in function `main`")
+        t_exit(0i64, "stage1/main.tes:365:9 in function `main`")
     };
     let v_rust: Rc<String> = f_codegen__generate((v_frontend.clone()).f_program.clone(), f_paths_of(v_files.clone()), f_runtime_text__core_runtime(), f_runtime_text__ui_runtime());
     if (v_command.clone() == t_text("emit-rust")) {
         if ((v_options.clone()).f_output.clone() == t_text("")) {
             t_print(f_without_final_newline(v_rust.clone()))
         } else {
-            t_write_file((v_options.clone()).f_output.clone(), v_rust.clone(), "stage1/main.tes:366:13 in function `main`")
+            t_write_file((v_options.clone()).f_output.clone(), v_rust.clone(), "stage1/main.tes:372:13 in function `main`")
         };
-        t_exit(0i64, "stage1/main.tes:368:9 in function `main`")
+        t_exit(0i64, "stage1/main.tes:374:9 in function `main`")
     };
     if ((v_options.clone()).f_output.clone() == t_text("")) {
         t_print_error(t_text("error: `build` needs `-o <output>`"));
-        t_exit(2i64, "stage1/main.tes:372:9 in function `main`")
+        t_exit(2i64, "stage1/main.tes:378:9 in function `main`")
     };
     let v_rust_path: Rc<String> = t_concat((v_options.clone()).f_output.clone(), t_text(".rs"));
-    t_write_file(v_rust_path.clone(), v_rust.clone(), "stage1/main.tes:375:5 in function `main`");
+    t_write_file(v_rust_path.clone(), v_rust.clone(), "stage1/main.tes:381:5 in function `main`");
     let v_status: i64 = f_run_rustc(v_options.clone(), v_rust_path.clone());
     if (v_status.clone() == (-1i64)) {
         t_print_error(t_text("error: cannot run rustc (install Rust from https://rustup.rs or set TESSERA_RUSTC)"));
-        t_exit(3i64, "stage1/main.tes:379:9 in function `main`")
+        t_exit(3i64, "stage1/main.tes:385:9 in function `main`")
     };
     if (v_status.clone() != 0i64) {
         t_print_error(t_text("error: internal compiler error: the generated Rust code did not compile. This is a bug in the Tessera compiler."));
-        t_exit(3i64, "stage1/main.tes:383:9 in function `main`")
+        t_exit(3i64, "stage1/main.tes:389:9 in function `main`")
     }
 }
 
@@ -1567,7 +1585,7 @@ fn f_lexer__token(v_kind: Rc<T_lexer__TokenKind>, v_text: Rc<String>, v_span: Rc
 fn f_lexer__newline_allowed(v_tokens: Rc<Vec<Rc<T_lexer__Token>>>, v_open_kinds: Rc<Vec<i64>>) -> bool {
     let v_open_count: i64 = t_list_length(&v_open_kinds.clone());
     if (v_open_count.clone() > 0i64) {
-        let v_top: i64 = t_index(&v_open_kinds.clone(), t_sub(v_open_count.clone(), 1i64, "stage1/lexer.tes:217:41 in function `lexer__newline_allowed`"), "stage1/lexer.tes:217:19 in function `lexer__newline_allowed`");
+        let v_top: i64 = t_index(&v_open_kinds.clone(), t_sub(v_open_count.clone(), 1i64, "stage1/lexer.tes:219:41 in function `lexer__newline_allowed`"), "stage1/lexer.tes:219:19 in function `lexer__newline_allowed`");
         if ((v_top.clone() == 40i64) || (v_top.clone() == 91i64)) {
             return false
         }
@@ -1576,35 +1594,35 @@ fn f_lexer__newline_allowed(v_tokens: Rc<Vec<Rc<T_lexer__Token>>>, v_open_kinds:
     if (v_count.clone() == 0i64) {
         return false
     };
-    let v_last: Rc<T_lexer__TokenKind> = (t_index(&v_tokens.clone(), t_sub(v_count.clone(), 1i64, "stage1/lexer.tes:226:29 in function `lexer__newline_allowed`"), "stage1/lexer.tes:226:16 in function `lexer__newline_allowed`")).f_kind.clone();
+    let v_last: Rc<T_lexer__TokenKind> = (t_index(&v_tokens.clone(), t_sub(v_count.clone(), 1i64, "stage1/lexer.tes:228:29 in function `lexer__newline_allowed`"), "stage1/lexer.tes:228:16 in function `lexer__newline_allowed`")).f_kind.clone();
     (!((v_last.clone() == Rc::new(T_lexer__TokenKind::V_Newline)) || f_lexer__continues_line(v_last.clone())))
 }
 
 fn f_lexer__non_ascii_letter(v_code: i64, v_span: Rc<T_source__Span>) -> Rc<T_source__Diagnostic> {
-    f_source__error_help(t_text("E0103"), v_span.clone(), t_concat(t_concat(t_text("non-ASCII letter `"), t_from_code_point(v_code.clone(), "stage1/lexer.tes:231:61 in function `lexer__non_ascii_letter`")), t_text("` in a name")), t_text("names use ASCII letters, digits and `_` only; this prevents look-alike characters (homoglyphs)"))
+    f_source__error_help(t_text("E0103"), v_span.clone(), t_concat(t_concat(t_text("non-ASCII letter `"), t_from_code_point(v_code.clone(), "stage1/lexer.tes:233:61 in function `lexer__non_ascii_letter`")), t_text("` in a name")), t_text("names use ASCII letters, digits and `_` only; this prevents look-alike characters (homoglyphs)"))
 }
 
 fn f_lexer__scan_word(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: i64, v_col: i64) -> Rc<T_lexer__Scan> {
     let mut v_index: i64 = v_start.clone();
     let mut v_name: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     let mut v_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>> = Rc::new(Vec::<Rc<T_source__Diagnostic>>::new());
-    while ((v_index.clone() < t_list_length(&v_codes.clone())) && ((f_source__is_alphanumeric(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:238:61 in function `lexer__scan_word`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:238:78 in function `lexer__scan_word`") == 95i64)) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:238:100 in function `lexer__scan_word`") >= 128i64))) {
-        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:239:20 in function `lexer__scan_word`");
+    while ((v_index.clone() < t_list_length(&v_codes.clone())) && ((f_source__is_alphanumeric(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:240:61 in function `lexer__scan_word`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:240:78 in function `lexer__scan_word`") == 95i64)) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:240:100 in function `lexer__scan_word`") >= 128i64))) {
+        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:241:20 in function `lexer__scan_word`");
         if (v_code.clone() >= 128i64) {
-            let v_here: i64 = t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:241:28 in function `lexer__scan_word`"), v_start.clone(), "stage1/lexer.tes:241:36 in function `lexer__scan_word`");
-            v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_lexer__non_ascii_letter(v_code.clone(), f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 1i64, "stage1/lexer.tes:242:112 in function `lexer__scan_word`"))));
+            let v_here: i64 = t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:243:28 in function `lexer__scan_word`"), v_start.clone(), "stage1/lexer.tes:243:36 in function `lexer__scan_word`");
+            v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_lexer__non_ascii_letter(v_code.clone(), f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 1i64, "stage1/lexer.tes:244:112 in function `lexer__scan_word`"))));
         } else {
             v_name = t_append(std::mem::take(&mut v_name), v_code.clone());
         };
-        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:246:27 in function `lexer__scan_word`");
+        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:248:27 in function `lexer__scan_word`");
     }
-    let v_word: Rc<String> = t_from_code_points(&v_name.clone(), "stage1/lexer.tes:248:16 in function `lexer__scan_word`");
-    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:249:52 in function `lexer__scan_word`"), v_start.clone(), "stage1/lexer.tes:249:60 in function `lexer__scan_word`"));
+    let v_word: Rc<String> = t_from_code_points(&v_name.clone(), "stage1/lexer.tes:250:16 in function `lexer__scan_word`");
+    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:251:52 in function `lexer__scan_word`"), v_start.clone(), "stage1/lexer.tes:251:60 in function `lexer__scan_word`"));
     let v_kind: Rc<T_lexer__TokenKind> = f_lexer__keyword_kind(v_word.clone());
     if ((v_kind.clone() == Rc::new(T_lexer__TokenKind::V_Ident)) && f_source__contains_text(f_lexer__reserved_words(), v_word.clone())) {
         v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0108"), v_span.clone(), t_concat(t_concat(t_text("`"), v_word.clone()), t_text("` is a reserved word")), t_text("choose a different name")));
     };
-    Rc::new(T_lexer__Scan { f_token: f_lexer__token(v_kind.clone(), v_word.clone(), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true })
+    Rc::new(T_lexer__Scan { f_token: f_lexer__token(v_kind.clone(), v_word.clone(), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
 }
 
 // note: Digits compared as text: `a` is larger than `b` when both have the same length.
@@ -1612,9 +1630,9 @@ fn f_lexer__digits_greater(v_a: Rc<Vec<i64>>, v_b: Rc<Vec<i64>>) -> bool {
     if (t_list_length(&v_a.clone()) != t_list_length(&v_b.clone())) {
         return (t_list_length(&v_a.clone()) > t_list_length(&v_b.clone()))
     };
-    for v_index in t_iter(t_range(0i64, t_list_length(&v_a.clone()), "stage1/lexer.tes:262:18 in function `lexer__digits_greater`")) {
-        if (t_index(&v_a.clone(), v_index.clone(), "stage1/lexer.tes:263:12 in function `lexer__digits_greater`") != t_index(&v_b.clone(), v_index.clone(), "stage1/lexer.tes:263:24 in function `lexer__digits_greater`")) {
-            return (t_index(&v_a.clone(), v_index.clone(), "stage1/lexer.tes:264:20 in function `lexer__digits_greater`") > t_index(&v_b.clone(), v_index.clone(), "stage1/lexer.tes:264:31 in function `lexer__digits_greater`"))
+    for v_index in t_iter(t_range(0i64, t_list_length(&v_a.clone()), "stage1/lexer.tes:264:18 in function `lexer__digits_greater`")) {
+        if (t_index(&v_a.clone(), v_index.clone(), "stage1/lexer.tes:265:12 in function `lexer__digits_greater`") != t_index(&v_b.clone(), v_index.clone(), "stage1/lexer.tes:265:24 in function `lexer__digits_greater`")) {
+            return (t_index(&v_a.clone(), v_index.clone(), "stage1/lexer.tes:266:20 in function `lexer__digits_greater`") > t_index(&v_b.clone(), v_index.clone(), "stage1/lexer.tes:266:31 in function `lexer__digits_greater`"))
         }
     }
     false
@@ -1623,70 +1641,153 @@ fn f_lexer__digits_greater(v_a: Rc<Vec<i64>>, v_b: Rc<Vec<i64>>) -> bool {
 fn f_lexer__scan_number(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: i64, v_col: i64) -> Rc<T_lexer__Scan> {
     let mut v_index: i64 = v_start.clone();
     let mut v_digits: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
-    while ((v_index.clone() < t_list_length(&v_codes.clone())) && (f_source__is_digit(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:273:54 in function `lexer__scan_number`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:273:71 in function `lexer__scan_number`") == 95i64))) {
-        if (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:274:12 in function `lexer__scan_number`") != 95i64) {
-            v_digits = t_append(std::mem::take(&mut v_digits), t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:275:41 in function `lexer__scan_number`"));
+    while ((v_index.clone() < t_list_length(&v_codes.clone())) && (f_source__is_digit(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:275:54 in function `lexer__scan_number`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:275:71 in function `lexer__scan_number`") == 95i64))) {
+        if (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:276:12 in function `lexer__scan_number`") != 95i64) {
+            v_digits = t_append(std::mem::take(&mut v_digits), t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:277:41 in function `lexer__scan_number`"));
         };
-        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:277:27 in function `lexer__scan_number`");
+        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:279:27 in function `lexer__scan_number`");
     }
     let mut v_bad_suffix: bool = false;
-    while ((v_index.clone() < t_list_length(&v_codes.clone())) && (f_source__is_alphanumeric(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:280:61 in function `lexer__scan_number`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:280:78 in function `lexer__scan_number`") >= 128i64))) {
+    while ((v_index.clone() < t_list_length(&v_codes.clone())) && (f_source__is_alphanumeric(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:282:61 in function `lexer__scan_number`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:282:78 in function `lexer__scan_number`") >= 128i64))) {
         v_bad_suffix = true;
-        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:282:27 in function `lexer__scan_number`");
+        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:284:27 in function `lexer__scan_number`");
     }
-    let v_raw_codes: Rc<Vec<i64>> = t_slice(v_codes.clone(), v_start.clone(), v_index.clone(), "stage1/lexer.tes:284:21 in function `lexer__scan_number`");
-    let v_raw: Rc<String> = t_from_code_points(&v_raw_codes.clone(), "stage1/lexer.tes:285:15 in function `lexer__scan_number`");
-    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:286:52 in function `lexer__scan_number`"), v_start.clone(), "stage1/lexer.tes:286:60 in function `lexer__scan_number`"));
+    let v_raw_codes: Rc<Vec<i64>> = t_slice(v_codes.clone(), v_start.clone(), v_index.clone(), "stage1/lexer.tes:286:21 in function `lexer__scan_number`");
+    let v_raw: Rc<String> = t_from_code_points(&v_raw_codes.clone(), "stage1/lexer.tes:287:15 in function `lexer__scan_number`");
+    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:288:52 in function `lexer__scan_number`"), v_start.clone(), "stage1/lexer.tes:288:60 in function `lexer__scan_number`"));
     if v_bad_suffix.clone() {
         let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0106"), v_span.clone(), t_concat(t_concat(t_text("invalid number `"), v_raw.clone()), t_text("`")), t_text("numbers are decimal digits only, optionally separated by `_`"));
-        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Int), t_text("0"), v_span.clone()), f_end: v_index.clone(), f_diagnostics: Rc::new(vec![v_d.clone()]), f_emit: true })
+        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Int), t_text("0"), v_span.clone()), f_end: v_index.clone(), f_diagnostics: Rc::new(vec![v_d.clone()]), f_emit: true, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
     };
     let mut v_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>> = Rc::new(Vec::<Rc<T_source__Diagnostic>>::new());
     let v_raw_count: i64 = t_list_length(&v_raw_codes.clone());
     let mut v_double_underscore: bool = false;
-    for v_position in t_iter(t_range(1i64, v_raw_count.clone(), "stage1/lexer.tes:294:21 in function `lexer__scan_number`")) {
-        if ((t_index(&v_raw_codes.clone(), v_position.clone(), "stage1/lexer.tes:295:12 in function `lexer__scan_number`") == 95i64) && (t_index(&v_raw_codes.clone(), t_sub(v_position.clone(), 1i64, "stage1/lexer.tes:295:61 in function `lexer__scan_number`"), "stage1/lexer.tes:295:42 in function `lexer__scan_number`") == 95i64)) {
+    for v_position in t_iter(t_range(1i64, v_raw_count.clone(), "stage1/lexer.tes:296:21 in function `lexer__scan_number`")) {
+        if ((t_index(&v_raw_codes.clone(), v_position.clone(), "stage1/lexer.tes:297:12 in function `lexer__scan_number`") == 95i64) && (t_index(&v_raw_codes.clone(), t_sub(v_position.clone(), 1i64, "stage1/lexer.tes:297:61 in function `lexer__scan_number`"), "stage1/lexer.tes:297:42 in function `lexer__scan_number`") == 95i64)) {
             v_double_underscore = true;
         }
     }
-    if ((t_index(&v_raw_codes.clone(), t_sub(v_raw_count.clone(), 1i64, "stage1/lexer.tes:299:28 in function `lexer__scan_number`"), "stage1/lexer.tes:299:8 in function `lexer__scan_number`") == 95i64) || v_double_underscore.clone()) {
+    if ((t_index(&v_raw_codes.clone(), t_sub(v_raw_count.clone(), 1i64, "stage1/lexer.tes:301:28 in function `lexer__scan_number`"), "stage1/lexer.tes:301:8 in function `lexer__scan_number`") == 95i64) || v_double_underscore.clone()) {
         v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0106"), v_span.clone(), t_concat(t_concat(t_text("invalid number `"), v_raw.clone()), t_text("`")), t_text("`_` may only appear between digits, e.g. `1_000_000`")));
     };
-    if ((t_list_length(&v_digits.clone()) > 1i64) && (t_index(&v_digits.clone(), 0i64, "stage1/lexer.tes:302:31 in function `lexer__scan_number`") == 48i64)) {
+    if ((t_list_length(&v_digits.clone()) > 1i64) && (t_index(&v_digits.clone(), 0i64, "stage1/lexer.tes:304:31 in function `lexer__scan_number`") == 48i64)) {
         v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0106"), v_span.clone(), t_concat(t_concat(t_text("number `"), v_raw.clone()), t_text("` has a leading zero")), t_text("leading zeros are not allowed; write the number without them")));
     };
-    let mut v_text: Rc<String> = t_from_code_points(&v_digits.clone(), "stage1/lexer.tes:305:16 in function `lexer__scan_number`");
+    let mut v_text: Rc<String> = t_from_code_points(&v_digits.clone(), "stage1/lexer.tes:307:16 in function `lexer__scan_number`");
     if f_lexer__digits_greater(v_digits.clone(), t_code_points(&t_text("9223372036854775808"))) {
         v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0106"), v_span.clone(), t_concat(t_concat(t_text("number `"), v_raw.clone()), t_text("` does not fit in `Int`")), t_text("`Int` is a signed 64-bit integer: -9223372036854775808 to 9223372036854775807")));
         v_text = t_text("0");
     };
-    Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Int), v_text.clone(), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true })
+    Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Int), v_text.clone(), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
 }
 
+// note: Index of the `)` that closes an interpolation whose code starts at `start`, or -1 if the line ends first.
+fn f_lexer__interpolation_end(v_codes: Rc<Vec<i64>>, v_start: i64) -> i64 {
+    let mut v_depth: i64 = 1i64;
+    let mut v_index: i64 = v_start.clone();
+    while (v_index.clone() < t_list_length(&v_codes.clone())) {
+        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:320:20 in function `lexer__interpolation_end`");
+        if (v_code.clone() == 10i64) {
+            return (-1i64)
+        };
+        if (v_code.clone() == 34i64) {
+            v_index = f_lexer__text_end(v_codes.clone(), v_index.clone());
+            if (v_index.clone() < 0i64) {
+                return (-1i64)
+            };
+            continue
+        };
+        if (v_code.clone() == 40i64) {
+            v_depth = t_add(v_depth.clone(), 1i64, "stage1/lexer.tes:332:31 in function `lexer__interpolation_end`");
+        } else if (v_code.clone() == 41i64) {
+            v_depth = t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:334:31 in function `lexer__interpolation_end`");
+            if (v_depth.clone() == 0i64) {
+                return v_index.clone()
+            }
+        };
+        v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:339:27 in function `lexer__interpolation_end`");
+    }
+    (-1i64)
+}
+
+// note: Index just after the closing quote of the text literal that starts at `start`, or -1.
+fn f_lexer__text_end(v_codes: Rc<Vec<i64>>, v_start: i64) -> i64 {
+    let mut v_index: i64 = t_add(v_start.clone(), 1i64, "stage1/lexer.tes:346:23 in function `lexer__text_end`");
+    while (v_index.clone() < t_list_length(&v_codes.clone())) {
+        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:348:20 in function `lexer__text_end`");
+        if (v_code.clone() == 10i64) {
+            return (-1i64)
+        };
+        if (v_code.clone() == 34i64) {
+            return t_add(v_index.clone(), 1i64, "stage1/lexer.tes:353:26 in function `lexer__text_end`")
+        };
+        if (((v_code.clone() == 92i64) && (t_add(v_index.clone(), 1i64, "stage1/lexer.tes:355:33 in function `lexer__text_end`") < t_list_length(&v_codes.clone()))) && (t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:355:69 in function `lexer__text_end`"), "stage1/lexer.tes:355:57 in function `lexer__text_end`") == 40i64)) {
+            let v_close: i64 = f_lexer__interpolation_end(v_codes.clone(), t_add(v_index.clone(), 2i64, "stage1/lexer.tes:356:56 in function `lexer__text_end`"));
+            if (v_close.clone() < 0i64) {
+                return (-1i64)
+            };
+            v_index = t_add(v_close.clone(), 1i64, "stage1/lexer.tes:360:31 in function `lexer__text_end`");
+        } else if (v_code.clone() == 92i64) {
+            v_index = t_add(v_index.clone(), 2i64, "stage1/lexer.tes:362:31 in function `lexer__text_end`");
+        } else {
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:364:31 in function `lexer__text_end`");
+        }
+    }
+    (-1i64)
+}
+
+// note: `\(expr)` in a text literal becomes `("before" + to_text(expr) + "after")`.
 fn f_lexer__scan_text(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: i64, v_col: i64) -> Rc<T_lexer__Scan> {
-    let mut v_index: i64 = t_add(v_start.clone(), 1i64, "stage1/lexer.tes:314:23 in function `lexer__scan_text`");
+    let mut v_index: i64 = t_add(v_start.clone(), 1i64, "stage1/lexer.tes:372:23 in function `lexer__scan_text`");
     let mut v_value: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     let mut v_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>> = Rc::new(Vec::<Rc<T_source__Diagnostic>>::new());
     let mut v_closed: bool = false;
+    let mut v_pieces: Rc<Vec<Rc<T_lexer__Token>>> = Rc::new(Vec::<Rc<T_lexer__Token>>::new());
+    let mut v_interpolated: bool = false;
+    let mut v_segment_col: i64 = v_col.clone();
     while (!v_closed.clone()) {
-        if ((v_index.clone() >= t_list_length(&v_codes.clone())) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:319:38 in function `lexer__scan_text`") == 10i64)) {
-            let v_open_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:320:65 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:320:73 in function `lexer__scan_text`"));
+        if ((v_index.clone() >= t_list_length(&v_codes.clone())) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:380:38 in function `lexer__scan_text`") == 10i64)) {
+            let v_open_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:381:65 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:381:73 in function `lexer__scan_text`"));
             v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), v_open_span.clone(), t_text("text literal is not closed"), t_text("add a closing `\"` on the same line; use `\\n` for line breaks")));
             break
         };
-        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:324:20 in function `lexer__scan_text`");
-        let v_here: i64 = t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:325:24 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:325:32 in function `lexer__scan_text`");
+        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:385:20 in function `lexer__scan_text`");
+        let v_here: i64 = t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:386:24 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:386:32 in function `lexer__scan_text`");
         if (v_code.clone() == 34i64) {
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:327:31 in function `lexer__scan_text`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:388:31 in function `lexer__scan_text`");
             v_closed = true;
+        } else if (((v_code.clone() == 92i64) && (t_add(v_index.clone(), 1i64, "stage1/lexer.tes:390:40 in function `lexer__scan_text`") < t_list_length(&v_codes.clone()))) && (t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:390:76 in function `lexer__scan_text`"), "stage1/lexer.tes:390:64 in function `lexer__scan_text`") == 40i64)) {
+            let v_here_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 2i64, "stage1/lexer.tes:391:67 in function `lexer__scan_text`"));
+            let v_close: i64 = f_lexer__interpolation_end(v_codes.clone(), t_add(v_index.clone(), 2i64, "stage1/lexer.tes:392:56 in function `lexer__scan_text`"));
+            if (v_close.clone() < 0i64) {
+                v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), v_here_span.clone(), t_text("`\\(` is not closed on this line"), t_text("write `\\(expression)`; the expression ends at the matching `)`")));
+                v_index = t_list_length(&v_codes.clone());
+                break
+            };
+            if (v_close.clone() == t_add(v_index.clone(), 2i64, "stage1/lexer.tes:398:31 in function `lexer__scan_text`")) {
+                v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), v_here_span.clone(), t_text("empty interpolation `\\()`"), t_text("put an expression between the parentheses, e.g. `\\(count)`")));
+            } else {
+                let v_inner: Rc<T_lexer__LexResult> = f_lexer__tokenize_range(v_codes.clone(), t_add(v_index.clone(), 2i64, "stage1/lexer.tes:401:57 in function `lexer__scan_text`"), v_close.clone(), v_file.clone(), v_line.clone(), t_add(v_here.clone(), 2i64, "stage1/lexer.tes:401:86 in function `lexer__scan_text`"), true);
+                v_diagnostics = t_concat_lists(std::mem::take(&mut v_diagnostics), (v_inner.clone()).f_diagnostics.clone());
+                if ((t_list_length(&v_pieces.clone()) > 0i64) || (t_list_length(&v_value.clone()) > 0i64)) {
+                    v_pieces = f_lexer__add_piece(std::mem::take(&mut v_pieces), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Text), t_from_code_points(&v_value.clone(), "stage1/lexer.tes:404:74 in function `lexer__scan_text`"), f_source__span_of(v_file.clone(), v_line.clone(), v_segment_col.clone(), v_here.clone())));
+                };
+                v_pieces = f_lexer__add_plus(std::mem::take(&mut v_pieces), v_here_span.clone());
+                v_pieces = t_concat_lists(std::mem::take(&mut v_pieces), Rc::new(vec![f_lexer__token(Rc::new(T_lexer__TokenKind::V_Ident), t_text("to_text"), v_here_span.clone()), f_lexer__token(Rc::new(T_lexer__TokenKind::V_LParen), t_text(""), v_here_span.clone())]));
+                v_pieces = t_append(t_concat_lists(std::mem::take(&mut v_pieces), (v_inner.clone()).f_tokens.clone()), f_lexer__token(Rc::new(T_lexer__TokenKind::V_RParen), t_text(""), v_here_span.clone()));
+            };
+            v_interpolated = true;
+            v_value = Rc::new(Vec::<i64>::new());
+            v_index = t_add(v_close.clone(), 1i64, "stage1/lexer.tes:412:31 in function `lexer__scan_text`");
+            v_segment_col = t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:413:35 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:413:43 in function `lexer__scan_text`");
         } else if (v_code.clone() == 92i64) {
-            let v_escape_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 1i64, "stage1/lexer.tes:330:69 in function `lexer__scan_text`"));
-            let v_next: i64 = if (t_add(v_index.clone(), 1i64, "stage1/lexer.tes:331:33 in function `lexer__scan_text`") < t_list_length(&v_codes.clone())) {
-                t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:331:67 in function `lexer__scan_text`"), "stage1/lexer.tes:331:55 in function `lexer__scan_text`")
+            let v_escape_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 1i64, "stage1/lexer.tes:415:69 in function `lexer__scan_text`"));
+            let v_next: i64 = if (t_add(v_index.clone(), 1i64, "stage1/lexer.tes:416:33 in function `lexer__scan_text`") < t_list_length(&v_codes.clone())) {
+                t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:416:67 in function `lexer__scan_text`"), "stage1/lexer.tes:416:55 in function `lexer__scan_text`")
             } else {
                 (-1i64)
             };
-            v_index = t_add(v_index.clone(), 2i64, "stage1/lexer.tes:332:31 in function `lexer__scan_text`");
+            v_index = t_add(v_index.clone(), 2i64, "stage1/lexer.tes:417:31 in function `lexer__scan_text`");
             if (v_next.clone() == 110i64) {
                 v_value = t_append(std::mem::take(&mut v_value), 10i64);
             } else if (v_next.clone() == 116i64) {
@@ -1696,18 +1797,18 @@ fn f_lexer__scan_text(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: 
             } else if (v_next.clone() == 34i64) {
                 v_value = t_append(std::mem::take(&mut v_value), 34i64);
             } else if (v_next.clone() == 117i64) {
-                if ((v_index.clone() >= t_list_length(&v_codes.clone())) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:342:46 in function `lexer__scan_text`") != 123i64)) {
+                if ((v_index.clone() >= t_list_length(&v_codes.clone())) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:427:46 in function `lexer__scan_text`") != 123i64)) {
                     v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), v_escape_span.clone(), t_text("invalid unicode escape"), t_text("write unicode escapes as `\\u{1F600}`")));
                     continue
                 };
-                v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:346:35 in function `lexer__scan_text`");
+                v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:431:35 in function `lexer__scan_text`");
                 let mut v_hex: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
-                while ((((v_index.clone() < t_list_length(&v_codes.clone())) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:348:49 in function `lexer__scan_text`") != 125i64)) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:348:73 in function `lexer__scan_text`") != 34i64)) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:348:96 in function `lexer__scan_text`") != 10i64)) {
-                    v_hex = t_append(std::mem::take(&mut v_hex), t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:349:43 in function `lexer__scan_text`"));
-                    v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:350:39 in function `lexer__scan_text`");
+                while ((((v_index.clone() < t_list_length(&v_codes.clone())) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:433:49 in function `lexer__scan_text`") != 125i64)) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:433:73 in function `lexer__scan_text`") != 34i64)) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:433:96 in function `lexer__scan_text`") != 10i64)) {
+                    v_hex = t_append(std::mem::take(&mut v_hex), t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:434:43 in function `lexer__scan_text`"));
+                    v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:435:39 in function `lexer__scan_text`");
                 }
-                if ((v_index.clone() < t_list_length(&v_codes.clone())) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:352:46 in function `lexer__scan_text`") == 125i64)) {
-                    v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:353:39 in function `lexer__scan_text`");
+                if ((v_index.clone() < t_list_length(&v_codes.clone())) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:437:46 in function `lexer__scan_text`") == 125i64)) {
+                    v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:438:39 in function `lexer__scan_text`");
                 };
                 let mut v_valid: bool = ((t_list_length(&v_hex.clone()) >= 1i64) && (t_list_length(&v_hex.clone()) <= 6i64));
                 let mut v_scalar: i64 = 0i64;
@@ -1715,7 +1816,7 @@ fn f_lexer__scan_text(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: 
                     if (!f_source__is_hex_digit(v_digit.clone())) {
                         v_valid = false;
                     } else {
-                        v_scalar = t_add(t_mul(v_scalar.clone(), 16i64, "stage1/lexer.tes:361:45 in function `lexer__scan_text`"), f_source__hex_value(v_digit.clone()), "stage1/lexer.tes:361:50 in function `lexer__scan_text`");
+                        v_scalar = t_add(t_mul(v_scalar.clone(), 16i64, "stage1/lexer.tes:446:45 in function `lexer__scan_text`"), f_source__hex_value(v_digit.clone()), "stage1/lexer.tes:446:50 in function `lexer__scan_text`");
                     }
                 }
                 if (v_valid.clone() && ((v_scalar.clone() > 1114111i64) || ((v_scalar.clone() >= 55296i64) && (v_scalar.clone() <= 57343i64)))) {
@@ -1724,29 +1825,51 @@ fn f_lexer__scan_text(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: 
                 if v_valid.clone() {
                     v_value = t_append(std::mem::take(&mut v_value), v_scalar.clone());
                 } else {
-                    v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error(t_text("E0109"), v_escape_span.clone(), t_concat(t_concat(t_text("`\\u{"), t_from_code_points(&v_hex.clone(), "stage1/lexer.tes:370:104 in function `lexer__scan_text`")), t_text("}` is not a valid unicode scalar value"))));
+                    v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error(t_text("E0109"), v_escape_span.clone(), t_concat(t_concat(t_text("`\\u{"), t_from_code_points(&v_hex.clone(), "stage1/lexer.tes:455:104 in function `lexer__scan_text`")), t_text("}` is not a valid unicode scalar value"))));
                 }
             } else {
                 let v_shown: Rc<String> = if ((v_next.clone() < 0i64) || (v_next.clone() == 10i64)) {
                     t_text("")
                 } else {
-                    t_from_code_point(v_next.clone(), "stage1/lexer.tes:373:69 in function `lexer__scan_text`")
+                    t_from_code_point(v_next.clone(), "stage1/lexer.tes:458:69 in function `lexer__scan_text`")
                 };
                 if (v_next.clone() == 10i64) {
-                    v_index = t_sub(v_index.clone(), 1i64, "stage1/lexer.tes:375:39 in function `lexer__scan_text`");
+                    v_index = t_sub(v_index.clone(), 1i64, "stage1/lexer.tes:460:39 in function `lexer__scan_text`");
                 };
                 v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), v_escape_span.clone(), t_concat(t_concat(t_text("unknown escape `\\"), v_shown.clone()), t_text("`")), t_text("valid escapes are `\\n`, `\\t`, `\\\\`, `\\\"` and `\\u{...}`")));
             }
         } else if f_source__is_control(v_code.clone()) {
-            v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 1i64, "stage1/lexer.tes:380:116 in function `lexer__scan_text`")), t_text("control character inside a text literal"), t_text("use an escape such as `\\t` or `\\u{...}`")));
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:381:31 in function `lexer__scan_text`");
+            v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0109"), f_source__span_of(v_file.clone(), v_line.clone(), v_here.clone(), t_add(v_here.clone(), 1i64, "stage1/lexer.tes:465:116 in function `lexer__scan_text`")), t_text("control character inside a text literal"), t_text("use an escape such as `\\t` or `\\u{...}`")));
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:466:31 in function `lexer__scan_text`");
         } else {
             v_value = t_append(std::mem::take(&mut v_value), v_code.clone());
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:384:31 in function `lexer__scan_text`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:469:31 in function `lexer__scan_text`");
         }
     }
-    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:387:52 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:387:60 in function `lexer__scan_text`"));
-    Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Text), t_from_code_points(&v_value.clone(), "stage1/lexer.tes:388:41 in function `lexer__scan_text`"), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true })
+    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:472:52 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:472:60 in function `lexer__scan_text`"));
+    if (!v_interpolated.clone()) {
+        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Text), t_from_code_points(&v_value.clone(), "stage1/lexer.tes:474:52 in function `lexer__scan_text`"), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
+    };
+    if (t_list_length(&v_value.clone()) > 0i64) {
+        v_pieces = f_lexer__add_piece(std::mem::take(&mut v_pieces), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Text), t_from_code_points(&v_value.clone(), "stage1/lexer.tes:477:62 in function `lexer__scan_text`"), f_source__span_of(v_file.clone(), v_line.clone(), v_segment_col.clone(), t_sub(t_add(v_col.clone(), v_index.clone(), "stage1/lexer.tes:477:131 in function `lexer__scan_text`"), v_start.clone(), "stage1/lexer.tes:477:139 in function `lexer__scan_text`"))));
+    };
+    if (t_list_length(&v_pieces.clone()) == 0i64) {
+        v_pieces = Rc::new(vec![f_lexer__token(Rc::new(T_lexer__TokenKind::V_Text), t_text(""), v_span.clone())]);
+    };
+    let v_expansion: Rc<Vec<Rc<T_lexer__Token>>> = t_append(t_concat_lists(Rc::new(vec![f_lexer__token(Rc::new(T_lexer__TokenKind::V_LParen), t_text(""), v_span.clone())]), v_pieces.clone()), f_lexer__token(Rc::new(T_lexer__TokenKind::V_RParen), t_text(""), v_span.clone()));
+    Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Text), t_text(""), v_span.clone()), f_end: v_index.clone(), f_diagnostics: v_diagnostics.clone(), f_emit: true, f_expansion: v_expansion.clone() })
+}
+
+fn f_lexer__add_plus(v_pieces: Rc<Vec<Rc<T_lexer__Token>>>, v_span: Rc<T_source__Span>) -> Rc<Vec<Rc<T_lexer__Token>>> {
+    if (t_list_length(&v_pieces.clone()) == 0i64) {
+        v_pieces.clone()
+    } else {
+        t_append(v_pieces.clone(), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Plus), t_text(""), v_span.clone()))
+    }
+}
+
+fn f_lexer__add_piece(v_pieces: Rc<Vec<Rc<T_lexer__Token>>>, v_piece: Rc<T_lexer__Token>) -> Rc<Vec<Rc<T_lexer__Token>>> {
+    t_append(f_lexer__add_plus(v_pieces.clone(), (v_piece.clone()).f_span.clone()), v_piece.clone())
 }
 
 fn f_lexer__two_char_kind(v_first: i64, v_second: i64) -> Rc<T_lexer__TokenKind> {
@@ -1802,23 +1925,23 @@ fn f_lexer__unexpected_character_help(v_code: i64) -> Rc<String> {
 }
 
 fn f_lexer__scan_symbol(v_codes: Rc<Vec<i64>>, v_start: i64, v_file: i64, v_line: i64, v_col: i64) -> Rc<T_lexer__Scan> {
-    let v_code: i64 = t_index(&v_codes.clone(), v_start.clone(), "stage1/lexer.tes:444:16 in function `lexer__scan_symbol`");
-    let v_next: i64 = if (t_add(v_start.clone(), 1i64, "stage1/lexer.tes:445:25 in function `lexer__scan_symbol`") < t_list_length(&v_codes.clone())) {
-        t_index(&v_codes.clone(), t_add(v_start.clone(), 1i64, "stage1/lexer.tes:445:59 in function `lexer__scan_symbol`"), "stage1/lexer.tes:445:47 in function `lexer__scan_symbol`")
+    let v_code: i64 = t_index(&v_codes.clone(), v_start.clone(), "stage1/lexer.tes:545:16 in function `lexer__scan_symbol`");
+    let v_next: i64 = if (t_add(v_start.clone(), 1i64, "stage1/lexer.tes:546:25 in function `lexer__scan_symbol`") < t_list_length(&v_codes.clone())) {
+        t_index(&v_codes.clone(), t_add(v_start.clone(), 1i64, "stage1/lexer.tes:546:59 in function `lexer__scan_symbol`"), "stage1/lexer.tes:546:47 in function `lexer__scan_symbol`")
     } else {
         (-1i64)
     };
     let v_pair: Rc<T_lexer__TokenKind> = f_lexer__two_char_kind(v_code.clone(), v_next.clone());
     if (v_pair.clone() != Rc::new(T_lexer__TokenKind::V_Eof)) {
-        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(v_pair.clone(), t_text(""), f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 2i64, "stage1/lexer.tes:448:82 in function `lexer__scan_symbol`"))), f_end: t_add(v_start.clone(), 2i64, "stage1/lexer.tes:448:100 in function `lexer__scan_symbol`"), f_diagnostics: Rc::new(Vec::<Rc<T_source__Diagnostic>>::new()), f_emit: true })
+        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(v_pair.clone(), t_text(""), f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 2i64, "stage1/lexer.tes:549:82 in function `lexer__scan_symbol`"))), f_end: t_add(v_start.clone(), 2i64, "stage1/lexer.tes:549:100 in function `lexer__scan_symbol`"), f_diagnostics: Rc::new(Vec::<Rc<T_source__Diagnostic>>::new()), f_emit: true, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
     };
-    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:450:52 in function `lexer__scan_symbol`"));
+    let v_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:551:52 in function `lexer__scan_symbol`"));
     let v_single: Rc<T_lexer__TokenKind> = f_lexer__one_char_kind(v_code.clone());
     if (v_single.clone() == Rc::new(T_lexer__TokenKind::V_Eof)) {
-        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0103"), v_span.clone(), t_concat(t_concat(t_text("unexpected character `"), t_from_code_point(v_code.clone(), "stage1/lexer.tes:453:77 in function `lexer__scan_symbol`")), t_text("`")), f_lexer__unexpected_character_help(v_code.clone()));
-        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Eof), t_text(""), v_span.clone()), f_end: t_add(v_start.clone(), 1i64, "stage1/lexer.tes:454:73 in function `lexer__scan_symbol`"), f_diagnostics: Rc::new(vec![v_d.clone()]), f_emit: false })
+        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0103"), v_span.clone(), t_concat(t_concat(t_text("unexpected character `"), t_from_code_point(v_code.clone(), "stage1/lexer.tes:554:77 in function `lexer__scan_symbol`")), t_text("`")), f_lexer__unexpected_character_help(v_code.clone()));
+        return Rc::new(T_lexer__Scan { f_token: f_lexer__token(Rc::new(T_lexer__TokenKind::V_Eof), t_text(""), v_span.clone()), f_end: t_add(v_start.clone(), 1i64, "stage1/lexer.tes:555:73 in function `lexer__scan_symbol`"), f_diagnostics: Rc::new(vec![v_d.clone()]), f_emit: false, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
     };
-    Rc::new(T_lexer__Scan { f_token: f_lexer__token(v_single.clone(), t_text(""), v_span.clone()), f_end: t_add(v_start.clone(), 1i64, "stage1/lexer.tes:456:55 in function `lexer__scan_symbol`"), f_diagnostics: Rc::new(Vec::<Rc<T_source__Diagnostic>>::new()), f_emit: true })
+    Rc::new(T_lexer__Scan { f_token: f_lexer__token(v_single.clone(), t_text(""), v_span.clone()), f_end: t_add(v_start.clone(), 1i64, "stage1/lexer.tes:557:55 in function `lexer__scan_symbol`"), f_diagnostics: Rc::new(Vec::<Rc<T_source__Diagnostic>>::new()), f_emit: true, f_expansion: Rc::new(Vec::<Rc<T_lexer__Token>>::new()) })
 }
 
 fn f_lexer__bracket_code(v_kind: Rc<T_lexer__TokenKind>) -> i64 {
@@ -1843,78 +1966,83 @@ fn f_lexer__is_closing(v_kind: Rc<T_lexer__TokenKind>) -> bool {
 
 fn f_lexer__tokenize(v_text: Rc<String>, v_file: i64) -> Rc<T_lexer__LexResult> {
     let v_codes: Rc<Vec<i64>> = t_code_points(&v_text.clone());
-    let v_count: i64 = t_list_length(&v_codes.clone());
+    f_lexer__tokenize_range(v_codes.clone(), 0i64, t_list_length(&v_codes.clone()), v_file.clone(), 1i64, 1i64, false)
+}
+
+// note: Tokenizes `codes[start..end]`. `nested` is true for the code inside a text interpolation: no end-of-file tokens then.
+fn f_lexer__tokenize_range(v_codes: Rc<Vec<i64>>, v_start: i64, v_end: i64, v_file: i64, v_first_line: i64, v_first_col: i64, v_nested: bool) -> Rc<T_lexer__LexResult> {
+    let v_count: i64 = v_end.clone();
     let mut v_tokens: Rc<Vec<Rc<T_lexer__Token>>> = Rc::new(Vec::<Rc<T_lexer__Token>>::new());
     let mut v_diagnostics: Rc<Vec<Rc<T_source__Diagnostic>>> = Rc::new(Vec::<Rc<T_source__Diagnostic>>::new());
     let mut v_open_kinds: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     let mut v_open_spans: Rc<Vec<Rc<T_source__Span>>> = Rc::new(Vec::<Rc<T_source__Span>>::new());
-    let mut v_index: i64 = 0i64;
-    let mut v_line: i64 = 1i64;
-    let mut v_col: i64 = 1i64;
-    if ((v_count.clone() > 0i64) && (t_index(&v_codes.clone(), 0i64, "stage1/lexer.tes:485:22 in function `lexer__tokenize`") == 65279i64)) {
+    let mut v_index: i64 = v_start.clone();
+    let mut v_line: i64 = v_first_line.clone();
+    let mut v_col: i64 = v_first_col.clone();
+    if (((!v_nested.clone()) && (v_count.clone() > 0i64)) && (t_index(&v_codes.clone(), 0i64, "stage1/lexer.tes:591:37 in function `lexer__tokenize_range`") == 65279i64)) {
         v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0101"), f_source__span_of(v_file.clone(), 1i64, 1i64, 2i64), t_text("file starts with a byte order mark"), t_text("save the file as UTF-8 without BOM")));
         v_index = 1i64;
         v_col = 2i64;
     };
     while (v_index.clone() < v_count.clone()) {
-        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:491:20 in function `lexer__tokenize`");
-        let v_here: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:492:56 in function `lexer__tokenize`"));
+        let v_code: i64 = t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:597:20 in function `lexer__tokenize_range`");
+        let v_here: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:598:56 in function `lexer__tokenize_range`"));
         if (v_code.clone() == 10i64) {
             if f_lexer__newline_allowed(v_tokens.clone(), v_open_kinds.clone()) {
                 v_tokens = t_append(std::mem::take(&mut v_tokens), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Newline), t_text(""), v_here.clone()));
             };
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:497:31 in function `lexer__tokenize`");
-            v_line = t_add(v_line.clone(), 1i64, "stage1/lexer.tes:498:29 in function `lexer__tokenize`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:603:31 in function `lexer__tokenize_range`");
+            v_line = t_add(v_line.clone(), 1i64, "stage1/lexer.tes:604:29 in function `lexer__tokenize_range`");
             v_col = 1i64;
             continue
         };
         if (v_code.clone() == 32i64) {
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:503:31 in function `lexer__tokenize`");
-            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:504:27 in function `lexer__tokenize`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:609:31 in function `lexer__tokenize_range`");
+            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:610:27 in function `lexer__tokenize_range`");
             continue
         };
         if (v_code.clone() == 9i64) {
             v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0101"), v_here.clone(), t_text("tab characters are not allowed"), t_text("indent with 4 spaces; write `\\t` inside text literals")));
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:509:31 in function `lexer__tokenize`");
-            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:510:27 in function `lexer__tokenize`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:615:31 in function `lexer__tokenize_range`");
+            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:616:27 in function `lexer__tokenize_range`");
             continue
         };
         if (v_code.clone() == 13i64) {
             v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0101"), v_here.clone(), t_text("carriage return characters are not allowed"), t_text("use Unix line endings (LF)")));
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:515:31 in function `lexer__tokenize`");
-            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:516:27 in function `lexer__tokenize`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:621:31 in function `lexer__tokenize_range`");
+            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:622:27 in function `lexer__tokenize_range`");
             continue
         };
-        if (((v_code.clone() == 47i64) && (t_add(v_index.clone(), 1i64, "stage1/lexer.tes:519:33 in function `lexer__tokenize`") < v_count.clone())) && (t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:519:61 in function `lexer__tokenize`"), "stage1/lexer.tes:519:49 in function `lexer__tokenize`") == 47i64)) {
-            while ((v_index.clone() < v_count.clone()) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:520:37 in function `lexer__tokenize`") != 10i64)) {
-                if ((t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:521:20 in function `lexer__tokenize`") == 13i64) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:521:42 in function `lexer__tokenize`") == 9i64)) {
-                    v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error(t_text("E0101"), f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:522:117 in function `lexer__tokenize`")), t_text("tab or carriage return characters are not allowed")));
+        if (((v_code.clone() == 47i64) && (t_add(v_index.clone(), 1i64, "stage1/lexer.tes:625:33 in function `lexer__tokenize_range`") < v_count.clone())) && (t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:625:61 in function `lexer__tokenize_range`"), "stage1/lexer.tes:625:49 in function `lexer__tokenize_range`") == 47i64)) {
+            while ((v_index.clone() < v_count.clone()) && (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:626:37 in function `lexer__tokenize_range`") != 10i64)) {
+                if ((t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:627:20 in function `lexer__tokenize_range`") == 13i64) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:627:42 in function `lexer__tokenize_range`") == 9i64)) {
+                    v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error(t_text("E0101"), f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:628:117 in function `lexer__tokenize_range`")), t_text("tab or carriage return characters are not allowed")));
                 };
-                v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:524:35 in function `lexer__tokenize`");
-                v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:525:31 in function `lexer__tokenize`");
+                v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:630:35 in function `lexer__tokenize_range`");
+                v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:631:31 in function `lexer__tokenize_range`");
             }
             continue
         };
-        if ((v_code.clone() == 95i64) && (!((t_add(v_index.clone(), 1i64, "stage1/lexer.tes:529:38 in function `lexer__tokenize`") < v_count.clone()) && (f_source__is_alphanumeric(t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:529:90 in function `lexer__tokenize`"), "stage1/lexer.tes:529:78 in function `lexer__tokenize`")) || (t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:529:111 in function `lexer__tokenize`"), "stage1/lexer.tes:529:99 in function `lexer__tokenize`") == 95i64))))) {
+        if ((v_code.clone() == 95i64) && (!((t_add(v_index.clone(), 1i64, "stage1/lexer.tes:635:38 in function `lexer__tokenize_range`") < v_count.clone()) && (f_source__is_alphanumeric(t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:635:90 in function `lexer__tokenize_range`"), "stage1/lexer.tes:635:78 in function `lexer__tokenize_range`")) || (t_index(&v_codes.clone(), t_add(v_index.clone(), 1i64, "stage1/lexer.tes:635:111 in function `lexer__tokenize_range`"), "stage1/lexer.tes:635:99 in function `lexer__tokenize_range`") == 95i64))))) {
             v_tokens = t_append(std::mem::take(&mut v_tokens), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Underscore), t_text(""), v_here.clone()));
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:531:31 in function `lexer__tokenize`");
-            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:532:27 in function `lexer__tokenize`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:637:31 in function `lexer__tokenize_range`");
+            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:638:27 in function `lexer__tokenize_range`");
             continue
         };
         if (v_code.clone() == 95i64) {
             v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error(t_text("E0103"), v_here.clone(), t_text("names must start with a letter")));
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:537:31 in function `lexer__tokenize`");
-            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:538:27 in function `lexer__tokenize`");
-            while ((v_index.clone() < v_count.clone()) && (f_source__is_alphanumeric(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:539:61 in function `lexer__tokenize`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:539:78 in function `lexer__tokenize`") == 95i64))) {
-                v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:540:35 in function `lexer__tokenize`");
-                v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:541:31 in function `lexer__tokenize`");
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:643:31 in function `lexer__tokenize_range`");
+            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:644:27 in function `lexer__tokenize_range`");
+            while ((v_index.clone() < v_count.clone()) && (f_source__is_alphanumeric(t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:645:61 in function `lexer__tokenize_range`")) || (t_index(&v_codes.clone(), v_index.clone(), "stage1/lexer.tes:645:78 in function `lexer__tokenize_range`") == 95i64))) {
+                v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:646:35 in function `lexer__tokenize_range`");
+                v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:647:31 in function `lexer__tokenize_range`");
             }
             continue
         };
         if (v_code.clone() >= 128i64) {
-            v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0103"), v_here.clone(), t_concat(t_concat(t_text("unexpected character `"), t_from_code_point(v_code.clone(), "stage1/lexer.tes:546:111 in function `lexer__tokenize`")), t_text("`")), t_text("names use ASCII letters, digits and `_` only; text belongs inside double quotes")));
-            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:547:31 in function `lexer__tokenize`");
-            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:548:27 in function `lexer__tokenize`");
+            v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0103"), v_here.clone(), t_concat(t_concat(t_text("unexpected character `"), t_from_code_point(v_code.clone(), "stage1/lexer.tes:652:111 in function `lexer__tokenize_range`")), t_text("`")), t_text("names use ASCII letters, digits and `_` only; text belongs inside double quotes")));
+            v_index = t_add(v_index.clone(), 1i64, "stage1/lexer.tes:653:31 in function `lexer__tokenize_range`");
+            v_col = t_add(v_col.clone(), 1i64, "stage1/lexer.tes:654:27 in function `lexer__tokenize_range`");
             continue
         };
         let v_scan: Rc<T_lexer__Scan> = if (v_code.clone() == 34i64) {
@@ -1927,9 +2055,13 @@ fn f_lexer__tokenize(v_text: Rc<String>, v_file: i64) -> Rc<T_lexer__LexResult> 
             f_lexer__scan_symbol(v_codes.clone(), v_index.clone(), v_file.clone(), v_line.clone(), v_col.clone())
         };
         v_diagnostics = t_concat_lists(std::mem::take(&mut v_diagnostics), (v_scan.clone()).f_diagnostics.clone());
-        v_col = t_sub(t_add(v_col.clone(), (v_scan.clone()).f_end.clone(), "stage1/lexer.tes:561:23 in function `lexer__tokenize`"), v_index.clone(), "stage1/lexer.tes:561:34 in function `lexer__tokenize`");
+        v_col = t_sub(t_add(v_col.clone(), (v_scan.clone()).f_end.clone(), "stage1/lexer.tes:667:23 in function `lexer__tokenize_range`"), v_index.clone(), "stage1/lexer.tes:667:34 in function `lexer__tokenize_range`");
         v_index = (v_scan.clone()).f_end.clone();
         if (!(v_scan.clone()).f_emit.clone()) {
+            continue
+        };
+        if (t_list_length(&(v_scan.clone()).f_expansion.clone()) > 0i64) {
+            v_tokens = t_concat_lists(std::mem::take(&mut v_tokens), (v_scan.clone()).f_expansion.clone());
             continue
         };
         let v_kind: Rc<T_lexer__TokenKind> = ((v_scan.clone()).f_token.clone()).f_kind.clone();
@@ -1944,29 +2076,32 @@ fn f_lexer__tokenize(v_text: Rc<String>, v_file: i64) -> Rc<T_lexer__LexResult> 
             if (v_depth.clone() == 0i64) {
                 v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error(t_text("E0102"), v_span.clone(), t_concat(t_concat(t_text("`"), v_shown.clone()), t_text("` has no matching opening bracket"))));
             } else {
-                let v_top: i64 = t_index(&v_open_kinds.clone(), t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:578:44 in function `lexer__tokenize`"), "stage1/lexer.tes:578:27 in function `lexer__tokenize`");
+                let v_top: i64 = t_index(&v_open_kinds.clone(), t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:688:44 in function `lexer__tokenize_range`"), "stage1/lexer.tes:688:27 in function `lexer__tokenize_range`");
                 if (v_top.clone() != v_expected.clone()) {
-                    let v_open_text: Rc<String> = t_from_code_point(v_top.clone(), "stage1/lexer.tes:580:37 in function `lexer__tokenize`");
-                    v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0102"), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("`"), v_shown.clone()), t_text("` does not match the open `")), v_open_text.clone()), t_text("`")), t_concat(t_concat(t_concat(t_text("the `"), v_open_text.clone()), t_text("` was opened on line ")), t_int_to_text((t_index(&v_open_spans.clone(), t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:581:228 in function `lexer__tokenize`"), "stage1/lexer.tes:581:211 in function `lexer__tokenize`")).f_line.clone()))));
+                    let v_open_text: Rc<String> = t_from_code_point(v_top.clone(), "stage1/lexer.tes:690:37 in function `lexer__tokenize_range`");
+                    v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), f_source__error_help(t_text("E0102"), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("`"), v_shown.clone()), t_text("` does not match the open `")), v_open_text.clone()), t_text("`")), t_concat(t_concat(t_concat(t_text("the `"), v_open_text.clone()), t_text("` was opened on line ")), t_int_to_text((t_index(&v_open_spans.clone(), t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:691:228 in function `lexer__tokenize_range`"), "stage1/lexer.tes:691:211 in function `lexer__tokenize_range`")).f_line.clone()))));
                 };
-                v_open_kinds = t_slice(std::mem::take(&mut v_open_kinds), 0i64, t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:583:61 in function `lexer__tokenize`"), "stage1/lexer.tes:583:34 in function `lexer__tokenize`");
-                v_open_spans = t_slice(std::mem::take(&mut v_open_spans), 0i64, t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:584:61 in function `lexer__tokenize`"), "stage1/lexer.tes:584:34 in function `lexer__tokenize`");
+                v_open_kinds = t_slice(std::mem::take(&mut v_open_kinds), 0i64, t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:693:61 in function `lexer__tokenize_range`"), "stage1/lexer.tes:693:34 in function `lexer__tokenize_range`");
+                v_open_spans = t_slice(std::mem::take(&mut v_open_spans), 0i64, t_sub(v_depth.clone(), 1i64, "stage1/lexer.tes:694:61 in function `lexer__tokenize_range`"), "stage1/lexer.tes:694:34 in function `lexer__tokenize_range`");
             }
         };
         v_tokens = t_append(std::mem::take(&mut v_tokens), (v_scan.clone()).f_token.clone());
     }
-    let v_end_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:589:56 in function `lexer__tokenize`"));
-    let mut v_remaining: i64 = t_sub(t_list_length(&v_open_kinds.clone()), 1i64, "stage1/lexer.tes:590:40 in function `lexer__tokenize`");
+    let v_end_span: Rc<T_source__Span> = f_source__span_of(v_file.clone(), v_line.clone(), v_col.clone(), t_add(v_col.clone(), 1i64, "stage1/lexer.tes:699:56 in function `lexer__tokenize_range`"));
+    if v_nested.clone() {
+        return Rc::new(T_lexer__LexResult { f_tokens: v_tokens.clone(), f_diagnostics: v_diagnostics.clone() })
+    };
+    let mut v_remaining: i64 = t_sub(t_list_length(&v_open_kinds.clone()), 1i64, "stage1/lexer.tes:703:40 in function `lexer__tokenize_range`");
     while (v_remaining.clone() >= 0i64) {
-        let v_d: Rc<T_source__Diagnostic> = f_source__error(t_text("E0102"), t_index(&v_open_spans.clone(), v_remaining.clone(), "stage1/lexer.tes:592:39 in function `lexer__tokenize`"), t_concat(t_concat(t_text("`"), t_from_code_point(t_index(&v_open_kinds.clone(), v_remaining.clone(), "stage1/lexer.tes:592:84 in function `lexer__tokenize`"), "stage1/lexer.tes:592:68 in function `lexer__tokenize`")), t_text("` is never closed")));
+        let v_d: Rc<T_source__Diagnostic> = f_source__error(t_text("E0102"), t_index(&v_open_spans.clone(), v_remaining.clone(), "stage1/lexer.tes:705:39 in function `lexer__tokenize_range`"), t_concat(t_concat(t_text("`"), t_from_code_point(t_index(&v_open_kinds.clone(), v_remaining.clone(), "stage1/lexer.tes:705:84 in function `lexer__tokenize_range`"), "stage1/lexer.tes:705:68 in function `lexer__tokenize_range`")), t_text("` is never closed")));
         v_diagnostics = t_append(std::mem::take(&mut v_diagnostics), { let mut t1 = Rc::unwrap_or_clone(v_d.clone()); t1.f_label = t_text("opened here"); Rc::new(t1) });
-        v_remaining = t_sub(v_remaining.clone(), 1i64, "stage1/lexer.tes:594:35 in function `lexer__tokenize`");
+        v_remaining = t_sub(v_remaining.clone(), 1i64, "stage1/lexer.tes:707:35 in function `lexer__tokenize_range`");
     }
     if f_lexer__newline_allowed(v_tokens.clone(), Rc::new(Vec::<i64>::new())) {
         v_tokens = t_append(std::mem::take(&mut v_tokens), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Newline), t_text(""), v_end_span.clone()));
     };
     let v_token_count: i64 = t_list_length(&v_tokens.clone());
-    if ((v_token_count.clone() > 0i64) && ((t_index(&v_tokens.clone(), t_sub(v_token_count.clone(), 1i64, "stage1/lexer.tes:600:47 in function `lexer__tokenize`"), "stage1/lexer.tes:600:28 in function `lexer__tokenize`")).f_kind.clone() != Rc::new(T_lexer__TokenKind::V_Newline))) {
+    if ((v_token_count.clone() > 0i64) && ((t_index(&v_tokens.clone(), t_sub(v_token_count.clone(), 1i64, "stage1/lexer.tes:713:47 in function `lexer__tokenize_range`"), "stage1/lexer.tes:713:28 in function `lexer__tokenize_range`")).f_kind.clone() != Rc::new(T_lexer__TokenKind::V_Newline))) {
         v_tokens = t_append(std::mem::take(&mut v_tokens), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Newline), t_text(""), v_end_span.clone()));
     };
     v_tokens = t_append(std::mem::take(&mut v_tokens), f_lexer__token(Rc::new(T_lexer__TokenKind::V_Eof), t_text(""), v_end_span.clone()));
@@ -2920,6 +3055,7 @@ fn f_parser__parse_primary(v_p: Rc<T_parser__Parser>, v_allow_record: bool) -> R
             f_parser__expr_result((v_value.clone()).f_parser.clone(), Rc::new(T_ast__ExprKind::V_Return(Some((v_value.clone()).f_expr.clone()))), f_source__span_to(v_start.clone(), ((v_value.clone()).f_expr.clone()).f_span.clone()))
         } }
         T_lexer__TokenKind::V_Break => { f_parser__expr_result(f_parser__advance(v_p.clone()), Rc::new(T_ast__ExprKind::V_Break), v_start.clone()) }
+        T_lexer__TokenKind::V_Dot => { f_parser__parse_shorthand_variant(v_p.clone()) }
         T_lexer__TokenKind::V_Continue => { f_parser__expr_result(f_parser__advance(v_p.clone()), Rc::new(T_ast__ExprKind::V_Continue), v_start.clone()) }
         T_lexer__TokenKind::V_Ident => { f_parser__parse_name(v_p.clone(), v_t.clone(), v_allow_record.clone()) }
         _ => { f_parser__failed_expr(f_parser__unexpected(v_p.clone(), t_text("an expression"))) }
@@ -2927,19 +3063,19 @@ fn f_parser__parse_primary(v_p: Rc<T_parser__Parser>, v_allow_record: bool) -> R
 }
 
 fn f_parser__is_qualified_type(v_p: Rc<T_parser__Parser>) -> bool {
-    (((f_parser__peek(v_p.clone()) == Rc::new(T_lexer__TokenKind::V_Dot)) && (f_parser__peek_at(v_p.clone(), 1i64) == Rc::new(T_lexer__TokenKind::V_Ident))) && f_source__starts_with_upper((t_index(&(v_p.clone()).f_tokens.clone(), t_add((v_p.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:920:123 in function `parser__is_qualified_type`"), "stage1/parser.tes:920:108 in function `parser__is_qualified_type`")).f_text.clone()))
+    (((f_parser__peek(v_p.clone()) == Rc::new(T_lexer__TokenKind::V_Dot)) && (f_parser__peek_at(v_p.clone(), 1i64) == Rc::new(T_lexer__TokenKind::V_Ident))) && f_source__starts_with_upper((t_index(&(v_p.clone()).f_tokens.clone(), t_add((v_p.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:921:123 in function `parser__is_qualified_type`"), "stage1/parser.tes:921:108 in function `parser__is_qualified_type`")).f_text.clone()))
 }
 
 fn f_parser__parse_name(v_p: Rc<T_parser__Parser>, v_t: Rc<T_lexer__Token>, v_allow_record: bool) -> Rc<T_parser__ExprResult> {
     let v_after_name: Rc<T_parser__Parser> = f_parser__advance(v_p.clone());
     if ((!f_source__starts_with_upper((v_t.clone()).f_text.clone())) && f_parser__is_qualified_type(v_after_name.clone())) {
-        let v_member: Rc<T_lexer__Token> = t_index(&(v_after_name.clone()).f_tokens.clone(), t_add((v_after_name.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:926:55 in function `parser__parse_name`"), "stage1/parser.tes:926:22 in function `parser__parse_name`");
+        let v_member: Rc<T_lexer__Token> = t_index(&(v_after_name.clone()).f_tokens.clone(), t_add((v_after_name.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:927:55 in function `parser__parse_name`"), "stage1/parser.tes:927:22 in function `parser__parse_name`");
         let v_qualified: Rc<T_lexer__Token> = Rc::new(T_lexer__Token { f_kind: Rc::new(T_lexer__TokenKind::V_Ident), f_text: t_concat(t_concat((v_t.clone()).f_text.clone(), t_text(".")), (v_member.clone()).f_text.clone()), f_span: f_source__span_to((v_t.clone()).f_span.clone(), (v_member.clone()).f_span.clone()) });
-        return f_parser__parse_type_use({ let mut t1 = Rc::unwrap_or_clone(v_after_name.clone()); t1.f_pos = t_add((v_after_name.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:928:69 in function `parser__parse_name`"); Rc::new(t1) }, v_qualified.clone(), v_allow_record.clone())
+        return f_parser__parse_type_use({ let mut t1 = Rc::unwrap_or_clone(v_after_name.clone()); t1.f_pos = t_add((v_after_name.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:929:69 in function `parser__parse_name`"); Rc::new(t1) }, v_qualified.clone(), v_allow_record.clone())
     };
     if ((((!f_source__starts_with_upper((v_t.clone()).f_text.clone())) && (f_parser__peek(v_after_name.clone()) == Rc::new(T_lexer__TokenKind::V_Dot))) && (f_parser__peek_at(v_after_name.clone(), 1i64) == Rc::new(T_lexer__TokenKind::V_Ident))) && (f_parser__peek_at(v_after_name.clone(), 2i64) == Rc::new(T_lexer__TokenKind::V_LParen))) {
-        let v_member: Rc<T_lexer__Token> = t_index(&(v_after_name.clone()).f_tokens.clone(), t_add((v_after_name.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:931:55 in function `parser__parse_name`"), "stage1/parser.tes:931:22 in function `parser__parse_name`");
-        let v_args: Rc<T_parser__ArgsResult> = f_parser__parse_args({ let mut t2 = Rc::unwrap_or_clone(v_after_name.clone()); t2.f_pos = t_add((v_after_name.clone()).f_pos.clone(), 3i64, "stage1/parser.tes:932:69 in function `parser__parse_name`"); Rc::new(t2) }, Rc::new(T_lexer__TokenKind::V_RParen));
+        let v_member: Rc<T_lexer__Token> = t_index(&(v_after_name.clone()).f_tokens.clone(), t_add((v_after_name.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:932:55 in function `parser__parse_name`"), "stage1/parser.tes:932:22 in function `parser__parse_name`");
+        let v_args: Rc<T_parser__ArgsResult> = f_parser__parse_args({ let mut t2 = Rc::unwrap_or_clone(v_after_name.clone()); t2.f_pos = t_add((v_after_name.clone()).f_pos.clone(), 3i64, "stage1/parser.tes:933:69 in function `parser__parse_name`"); Rc::new(t2) }, Rc::new(T_lexer__TokenKind::V_RParen));
         if ((v_args.clone()).f_parser.clone()).f_failed.clone() {
             return f_parser__failed_expr((v_args.clone()).f_parser.clone())
         };
@@ -3015,6 +3151,23 @@ fn f_parser__parse_field_inits(v_start: Rc<T_parser__Parser>) -> Rc<T_parser__Fi
     Rc::new(T_parser__FieldInitsResult { f_parser: f_parser__advance(v_p.clone()), f_fields: v_fields.clone(), f_close: f_parser__current_span(v_p.clone()) })
 }
 
+// note: `.Variant` or `.Variant(args)`: the checker finds the type from the context.
+fn f_parser__parse_shorthand_variant(v_p: Rc<T_parser__Parser>) -> Rc<T_parser__ExprResult> {
+    let v_start: Rc<T_source__Span> = f_parser__current_span(v_p.clone());
+    let v_variant: Rc<T_parser__NameResult> = f_parser__identifier(f_parser__advance(v_p.clone()), t_text("a variant name after `.`"));
+    if ((v_variant.clone()).f_parser.clone()).f_failed.clone() {
+        return f_parser__failed_expr((v_variant.clone()).f_parser.clone())
+    };
+    if f_parser__at((v_variant.clone()).f_parser.clone(), Rc::new(T_lexer__TokenKind::V_LParen)) {
+        let v_args: Rc<T_parser__ArgsResult> = f_parser__parse_args(f_parser__advance((v_variant.clone()).f_parser.clone()), Rc::new(T_lexer__TokenKind::V_RParen));
+        if ((v_args.clone()).f_parser.clone()).f_failed.clone() {
+            return f_parser__failed_expr((v_args.clone()).f_parser.clone())
+        };
+        return f_parser__expr_result((v_args.clone()).f_parser.clone(), Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text(""), (v_variant.clone()).f_name.clone(), (v_variant.clone()).f_span.clone(), (v_args.clone()).f_args.clone())), f_source__span_to(v_start.clone(), (v_args.clone()).f_end.clone()))
+    };
+    f_parser__expr_result((v_variant.clone()).f_parser.clone(), Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text(""), (v_variant.clone()).f_name.clone(), (v_variant.clone()).f_span.clone(), Rc::new(Vec::<Rc<T_ast__Expr>>::new()))), f_source__span_to(v_start.clone(), (v_variant.clone()).f_span.clone()))
+}
+
 fn f_parser__parse_record_literal(v_start: Rc<T_parser__Parser>, v_type_name: Rc<String>, v_type_span: Rc<T_source__Span>) -> Rc<T_parser__ExprResult> {
     let mut v_p: Rc<T_parser__Parser> = f_parser__expect(v_start.clone(), Rc::new(T_lexer__TokenKind::V_LBrace));
     let mut v_fields: Rc<Vec<Rc<T_ast__FieldInit>>> = Rc::new(Vec::<Rc<T_ast__FieldInit>>::new());
@@ -3069,7 +3222,7 @@ fn f_parser__parse_if(v_p: Rc<T_parser__Parser>) -> Rc<T_parser__ExprResult> {
         return f_parser__expr_result((v_else_branch.clone()).f_parser.clone(), v_kind.clone(), f_source__span_to(v_start.clone(), ((v_else_branch.clone()).f_expr.clone()).f_span.clone()))
     };
     if (f_parser__at(v_after.clone(), Rc::new(T_lexer__TokenKind::V_Newline)) && (f_parser__peek_at(v_after.clone(), 1i64) == Rc::new(T_lexer__TokenKind::V_Else))) {
-        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0111"), (t_index(&(v_after.clone()).f_tokens.clone(), t_add((v_after.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:1068:67 in function `parser__parse_if`"), "stage1/parser.tes:1068:44 in function `parser__parse_if`")).f_span.clone(), t_text("`else` must be on the same line as the closing `}`"), t_text("write `} else {`"));
+        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0111"), (t_index(&(v_after.clone()).f_tokens.clone(), t_add((v_after.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:1086:67 in function `parser__parse_if`"), "stage1/parser.tes:1086:44 in function `parser__parse_if`")).f_span.clone(), t_text("`else` must be on the same line as the closing `}`"), t_text("write `} else {`"));
         return f_parser__failed_expr(f_parser__fail_parse(v_after.clone(), v_d.clone()))
     };
     f_parser__expr_result(v_after.clone(), Rc::new(T_ast__ExprKind::V_If((v_condition.clone()).f_expr.clone(), (v_then_block.clone()).f_block.clone(), Option::<Rc<T_ast__Expr>>::None)), f_source__span_to(v_start.clone(), ((v_then_block.clone()).f_block.clone()).f_span.clone()))
@@ -3130,13 +3283,14 @@ fn f_parser__parse_pattern(v_p: Rc<T_parser__Parser>) -> Rc<T_parser__PatternRes
             let v_value: i64 = if ((v_number.clone()).f_text.clone() == f_parser__min_int_digits()) {
                 f_parser__min_int()
             } else {
-                t_neg(f_parser__parse_int_text((v_number.clone()).f_text.clone()), "stage1/parser.tes:1124:81 in function `parser__parse_pattern`")
+                t_neg(f_parser__parse_int_text((v_number.clone()).f_text.clone()), "stage1/parser.tes:1142:81 in function `parser__parse_pattern`")
             };
             f_parser__pattern_result(f_parser__advance(f_parser__advance(v_p.clone())), Rc::new(T_ast__PatternKind::V_IntPattern(v_value.clone())), v_start.clone())
         } }
         T_lexer__TokenKind::V_Text => { f_parser__pattern_result(f_parser__advance(v_p.clone()), Rc::new(T_ast__PatternKind::V_TextPattern((v_t.clone()).f_text.clone())), v_start.clone()) }
         T_lexer__TokenKind::V_True => { f_parser__pattern_result(f_parser__advance(v_p.clone()), Rc::new(T_ast__PatternKind::V_BoolPattern(true)), v_start.clone()) }
         T_lexer__TokenKind::V_False => { f_parser__pattern_result(f_parser__advance(v_p.clone()), Rc::new(T_ast__PatternKind::V_BoolPattern(false)), v_start.clone()) }
+        T_lexer__TokenKind::V_Dot => { f_parser__parse_variant_pattern(v_p.clone(), t_text(""), v_start.clone()) }
         T_lexer__TokenKind::V_Ident => { {
             let mut v_type_name: Rc<String> = (v_t.clone()).f_text.clone();
             let mut v_after_type: Rc<T_parser__Parser> = f_parser__advance(v_p.clone());
@@ -3144,39 +3298,44 @@ fn f_parser__parse_pattern(v_p: Rc<T_parser__Parser>) -> Rc<T_parser__PatternRes
                 if (!f_parser__is_qualified_type(v_after_type.clone())) {
                     return f_parser__failed_pattern(f_parser__unexpected(v_p.clone(), t_text("a pattern (`_`, a literal, or `Type.Variant`)")))
                 };
-                v_type_name = t_concat(t_concat((v_t.clone()).f_text.clone(), t_text(".")), (t_index(&(v_after_type.clone()).f_tokens.clone(), t_add((v_after_type.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:1137:81 in function `parser__parse_pattern`"), "stage1/parser.tes:1137:48 in function `parser__parse_pattern`")).f_text.clone());
-                v_after_type = { let mut t1 = Rc::unwrap_or_clone(v_after_type.clone()); t1.f_pos = t_add((v_after_type.clone()).f_pos.clone(), 2i64, "stage1/parser.tes:1138:72 in function `parser__parse_pattern`"); Rc::new(t1) };
+                v_type_name = t_concat(t_concat((v_t.clone()).f_text.clone(), t_text(".")), (t_index(&(v_after_type.clone()).f_tokens.clone(), t_add((v_after_type.clone()).f_pos.clone(), 1i64, "stage1/parser.tes:1156:81 in function `parser__parse_pattern`"), "stage1/parser.tes:1156:48 in function `parser__parse_pattern`")).f_text.clone());
+                v_after_type = { let mut t1 = Rc::unwrap_or_clone(v_after_type.clone()); t1.f_pos = t_add((v_after_type.clone()).f_pos.clone(), 2i64, "stage1/parser.tes:1157:72 in function `parser__parse_pattern`"); Rc::new(t1) };
             };
-            let v_variant: Rc<T_parser__NameResult> = f_parser__identifier(f_parser__expect(v_after_type.clone(), Rc::new(T_lexer__TokenKind::V_Dot)), t_text("a variant name"));
-            if ((v_variant.clone()).f_parser.clone()).f_failed.clone() {
-                return f_parser__failed_pattern((v_variant.clone()).f_parser.clone())
-            };
-            let mut v_q: Rc<T_parser__Parser> = (v_variant.clone()).f_parser.clone();
-            let mut v_bindings: Rc<Vec<Rc<T_ast__Binding>>> = Rc::new(Vec::<Rc<T_ast__Binding>>::new());
-            if f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_LParen)) {
-                v_q = f_parser__advance(v_q.clone());
-                while (!f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_RParen))) {
-                    let v_b: Rc<T_lexer__Token> = f_parser__current(v_q.clone());
-                    if ((v_b.clone()).f_kind.clone() == Rc::new(T_lexer__TokenKind::V_Underscore)) {
-                        v_bindings = t_append(std::mem::take(&mut v_bindings), Rc::new(T_ast__Binding { f_name: t_text("_"), f_span: (v_b.clone()).f_span.clone() }));
-                    } else if ((v_b.clone()).f_kind.clone() == Rc::new(T_lexer__TokenKind::V_Ident)) {
-                        v_bindings = t_append(std::mem::take(&mut v_bindings), Rc::new(T_ast__Binding { f_name: (v_b.clone()).f_text.clone(), f_span: (v_b.clone()).f_span.clone() }));
-                    } else {
-                        return f_parser__failed_pattern(f_parser__unexpected(v_q.clone(), t_text("a binding name or `_`")))
-                    };
-                    v_q = f_parser__advance(v_q.clone());
-                    if f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_Comma)) {
-                        v_q = f_parser__advance(v_q.clone());
-                    } else if (!f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_RParen))) {
-                        return f_parser__failed_pattern(f_parser__unexpected(v_q.clone(), t_text("`,` or `)`")))
-                    }
-                }
-                v_q = f_parser__advance(v_q.clone());
-            };
-            f_parser__pattern_result(v_q.clone(), Rc::new(T_ast__PatternKind::V_VariantPattern(v_type_name.clone(), (v_variant.clone()).f_name.clone(), v_bindings.clone())), v_start.clone())
+            f_parser__parse_variant_pattern(v_after_type.clone(), v_type_name.clone(), v_start.clone())
         } }
         _ => { f_parser__failed_pattern(f_parser__unexpected(v_p.clone(), t_text("a pattern (`_`, a literal, or `Type.Variant`)"))) }
     }
+}
+
+// note: From the `.` before the variant name; `type_name` is empty for the `.Variant` shorthand.
+fn f_parser__parse_variant_pattern(v_after_type: Rc<T_parser__Parser>, v_type_name: Rc<String>, v_start: Rc<T_source__Span>) -> Rc<T_parser__PatternResult> {
+    let v_variant: Rc<T_parser__NameResult> = f_parser__identifier(f_parser__expect(v_after_type.clone(), Rc::new(T_lexer__TokenKind::V_Dot)), t_text("a variant name"));
+    if ((v_variant.clone()).f_parser.clone()).f_failed.clone() {
+        return f_parser__failed_pattern((v_variant.clone()).f_parser.clone())
+    };
+    let mut v_q: Rc<T_parser__Parser> = (v_variant.clone()).f_parser.clone();
+    let mut v_bindings: Rc<Vec<Rc<T_ast__Binding>>> = Rc::new(Vec::<Rc<T_ast__Binding>>::new());
+    if f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_LParen)) {
+        v_q = f_parser__advance(v_q.clone());
+        while (!f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_RParen))) {
+            let v_b: Rc<T_lexer__Token> = f_parser__current(v_q.clone());
+            if ((v_b.clone()).f_kind.clone() == Rc::new(T_lexer__TokenKind::V_Underscore)) {
+                v_bindings = t_append(std::mem::take(&mut v_bindings), Rc::new(T_ast__Binding { f_name: t_text("_"), f_span: (v_b.clone()).f_span.clone() }));
+            } else if ((v_b.clone()).f_kind.clone() == Rc::new(T_lexer__TokenKind::V_Ident)) {
+                v_bindings = t_append(std::mem::take(&mut v_bindings), Rc::new(T_ast__Binding { f_name: (v_b.clone()).f_text.clone(), f_span: (v_b.clone()).f_span.clone() }));
+            } else {
+                return f_parser__failed_pattern(f_parser__unexpected(v_q.clone(), t_text("a binding name or `_`")))
+            };
+            v_q = f_parser__advance(v_q.clone());
+            if f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_Comma)) {
+                v_q = f_parser__advance(v_q.clone());
+            } else if (!f_parser__at(v_q.clone(), Rc::new(T_lexer__TokenKind::V_RParen))) {
+                return f_parser__failed_pattern(f_parser__unexpected(v_q.clone(), t_text("`,` or `)`")))
+            }
+        }
+        v_q = f_parser__advance(v_q.clone());
+    };
+    f_parser__pattern_result(v_q.clone(), Rc::new(T_ast__PatternKind::V_VariantPattern(v_type_name.clone(), (v_variant.clone()).f_name.clone(), v_bindings.clone())), v_start.clone())
 }
 
 fn f_checker__effect_names() -> Rc<Vec<Rc<String>>> {
@@ -3526,41 +3685,52 @@ fn f_checker__resolve(v_start: Rc<T_checker__Checker>, v_te: Rc<T_ast__TypeExpr>
         v_ty = Rc::new(T_ast__Type::V_Text);
     } else if (v_name.clone() == t_text("Unit")) {
         v_ty = Rc::new(T_ast__Type::V_Unit);
-    } else if (f_checker__lookup_type(v_c.clone(), v_name.clone(), (v_te.clone()).f_span.clone())).f_found.clone() {
-        let v_lookup: Rc<T_checker__NameLookup> = f_checker__lookup_type(v_c.clone(), v_name.clone(), (v_te.clone()).f_span.clone());
-        v_ty = Rc::new(T_ast__Type::V_Named((v_lookup.clone()).f_canonical.clone()));
-        v_c = f_checker__mark_window_event((v_lookup.clone()).f_checker.clone(), (v_lookup.clone()).f_canonical.clone());
-    } else if (f_checker__lookup_type(v_c.clone(), v_name.clone(), (v_te.clone()).f_span.clone())).f_reported.clone() {
-        return Rc::new(T_checker__ResolvedType { f_checker: (f_checker__lookup_type(v_c.clone(), v_name.clone(), (v_te.clone()).f_span.clone())).f_checker.clone(), f_ty: Rc::new(T_ast__Type::V_Unknown) })
     } else {
-        let v_hint: Rc<String> = match (v_name.clone()).as_str() {
-            "i64" => { t_text("Int") }
-            "int" => { t_text("Int") }
-            "integer" => { t_text("Int") }
-            "bool" => { t_text("Bool") }
-            "boolean" => { t_text("Bool") }
-            "str" => { t_text("Text") }
-            "string" => { t_text("Text") }
-            "String" => { t_text("Text") }
-            "text" => { t_text("Text") }
-            "unit" => { t_text("Unit") }
-            "void" => { t_text("Unit") }
-            "list" => { t_text("List[...]") }
-            "Vec" => { t_text("List[...]") }
-            "vec" => { t_text("List[...]") }
-            "Array" => { t_text("List[...]") }
-            _ => { t_text("") }
-        };
-        let mut v_d: Rc<T_source__Diagnostic> = f_source__error(t_text("E0208"), (v_te.clone()).f_span.clone(), t_concat(t_concat(t_text("unknown type `"), v_name.clone()), t_text("`")));
-        if (v_hint.clone() != t_text("")) {
-            v_d = { let mut t1 = Rc::unwrap_or_clone(v_d.clone()); t1.f_help = t_concat(t_concat(t_text("did you mean `"), v_hint.clone()), t_text("`?")); Rc::new(t1) };
-        };
-        return Rc::new(T_checker__ResolvedType { f_checker: f_checker__report(v_c.clone(), v_d.clone()), f_ty: Rc::new(T_ast__Type::V_Unknown) })
+        let v_lookup: Rc<T_checker__NameLookup> = f_checker__lookup_type(v_c.clone(), v_name.clone(), (v_te.clone()).f_span.clone());
+        match &((v_lookup.clone()).f_result.clone()) {
+            Ok(t1) => { let v_canonical = t1.clone(); {
+                v_ty = Rc::new(T_ast__Type::V_Named(v_canonical.clone()));
+                v_c = f_checker__mark_window_event((v_lookup.clone()).f_checker.clone(), v_canonical.clone());
+            } }
+            Err(t2) => { let v_unresolved = t2.clone(); {
+                if (v_unresolved.clone() == Rc::new(T_checker__Unresolved::V_Reported)) {
+                    return Rc::new(T_checker__ResolvedType { f_checker: (v_lookup.clone()).f_checker.clone(), f_ty: Rc::new(T_ast__Type::V_Unknown) })
+                };
+                return Rc::new(T_checker__ResolvedType { f_checker: f_checker__report(v_c.clone(), f_checker__unknown_type_error(v_name.clone(), (v_te.clone()).f_span.clone())), f_ty: Rc::new(T_ast__Type::V_Unknown) })
+            } }
+        }
     };
     if (t_list_length(&(v_te.clone()).f_args.clone()) > 0i64) {
         v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0208"), (v_te.clone()).f_span.clone(), t_concat(t_concat(t_text("type `"), v_name.clone()), t_text("` takes no type arguments"))));
     };
     Rc::new(T_checker__ResolvedType { f_checker: v_c.clone(), f_ty: v_ty.clone() })
+}
+
+fn f_checker__unknown_type_error(v_name: Rc<String>, v_span: Rc<T_source__Span>) -> Rc<T_source__Diagnostic> {
+    let v_hint: Rc<String> = match (v_name.clone()).as_str() {
+        "i64" => { t_text("Int") }
+        "int" => { t_text("Int") }
+        "integer" => { t_text("Int") }
+        "bool" => { t_text("Bool") }
+        "boolean" => { t_text("Bool") }
+        "str" => { t_text("Text") }
+        "string" => { t_text("Text") }
+        "String" => { t_text("Text") }
+        "text" => { t_text("Text") }
+        "unit" => { t_text("Unit") }
+        "void" => { t_text("Unit") }
+        "list" => { t_text("List[...]") }
+        "Vec" => { t_text("List[...]") }
+        "vec" => { t_text("List[...]") }
+        "Array" => { t_text("List[...]") }
+        _ => { t_text("") }
+    };
+    let v_d: Rc<T_source__Diagnostic> = f_source__error(t_text("E0208"), v_span.clone(), t_concat(t_concat(t_text("unknown type `"), v_name.clone()), t_text("`")));
+    if (v_hint.clone() == t_text("")) {
+        v_d.clone()
+    } else {
+        { let mut t1 = Rc::unwrap_or_clone(v_d.clone()); t1.f_help = t_concat(t_concat(t_text("did you mean `"), v_hint.clone()), t_text("`?")); Rc::new(t1) }
+    }
 }
 
 fn f_checker__resolve_fields(v_start: Rc<T_checker__Checker>, v_fields: Rc<Vec<Rc<T_ast__Field>>>) -> Rc<T_checker__ResolvedFields> {
@@ -3614,9 +3784,20 @@ fn f_checker__mark_alias_used(v_c: Rc<T_checker__Checker>, v_alias: Rc<String>) 
     { let mut t1 = Rc::unwrap_or_clone(v_c.clone()); t1.f_used_aliases = t_append((v_c.clone()).f_used_aliases.clone(), v_key.clone()); Rc::new(t1) }
 }
 
+fn f_checker__resolved_name(v_lookup: Rc<T_checker__NameLookup>) -> Rc<String> {
+    match &((v_lookup.clone()).f_result.clone()) {
+        Ok(t1) => { let v_canonical = t1.clone(); v_canonical.clone() }
+        Err(_) => { t_text("") }
+    }
+}
+
+fn f_checker__already_reported(v_lookup: Rc<T_checker__NameLookup>) -> bool {
+    ((v_lookup.clone()).f_result.clone() == Result::<Rc<String>, Rc<T_checker__Unresolved>>::Err(Rc::new(T_checker__Unresolved::V_Reported)))
+}
+
 fn f_checker__module_path_of(v_prefix: Rc<String>) -> Rc<String> {
     let v_parts: Rc<Vec<Rc<String>>> = f_source__split_on_text(v_prefix.clone(), t_text("__"));
-    t_join(&t_slice(v_parts.clone(), 0i64, t_sub(t_list_length(&v_parts.clone()), 1i64, "stage1/checker.tes:558:40 in function `checker__module_path_of`"), "stage1/checker.tes:558:10 in function `checker__module_path_of`"), &t_text("/"))
+    t_join(&t_slice(v_parts.clone(), 0i64, t_sub(t_list_length(&v_parts.clone()), 1i64, "stage1/checker.tes:578:40 in function `checker__module_path_of`"), "stage1/checker.tes:578:10 in function `checker__module_path_of`"), &t_text("/"))
 }
 
 // note: Resolves `Name` (this module) or `alias.Name` (an imported module) to a canonical type name.
@@ -3628,9 +3809,60 @@ fn f_checker__lookup_type(v_c: Rc<T_checker__Checker>, v_name: Rc<String>, v_spa
         } else {
             t_concat((v_c.clone()).f_prefix.clone(), v_name.clone())
         };
-        return Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_canonical: v_canonical.clone(), f_found: (f_checker__type_index(v_c.clone(), v_canonical.clone()) >= 0i64), f_reported: false })
+        let v_result: Result<Rc<String>, Rc<T_checker__Unresolved>> = if (f_checker__type_index(v_c.clone(), v_canonical.clone()) >= 0i64) {
+            Result::<Rc<String>, Rc<T_checker__Unresolved>>::Ok(v_canonical.clone())
+        } else {
+            Result::<Rc<String>, Rc<T_checker__Unresolved>>::Err(Rc::new(T_checker__Unresolved::V_NotDeclared))
+        };
+        return Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_result: v_result.clone() })
     };
-    f_checker__lookup_qualified(v_c.clone(), t_index(&v_parts.clone(), 0i64, "stage1/checker.tes:568:25 in function `checker__lookup_type`"), t_index(&v_parts.clone(), 1i64, "stage1/checker.tes:568:35 in function `checker__lookup_type`"), v_span.clone(), true)
+    f_checker__lookup_qualified(v_c.clone(), t_index(&v_parts.clone(), 0i64, "stage1/checker.tes:589:25 in function `checker__lookup_type`"), t_index(&v_parts.clone(), 1i64, "stage1/checker.tes:589:35 in function `checker__lookup_type`"), v_span.clone(), true)
+}
+
+fn f_checker__lookup_function(v_c: Rc<T_checker__Checker>, v_name: Rc<String>, v_span: Rc<T_source__Span>) -> Rc<T_checker__NameLookup> {
+    let v_parts: Rc<Vec<Rc<String>>> = f_source__split_on(v_name.clone(), 46i64);
+    if (t_list_length(&v_parts.clone()) == 1i64) {
+        let v_canonical: Rc<String> = t_concat((v_c.clone()).f_prefix.clone(), v_name.clone());
+        let v_result: Result<Rc<String>, Rc<T_checker__Unresolved>> = if (f_checker__find_signature(v_c.clone(), v_canonical.clone()) != Option::<Rc<T_checker__Signature>>::None) {
+            Result::<Rc<String>, Rc<T_checker__Unresolved>>::Ok(v_canonical.clone())
+        } else {
+            Result::<Rc<String>, Rc<T_checker__Unresolved>>::Err(Rc::new(T_checker__Unresolved::V_NotDeclared))
+        };
+        return Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_result: v_result.clone() })
+    };
+    f_checker__lookup_qualified(v_c.clone(), t_index(&v_parts.clone(), 0i64, "stage1/checker.tes:599:25 in function `checker__lookup_function`"), t_index(&v_parts.clone(), 1i64, "stage1/checker.tes:599:35 in function `checker__lookup_function`"), v_span.clone(), false)
+}
+
+fn f_checker__import_named(v_c: Rc<T_checker__Checker>, v_alias: Rc<String>) -> Result<Rc<T_ast__Import>, Rc<T_checker__LookupFailure>> {
+    match &(f_checker__find_import(v_c.clone(), v_alias.clone())) {
+        Some(t1) => { let v_found = t1.clone(); Result::<Rc<T_ast__Import>, Rc<T_checker__LookupFailure>>::Ok(v_found.clone()) }
+        None => { Result::<Rc<T_ast__Import>, Rc<T_checker__LookupFailure>>::Err(Rc::new(T_checker__LookupFailure::V_UnknownModule)) }
+    }
+}
+
+fn f_checker__is_public(v_c: Rc<T_checker__Checker>, v_canonical: Rc<String>, v_is_type: bool, v_path: Rc<String>) -> Result<bool, Rc<T_checker__LookupFailure>> {
+    if v_is_type.clone() {
+        let v_index: i64 = f_checker__type_index(v_c.clone(), v_canonical.clone());
+        return if (v_index.clone() >= 0i64) {
+            Result::<bool, Rc<T_checker__LookupFailure>>::Ok((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:619:42 in function `checker__is_public`")).f_public.clone())
+        } else {
+            Result::<bool, Rc<T_checker__LookupFailure>>::Err(Rc::new(T_checker__LookupFailure::V_Missing(v_path.clone())))
+        }
+    };
+    match &(f_checker__find_signature(v_c.clone(), v_canonical.clone())) {
+        Some(t1) => { let v_signature = t1.clone(); Result::<bool, Rc<T_checker__LookupFailure>>::Ok((v_signature.clone()).f_public.clone()) }
+        None => { Result::<bool, Rc<T_checker__LookupFailure>>::Err(Rc::new(T_checker__LookupFailure::V_Missing(v_path.clone()))) }
+    }
+}
+
+// note: Pure: the canonical name of `alias.member`, or why it cannot be used. Reports nothing.
+fn f_checker__qualified_name(v_c: Rc<T_checker__Checker>, v_alias: Rc<String>, v_member: Rc<String>, v_is_type: bool) -> Result<Rc<String>, Rc<T_checker__LookupFailure>> {
+    let v_import_decl: Rc<T_ast__Import> = match f_checker__import_named(v_c.clone(), v_alias.clone()) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) };
+    let v_canonical: Rc<String> = t_concat(f_ast__module_prefix((v_import_decl.clone()).f_path.clone()), v_member.clone());
+    if (!match f_checker__is_public(v_c.clone(), v_canonical.clone(), v_is_type.clone(), (v_import_decl.clone()).f_path.clone()) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) }) {
+        return Result::<Rc<String>, Rc<T_checker__LookupFailure>>::Err(Rc::new(T_checker__LookupFailure::V_Private((v_import_decl.clone()).f_path.clone(), v_canonical.clone())))
+    };
+    Result::<Rc<String>, Rc<T_checker__LookupFailure>>::Ok(v_canonical.clone())
 }
 
 fn f_checker__lookup_qualified(v_c: Rc<T_checker__Checker>, v_alias: Rc<String>, v_member: Rc<String>, v_span: Rc<T_source__Span>, v_is_type: bool) -> Rc<T_checker__NameLookup> {
@@ -3639,59 +3871,32 @@ fn f_checker__lookup_qualified(v_c: Rc<T_checker__Checker>, v_alias: Rc<String>,
     } else {
         t_text("function")
     };
-    let v_path: Rc<String> = match &(f_checker__find_import(v_c.clone(), v_alias.clone())) {
-        Some(t1) => { let v_found = t1.clone(); (v_found.clone()).f_path.clone() }
-        None => { {
+    let v_failure: Rc<T_checker__LookupFailure> = match &(f_checker__qualified_name(v_c.clone(), v_alias.clone(), v_member.clone(), v_is_type.clone())) {
+        Ok(t1) => { let v_canonical = t1.clone(); return Rc::new(T_checker__NameLookup { f_checker: f_checker__mark_alias_used(v_c.clone(), v_alias.clone()), f_result: Result::<Rc<String>, Rc<T_checker__Unresolved>>::Ok(v_canonical.clone()) }) }
+        Err(t2) => { let v_why = t2.clone(); v_why.clone() }
+    };
+    match &*(v_failure.clone()) {
+        T_checker__LookupFailure::V_UnknownModule => { {
             let mut v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0606"), v_span.clone(), t_concat(t_concat(t_text("unknown module `"), v_alias.clone()), t_text("`")), t_concat(t_concat(t_text("add `import path/to/"), v_alias.clone()), t_text("` at the top of the file")));
             if (f_checker__find_local(v_c.clone(), v_alias.clone()) != Option::<Rc<T_checker__Local>>::None) {
-                v_d = { let mut t2 = Rc::unwrap_or_clone(v_d.clone()); t2.f_help = t_concat(t_concat(t_concat(t_concat(t_text("Tessera has no method calls; call the function with the value as first argument, e.g. `"), v_member.clone()), t_text("(")), v_alias.clone()), t_text(", ...)`")); Rc::new(t2) };
+                v_d = { let mut t3 = Rc::unwrap_or_clone(v_d.clone()); t3.f_help = t_concat(t_concat(t_concat(t_concat(t_text("Tessera has no method calls; call the function with the value as first argument, e.g. `"), v_member.clone()), t_text("(")), v_alias.clone()), t_text(", ...)`")); Rc::new(t3) };
             };
-            return Rc::new(T_checker__NameLookup { f_checker: f_checker__report(v_c.clone(), v_d.clone()), f_canonical: t_text(""), f_found: false, f_reported: true })
+            Rc::new(T_checker__NameLookup { f_checker: f_checker__report(v_c.clone(), v_d.clone()), f_result: Result::<Rc<String>, Rc<T_checker__Unresolved>>::Err(Rc::new(T_checker__Unresolved::V_Reported)) })
         } }
-    };
-    let v_canonical: Rc<String> = t_concat(f_ast__module_prefix(v_path.clone()), v_member.clone());
-    let v_used: Rc<T_checker__Checker> = f_checker__mark_alias_used(v_c.clone(), v_alias.clone());
-    let mut v_exists: bool = false;
-    let mut v_public: bool = false;
-    if v_is_type.clone() {
-        let v_index: i64 = f_checker__type_index(v_used.clone(), v_canonical.clone());
-        if (v_index.clone() >= 0i64) {
-            v_exists = true;
-            v_public = (t_index(&(v_used.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:591:26 in function `checker__lookup_qualified`")).f_public.clone();
-        }
-    } else {
-        match &(f_checker__find_signature(v_used.clone(), v_canonical.clone())) {
-            Some(t3) => { let v_signature = t3.clone(); {
-                v_exists = true;
-                v_public = (v_signature.clone()).f_public.clone();
-            } }
-            None => { {
-            } }
-        }
-    };
-    if (!v_exists.clone()) {
-        let v_code: Rc<String> = if v_is_type.clone() {
-            t_text("E0208")
-        } else {
-            t_text("E0203")
-        };
-        let v_d: Rc<T_source__Diagnostic> = f_source__error(v_code.clone(), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("module `"), v_path.clone()), t_text("` has no ")), v_what.clone()), t_text(" `")), v_member.clone()), t_text("`")));
-        return Rc::new(T_checker__NameLookup { f_checker: f_checker__report(v_used.clone(), v_d.clone()), f_canonical: v_canonical.clone(), f_found: false, f_reported: true })
-    };
-    if (!v_public.clone()) {
-        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0607"), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(v_what.clone(), t_text(" `")), v_member.clone()), t_text("` is private to module `")), v_path.clone()), t_text("`")), t_concat(t_concat(t_text("mark it `pub` in "), v_path.clone()), t_text(".tes if other modules may use it")));
-        return Rc::new(T_checker__NameLookup { f_checker: f_checker__report(v_used.clone(), v_d.clone()), f_canonical: v_canonical.clone(), f_found: true, f_reported: true })
-    };
-    Rc::new(T_checker__NameLookup { f_checker: v_used.clone(), f_canonical: v_canonical.clone(), f_found: true, f_reported: false })
-}
-
-fn f_checker__lookup_function(v_c: Rc<T_checker__Checker>, v_name: Rc<String>, v_span: Rc<T_source__Span>) -> Rc<T_checker__NameLookup> {
-    let v_parts: Rc<Vec<Rc<String>>> = f_source__split_on(v_name.clone(), 46i64);
-    if (t_list_length(&v_parts.clone()) == 1i64) {
-        let v_canonical: Rc<String> = t_concat((v_c.clone()).f_prefix.clone(), v_name.clone());
-        return Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_canonical: v_canonical.clone(), f_found: (f_checker__find_signature(v_c.clone(), v_canonical.clone()) != Option::<Rc<T_checker__Signature>>::None), f_reported: false })
-    };
-    f_checker__lookup_qualified(v_c.clone(), t_index(&v_parts.clone(), 0i64, "stage1/checker.tes:620:25 in function `checker__lookup_function`"), t_index(&v_parts.clone(), 1i64, "stage1/checker.tes:620:35 in function `checker__lookup_function`"), v_span.clone(), false)
+        T_checker__LookupFailure::V_Missing(t4) => { let v_path = t4.clone(); {
+            let v_code: Rc<String> = if v_is_type.clone() {
+                t_text("E0208")
+            } else {
+                t_text("E0203")
+            };
+            let v_d: Rc<T_source__Diagnostic> = f_source__error(v_code.clone(), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("module `"), v_path.clone()), t_text("` has no ")), v_what.clone()), t_text(" `")), v_member.clone()), t_text("`")));
+            Rc::new(T_checker__NameLookup { f_checker: f_checker__report(f_checker__mark_alias_used(v_c.clone(), v_alias.clone()), v_d.clone()), f_result: Result::<Rc<String>, Rc<T_checker__Unresolved>>::Err(Rc::new(T_checker__Unresolved::V_Reported)) })
+        } }
+        T_checker__LookupFailure::V_Private(t5, t6) => { let v_path = t5.clone(); let v_canonical = t6.clone(); {
+            let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0607"), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(v_what.clone(), t_text(" `")), v_member.clone()), t_text("` is private to module `")), v_path.clone()), t_text("`")), t_concat(t_concat(t_text("mark it `pub` in "), v_path.clone()), t_text(".tes if other modules may use it")));
+            Rc::new(T_checker__NameLookup { f_checker: f_checker__report(f_checker__mark_alias_used(v_c.clone(), v_alias.clone()), v_d.clone()), f_result: Result::<Rc<String>, Rc<T_checker__Unresolved>>::Ok(v_canonical.clone()) })
+        } }
+    }
 }
 
 // note: Canonical form of an already validated type expression, for the code generator.
@@ -3704,7 +3909,7 @@ fn f_checker__canonical_type_expr(v_c: Rc<T_checker__Checker>, v_te: Rc<T_ast__T
     let v_name: Rc<String> = if v_builtin_type.clone() {
         (v_te.clone()).f_name.clone()
     } else {
-        (f_checker__lookup_type(v_c.clone(), (v_te.clone()).f_name.clone(), (v_te.clone()).f_span.clone())).f_canonical.clone()
+        f_checker__resolved_name(f_checker__lookup_type(v_c.clone(), (v_te.clone()).f_name.clone(), (v_te.clone()).f_span.clone()))
     };
     Rc::new(T_ast__TypeExpr { f_name: v_name.clone(), f_args: v_args.clone(), f_span: (v_te.clone()).f_span.clone() })
 }
@@ -3714,7 +3919,7 @@ fn f_checker__hint_for_function(v_c: Rc<T_checker__Checker>, v_name: Rc<String>)
         if (((v_s.clone()).f_public.clone() && ((v_s.clone()).f_prefix.clone() != (v_c.clone()).f_prefix.clone())) && ((v_s.clone()).f_name.clone() == t_concat((v_s.clone()).f_prefix.clone(), v_name.clone()))) {
             let v_path: Rc<String> = f_checker__module_path_of((v_s.clone()).f_prefix.clone());
             let v_parts: Rc<Vec<Rc<String>>> = f_source__split_on(v_path.clone(), 47i64);
-            let v_alias: Rc<String> = t_index(&v_parts.clone(), t_sub(t_list_length(&v_parts.clone()), 1i64, "stage1/checker.tes:639:45 in function `checker__hint_for_function`"), "stage1/checker.tes:639:25 in function `checker__hint_for_function`");
+            let v_alias: Rc<String> = t_index(&v_parts.clone(), t_sub(t_list_length(&v_parts.clone()), 1i64, "stage1/checker.tes:679:45 in function `checker__hint_for_function`"), "stage1/checker.tes:679:25 in function `checker__hint_for_function`");
             return t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("`"), v_name.clone()), t_text("` is in module `")), v_path.clone()), t_text("`; import it and call `")), v_alias.clone()), t_text(".")), v_name.clone()), t_text("(...)`"))
         }
     }
@@ -3765,7 +3970,7 @@ fn f_checker__private_types_in(v_c: Rc<T_checker__Checker>, v_ty: Rc<T_ast__Type
         T_ast__Type::V_Result(t3, t4) => { let v_value = t3.clone(); let v_error = t4.clone(); t_concat_lists(f_checker__private_types_in(v_c.clone(), v_value.clone(), v_prefix.clone()), f_checker__private_types_in(v_c.clone(), v_error.clone(), v_prefix.clone())) }
         T_ast__Type::V_Named(t5) => { let v_name = t5.clone(); {
             let v_index: i64 = f_checker__type_index(v_c.clone(), v_name.clone());
-            if (((v_index.clone() >= 0i64) && (!(t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:690:35 in function `checker__private_types_in`")).f_public.clone())) && ((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:690:65 in function `checker__private_types_in`")).f_prefix.clone() == v_prefix.clone())) {
+            if (((v_index.clone() >= 0i64) && (!(t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:730:35 in function `checker__private_types_in`")).f_public.clone())) && ((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:730:65 in function `checker__private_types_in`")).f_prefix.clone() == v_prefix.clone())) {
                 Rc::new(vec![v_name.clone()])
             } else {
                 Rc::new(Vec::<Rc<String>>::new())
@@ -3779,7 +3984,7 @@ fn f_checker__exposure_error(v_c: Rc<T_checker__Checker>, v_span: Rc<T_source__S
     if (t_list_length(&v_hidden.clone()) == 0i64) {
         return v_c.clone()
     };
-    let v_shown: Rc<String> = f_ast__display_name(t_index(&v_hidden.clone(), 0i64, "stage1/checker.tes:700:34 in function `checker__exposure_error`"));
+    let v_shown: Rc<String> = f_ast__display_name(t_index(&v_hidden.clone(), 0i64, "stage1/checker.tes:740:34 in function `checker__exposure_error`"));
     f_checker__report(v_c.clone(), f_source__error_help(t_text("E0609"), v_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("public "), v_what.clone()), t_text(" `")), v_name.clone()), t_text("` exposes private type `")), v_shown.clone()), t_text("`")), t_concat(t_concat(t_concat(t_concat(t_text("mark `"), v_shown.clone()), t_text("` as `pub`, or make `")), v_name.clone()), t_text("` private"))))
 }
 
@@ -3807,7 +4012,7 @@ fn f_checker__check_program(v_modules: Rc<Vec<Rc<T_ast__Module>>>) -> Rc<T_check
             let v_canonical: Rc<String> = t_concat((v_m.clone()).f_prefix.clone(), v_name.clone());
             let v_existing: i64 = f_checker__type_index(v_c.clone(), v_canonical.clone());
             if (v_existing.clone() >= 0i64) {
-                v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0201"), v_decl_span.clone(), t_concat(t_concat(t_concat(t_text("type `"), v_name.clone()), t_text("` is already defined on line ")), t_int_to_text(((t_index(&(v_c.clone()).f_type_defs.clone(), v_existing.clone(), "stage1/checker.tes:732:128 in function `checker__check_program`")).f_span.clone()).f_line.clone()))));
+                v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0201"), v_decl_span.clone(), t_concat(t_concat(t_concat(t_text("type `"), v_name.clone()), t_text("` is already defined on line ")), t_int_to_text(((t_index(&(v_c.clone()).f_type_defs.clone(), v_existing.clone(), "stage1/checker.tes:772:128 in function `checker__check_program`")).f_span.clone()).f_line.clone()))));
                 continue
             };
             v_c = { let mut t3 = Rc::unwrap_or_clone(v_c.clone()); t3.f_type_defs = t_append((v_c.clone()).f_type_defs.clone(), { let mut t4 = Rc::unwrap_or_clone(v_decl.clone()); t4.f_name = v_canonical.clone(); Rc::new(t4) }); Rc::new(t3) };
@@ -3819,16 +4024,16 @@ fn f_checker__check_program(v_modules: Rc<Vec<Rc<T_ast__Module>>>) -> Rc<T_check
             match &*(v_item.clone()) {
                 T_ast__Item::V_RecordItem(t5) => { let v_r = t5.clone(); {
                     let v_index: i64 = f_checker__type_index(v_c.clone(), t_concat((v_m.clone()).f_prefix.clone(), (v_r.clone()).f_name.clone()));
-                    if ((v_index.clone() >= 0i64) && ((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:746:39 in function `checker__check_program`")).f_span.clone() == (v_r.clone()).f_name_span.clone())) {
+                    if ((v_index.clone() >= 0i64) && ((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:786:39 in function `checker__check_program`")).f_span.clone() == (v_r.clone()).f_name_span.clone())) {
                         let v_resolved: Rc<T_checker__ResolvedFields> = f_checker__resolve_fields(v_c.clone(), (v_r.clone()).f_fields.clone());
                         v_c = (v_resolved.clone()).f_checker.clone();
                         let v_def: Rc<T_checker__TypeDef> = Rc::new(T_checker__TypeDef { f_name: t_concat((v_m.clone()).f_prefix.clone(), (v_r.clone()).f_name.clone()), f_is_enum: false, f_fields: (v_resolved.clone()).f_fields.clone(), f_variants: Rc::new(Vec::<Rc<T_checker__VariantType>>::new()), f_span: (v_r.clone()).f_name_span.clone(), f_public: (v_r.clone()).f_public.clone(), f_prefix: (v_m.clone()).f_prefix.clone() });
-                        v_c = { let mut t6 = Rc::unwrap_or_clone(v_c.clone()); t6.f_type_defs = t_replace_at((v_c.clone()).f_type_defs.clone(), v_index.clone(), v_def.clone(), "stage1/checker.tes:750:53 in function `checker__check_program`"); Rc::new(t6) };
+                        v_c = { let mut t6 = Rc::unwrap_or_clone(v_c.clone()); t6.f_type_defs = t_replace_at((v_c.clone()).f_type_defs.clone(), v_index.clone(), v_def.clone(), "stage1/checker.tes:790:53 in function `checker__check_program`"); Rc::new(t6) };
                     }
                 } }
                 T_ast__Item::V_EnumItem(t7) => { let v_e = t7.clone(); {
                     let v_index: i64 = f_checker__type_index(v_c.clone(), t_concat((v_m.clone()).f_prefix.clone(), (v_e.clone()).f_name.clone()));
-                    if ((v_index.clone() >= 0i64) && ((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:755:39 in function `checker__check_program`")).f_span.clone() == (v_e.clone()).f_name_span.clone())) {
+                    if ((v_index.clone() >= 0i64) && ((t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:795:39 in function `checker__check_program`")).f_span.clone() == (v_e.clone()).f_name_span.clone())) {
                         let mut v_variants: Rc<Vec<Rc<T_checker__VariantType>>> = Rc::new(Vec::<Rc<T_checker__VariantType>>::new());
                         for v_v in t_iter((v_e.clone()).f_variants.clone()) {
                             v_c = f_checker__check_pascal(v_c.clone(), (v_v.clone()).f_name.clone(), (v_v.clone()).f_span.clone(), t_text("variant"));
@@ -3844,7 +4049,7 @@ fn f_checker__check_program(v_modules: Rc<Vec<Rc<T_ast__Module>>>) -> Rc<T_check
                             v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0201"), (v_e.clone()).f_name_span.clone(), t_concat(t_concat(t_text("enum `"), (v_e.clone()).f_name.clone()), t_text("` has no variants"))));
                         };
                         let v_def: Rc<T_checker__TypeDef> = Rc::new(T_checker__TypeDef { f_name: t_concat((v_m.clone()).f_prefix.clone(), (v_e.clone()).f_name.clone()), f_is_enum: true, f_fields: Rc::new(Vec::<Rc<T_checker__FieldType>>::new()), f_variants: v_variants.clone(), f_span: (v_e.clone()).f_name_span.clone(), f_public: (v_e.clone()).f_public.clone(), f_prefix: (v_m.clone()).f_prefix.clone() });
-                        v_c = { let mut t8 = Rc::unwrap_or_clone(v_c.clone()); t8.f_type_defs = t_replace_at((v_c.clone()).f_type_defs.clone(), v_index.clone(), v_def.clone(), "stage1/checker.tes:771:53 in function `checker__check_program`"); Rc::new(t8) };
+                        v_c = { let mut t8 = Rc::unwrap_or_clone(v_c.clone()); t8.f_type_defs = t_replace_at((v_c.clone()).f_type_defs.clone(), v_index.clone(), v_def.clone(), "stage1/checker.tes:811:53 in function `checker__check_program`"); Rc::new(t8) };
                     }
                 } }
                 _ => { {
@@ -4017,7 +4222,7 @@ fn f_checker__check_program(v_modules: Rc<Vec<Rc<T_ast__Module>>>) -> Rc<T_check
 
 fn f_checker__slice_name(v_canonical: Rc<String>, v_prefix: Rc<String>) -> Rc<String> {
     let v_codes: Rc<Vec<i64>> = t_code_points(&v_canonical.clone());
-    t_from_code_points(&t_slice(v_codes.clone(), t_list_length(&t_code_points(&v_prefix.clone())), t_list_length(&v_codes.clone()), "stage1/checker.tes:945:22 in function `checker__slice_name`"), "stage1/checker.tes:945:5 in function `checker__slice_name`")
+    t_from_code_points(&t_slice(v_codes.clone(), t_list_length(&t_code_points(&v_prefix.clone())), t_list_length(&v_codes.clone()), "stage1/checker.tes:985:22 in function `checker__slice_name`"), "stage1/checker.tes:985:5 in function `checker__slice_name`")
 }
 
 // note: Stands in for a missing signature; its span matches no declaration.
@@ -4027,9 +4232,9 @@ fn f_checker__placeholder_signature() -> Rc<T_checker__Signature> {
 
 fn f_checker__check_function(v_start: Rc<T_checker__Checker>, v_f: Rc<T_ast__Function>, v_signature: Rc<T_checker__Signature>) -> Rc<T_checker__Checked> {
     let mut v_c: Rc<T_checker__Checker> = f_checker__enter_function(v_start.clone(), (v_f.clone()).f_name.clone(), (v_signature.clone()).f_return_type.clone(), (v_signature.clone()).f_effects.clone());
-    for v_index in t_iter(t_range(0i64, t_list_length(&(v_f.clone()).f_params.clone()), "stage1/checker.tes:955:18 in function `checker__check_function`")) {
-        let v_p: Rc<T_ast__Param> = t_index(&(v_f.clone()).f_params.clone(), v_index.clone(), "stage1/checker.tes:956:17 in function `checker__check_function`");
-        v_c = f_checker__declare(v_c.clone(), (v_p.clone()).f_name.clone(), (v_p.clone()).f_span.clone(), t_index(&(v_signature.clone()).f_params.clone(), v_index.clone(), "stage1/checker.tes:957:44 in function `checker__check_function`"), false, t_text("parameter"));
+    for v_index in t_iter(t_range(0i64, t_list_length(&(v_f.clone()).f_params.clone()), "stage1/checker.tes:995:18 in function `checker__check_function`")) {
+        let v_p: Rc<T_ast__Param> = t_index(&(v_f.clone()).f_params.clone(), v_index.clone(), "stage1/checker.tes:996:17 in function `checker__check_function`");
+        v_c = f_checker__declare(v_c.clone(), (v_p.clone()).f_name.clone(), (v_p.clone()).f_span.clone(), t_index(&(v_signature.clone()).f_params.clone(), v_index.clone(), "stage1/checker.tes:997:44 in function `checker__check_function`"), false, t_text("parameter"));
     }
     let v_body: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), (v_f.clone()).f_body.clone(), (v_signature.clone()).f_return_type.clone());
     v_c = (v_body.clone()).f_checker.clone();
@@ -4149,6 +4354,7 @@ fn f_checker__check_expr(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_ex
         T_ast__ExprKind::V_VariantLiteral(t34, t35, t36, t37) => { let v_type_name = t34.clone(); let v_variant = t35.clone(); let v_variant_span = t36.clone(); let v_args = t37.clone(); match (v_type_name.clone()).as_str() {
             "Option" => { f_checker__check_option_variant(v_c.clone(), v_e.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone(), v_expected.clone()) }
             "Result" => { f_checker__check_result_variant(v_c.clone(), v_e.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone(), v_expected.clone()) }
+            "" => { f_checker__check_shorthand_variant(v_c.clone(), v_e.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone(), v_expected.clone()) }
             _ => { f_checker__check_variant(v_c.clone(), v_e.clone(), v_type_name.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone()) }
         } }
         T_ast__ExprKind::V_Try(t38) => { let v_operand = t38.clone(); f_checker__check_try(v_c.clone(), v_e.clone(), v_operand.clone(), v_expected.clone()) }
@@ -4199,7 +4405,7 @@ fn f_checker__check_list(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, 
             } }
         }
     };
-    let v_first: Rc<T_checker__Checked> = f_checker__check_expr(v_start.clone(), t_index(&v_items.clone(), 0i64, "stage1/checker.tes:1120:35 in function `checker__check_list`"), t_value_or(v_element_expected.clone(), Rc::new(T_ast__Type::V_Unknown)));
+    let v_first: Rc<T_checker__Checked> = f_checker__check_expr(v_start.clone(), t_index(&v_items.clone(), 0i64, "stage1/checker.tes:1161:35 in function `checker__check_list`"), t_value_or(v_element_expected.clone(), Rc::new(T_ast__Type::V_Unknown)));
     let mut v_c: Rc<T_checker__Checker> = (v_first.clone()).f_checker.clone();
     let mut v_element: Rc<T_ast__Type> = ((v_first.clone()).f_expr.clone()).f_ty.clone();
     match &(v_element_expected.clone()) {
@@ -4212,7 +4418,7 @@ fn f_checker__check_list(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, 
         } }
     };
     let mut v_typed: Rc<Vec<Rc<T_ast__Expr>>> = Rc::new(vec![(v_first.clone()).f_expr.clone()]);
-    for v_item in t_iter(t_slice(v_items.clone(), 1i64, t_list_length(&v_items.clone()), "stage1/checker.tes:1132:17 in function `checker__check_list`")) {
+    for v_item in t_iter(t_slice(v_items.clone(), 1i64, t_list_length(&v_items.clone()), "stage1/checker.tes:1173:17 in function `checker__check_list`")) {
         let v_result: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), v_item.clone(), v_element.clone());
         v_c = (v_result.clone()).f_checker.clone();
         v_typed = t_append(std::mem::take(&mut v_typed), (v_result.clone()).f_expr.clone());
@@ -4238,8 +4444,8 @@ fn f_checker__check_field(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_t
         T_ast__Type::V_Unknown => { f_checker__checked(v_after.clone(), v_typed.clone(), Rc::new(T_ast__Type::V_Unknown)) }
         T_ast__Type::V_Named(t2) => { let v_type_name = t2.clone(); {
             let v_index: i64 = f_checker__type_index(v_after.clone(), v_type_name.clone());
-            if ((v_index.clone() >= 0i64) && (!(t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1158:35 in function `checker__check_field`")).f_is_enum.clone())) {
-                let v_fields: Rc<Vec<Rc<T_checker__FieldType>>> = (t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1159:30 in function `checker__check_field`")).f_fields.clone();
+            if ((v_index.clone() >= 0i64) && (!(t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1199:35 in function `checker__check_field`")).f_is_enum.clone())) {
+                let v_fields: Rc<Vec<Rc<T_checker__FieldType>>> = (t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1200:30 in function `checker__check_field`")).f_fields.clone();
                 match &(f_checker__field_type_of(v_fields.clone(), v_name.clone())) {
                     Some(t3) => { let v_field_type = t3.clone(); return f_checker__checked(v_after.clone(), v_typed.clone(), v_field_type.clone()) }
                     None => { {
@@ -4406,17 +4612,17 @@ fn f_checker__check_statement(v_c: Rc<T_checker__Checker>, v_statement: Rc<T_ast
             };
             let v_mark: i64 = t_list_length(&(v_after.clone()).f_locals.clone());
             v_after = f_checker__declare(v_after.clone(), v_variable.clone(), v_variable_span.clone(), v_element.clone(), false, t_text("loop variable"));
-            v_after = { let mut t18 = Rc::unwrap_or_clone(v_after.clone()); t18.f_loop_depth = t_add((v_after.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1321:67 in function `checker__check_statement`"); Rc::new(t18) };
+            v_after = { let mut t18 = Rc::unwrap_or_clone(v_after.clone()); t18.f_loop_depth = t_add((v_after.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1362:67 in function `checker__check_statement`"); Rc::new(t18) };
             let v_body_result: Rc<T_checker__CheckedBlock> = f_checker__check_loop_body(v_after.clone(), v_body.clone(), t_text("for"));
-            v_after = { let mut t19 = Rc::unwrap_or_clone((v_body_result.clone()).f_checker.clone()); t19.f_loop_depth = t_sub(((v_body_result.clone()).f_checker.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1323:95 in function `checker__check_statement`"); Rc::new(t19) };
+            v_after = { let mut t19 = Rc::unwrap_or_clone((v_body_result.clone()).f_checker.clone()); t19.f_loop_depth = t_sub(((v_body_result.clone()).f_checker.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1364:95 in function `checker__check_statement`"); Rc::new(t19) };
             v_after = f_checker__pop_scope(v_after.clone(), v_mark.clone());
             Rc::new(T_checker__CheckedStatement { f_checker: v_after.clone(), f_statement: Rc::new(T_ast__Statement::V_For(v_variable.clone(), v_variable_span.clone(), (v_iterable_result.clone()).f_expr.clone(), (v_body_result.clone()).f_block.clone())) })
         } }
         T_ast__Statement::V_While(t20, t21) => { let v_condition = t20.clone(); let v_body = t21.clone(); {
             let v_cond: Rc<T_checker__Checked> = f_checker__check_condition(v_c.clone(), v_condition.clone(), t_text("while"));
-            let v_inside: Rc<T_checker__Checker> = { let mut t22 = Rc::unwrap_or_clone((v_cond.clone()).f_checker.clone()); t22.f_loop_depth = t_add(((v_cond.clone()).f_checker.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1329:82 in function `checker__check_statement`"); Rc::new(t22) };
+            let v_inside: Rc<T_checker__Checker> = { let mut t22 = Rc::unwrap_or_clone((v_cond.clone()).f_checker.clone()); t22.f_loop_depth = t_add(((v_cond.clone()).f_checker.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1370:82 in function `checker__check_statement`"); Rc::new(t22) };
             let v_body_result: Rc<T_checker__CheckedBlock> = f_checker__check_loop_body(v_inside.clone(), v_body.clone(), t_text("while"));
-            let v_after: Rc<T_checker__Checker> = { let mut t23 = Rc::unwrap_or_clone((v_body_result.clone()).f_checker.clone()); t23.f_loop_depth = t_sub(((v_body_result.clone()).f_checker.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1331:95 in function `checker__check_statement`"); Rc::new(t23) };
+            let v_after: Rc<T_checker__Checker> = { let mut t23 = Rc::unwrap_or_clone((v_body_result.clone()).f_checker.clone()); t23.f_loop_depth = t_sub(((v_body_result.clone()).f_checker.clone()).f_loop_depth.clone(), 1i64, "stage1/checker.tes:1372:95 in function `checker__check_statement`"); Rc::new(t23) };
             Rc::new(T_checker__CheckedStatement { f_checker: v_after.clone(), f_statement: Rc::new(T_ast__Statement::V_While((v_cond.clone()).f_expr.clone(), (v_body_result.clone()).f_block.clone())) })
         } }
         T_ast__Statement::V_ExprStatement(t24) => { let v_expr = t24.clone(); {
@@ -4539,15 +4745,15 @@ fn f_checker__field_type_of(v_fields: Rc<Vec<Rc<T_checker__FieldType>>>, v_name:
 fn f_checker__check_record_literal(v_original: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_type_name: Rc<String>, v_type_span: Rc<T_source__Span>, v_inits: Rc<Vec<Rc<T_ast__FieldInit>>>) -> Rc<T_checker__Checked> {
     let v_lookup: Rc<T_checker__NameLookup> = f_checker__lookup_type(v_original.clone(), v_type_name.clone(), v_type_span.clone());
     let v_start: Rc<T_checker__Checker> = (v_lookup.clone()).f_checker.clone();
-    let v_canonical: Rc<String> = (v_lookup.clone()).f_canonical.clone();
+    let v_canonical: Rc<String> = f_checker__resolved_name(v_lookup.clone());
     let v_index: i64 = f_checker__type_index(v_start.clone(), v_canonical.clone());
-    if ((v_index.clone() < 0i64) || (t_index(&(v_start.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1448:21 in function `checker__check_record_literal`")).f_is_enum.clone()) {
+    if ((v_index.clone() < 0i64) || (t_index(&(v_start.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1489:21 in function `checker__check_record_literal`")).f_is_enum.clone()) {
         let v_d: Rc<T_source__Diagnostic> = if (v_index.clone() < 0i64) {
             f_source__error(t_text("E0208"), v_type_span.clone(), t_concat(t_concat(t_text("unknown type `"), v_type_name.clone()), t_text("`")))
         } else {
             f_source__error_help(t_text("E0511"), v_type_span.clone(), t_concat(t_concat(t_text("`"), v_type_name.clone()), t_text("` is an enum, not a record")), t_concat(t_concat(t_text("build an enum value with `"), v_type_name.clone()), t_text(".Variant(...)`")))
         };
-        let mut v_after: Rc<T_checker__Checker> = if ((v_lookup.clone()).f_reported.clone() && (v_index.clone() < 0i64)) {
+        let mut v_after: Rc<T_checker__Checker> = if (f_checker__already_reported(v_lookup.clone()) && (v_index.clone() < 0i64)) {
             v_start.clone()
         } else {
             f_checker__report(v_start.clone(), v_d.clone())
@@ -4560,7 +4766,7 @@ fn f_checker__check_record_literal(v_original: Rc<T_checker__Checker>, v_e: Rc<T
         }
         return f_checker__checked(v_after.clone(), { let mut t2 = Rc::unwrap_or_clone(v_e.clone()); t2.f_kind = Rc::new(T_ast__ExprKind::V_RecordLiteral(v_type_name.clone(), v_type_span.clone(), v_typed_inits.clone())); Rc::new(t2) }, Rc::new(T_ast__Type::V_Unknown))
     };
-    let v_fields: Rc<Vec<Rc<T_checker__FieldType>>> = (t_index(&(v_start.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1463:18 in function `checker__check_record_literal`")).f_fields.clone();
+    let v_fields: Rc<Vec<Rc<T_checker__FieldType>>> = (t_index(&(v_start.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1504:18 in function `checker__check_record_literal`")).f_fields.clone();
     let mut v_c: Rc<T_checker__Checker> = v_start.clone();
     let mut v_seen: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
     let mut v_typed: Rc<Vec<Rc<T_ast__FieldInit>>> = Rc::new(Vec::<Rc<T_ast__FieldInit>>::new());
@@ -4613,17 +4819,17 @@ fn f_checker__check_option_variant(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__E
     if (v_variant.clone() == t_text("None")) {
         if (v_element_expected.clone() == Rc::new(T_ast__Type::V_Unknown)) {
             let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0505"), (v_e.clone()).f_span.clone(), t_text("the type of this `Option.None` is unknown"), t_text("add a type annotation, e.g. `let name: Option[Text] = Option.None`"));
-            return f_checker__checked(f_checker__report(v_c.clone(), v_d.clone()), v_e.clone(), Rc::new(T_ast__Type::V_Unknown))
+            return f_checker__checked(f_checker__report(v_c.clone(), v_d.clone()), { let mut t4 = Rc::unwrap_or_clone(v_e.clone()); t4.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text("Option"), v_variant.clone(), v_variant_span.clone(), Rc::new(Vec::<Rc<T_ast__Expr>>::new()))); Rc::new(t4) }, Rc::new(T_ast__Type::V_Unknown))
         };
-        return f_checker__checked(v_c.clone(), v_e.clone(), Rc::new(T_ast__Type::V_Option(v_element_expected.clone())))
+        return f_checker__checked(v_c.clone(), { let mut t5 = Rc::unwrap_or_clone(v_e.clone()); t5.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text("Option"), v_variant.clone(), v_variant_span.clone(), Rc::new(Vec::<Rc<T_ast__Expr>>::new()))); Rc::new(t5) }, Rc::new(T_ast__Type::V_Option(v_element_expected.clone())))
     };
-    let v_value: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1516:31 in function `checker__check_option_variant`"), v_element_expected.clone());
+    let v_value: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1557:31 in function `checker__check_option_variant`"), v_element_expected.clone());
     let v_element: Rc<T_ast__Type> = if ((v_element_expected.clone() != Rc::new(T_ast__Type::V_Unknown)) && f_checker__fits(((v_value.clone()).f_expr.clone()).f_ty.clone(), v_element_expected.clone())) {
         v_element_expected.clone()
     } else {
         ((v_value.clone()).f_expr.clone()).f_ty.clone()
     };
-    f_checker__checked((v_value.clone()).f_checker.clone(), { let mut t4 = Rc::unwrap_or_clone(v_e.clone()); t4.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text("Option"), v_variant.clone(), v_variant_span.clone(), Rc::new(vec![(v_value.clone()).f_expr.clone()]))); Rc::new(t4) }, Rc::new(T_ast__Type::V_Option(v_element.clone())))
+    f_checker__checked((v_value.clone()).f_checker.clone(), { let mut t6 = Rc::unwrap_or_clone(v_e.clone()); t6.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text("Option"), v_variant.clone(), v_variant_span.clone(), Rc::new(vec![(v_value.clone()).f_expr.clone()]))); Rc::new(t6) }, Rc::new(T_ast__Type::V_Option(v_element.clone())))
 }
 
 fn f_checker__check_result_variant(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_variant: Rc<String>, v_variant_span: Rc<T_source__Span>, v_args: Rc<Vec<Rc<T_ast__Expr>>>, v_expected: Rc<T_ast__Type>) -> Rc<T_checker__Checked> {
@@ -4651,7 +4857,7 @@ fn f_checker__check_result_variant(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__E
     } else {
         v_expected_error.clone()
     };
-    let v_inner: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1542:31 in function `checker__check_result_variant`"), v_hint.clone());
+    let v_inner: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1583:31 in function `checker__check_result_variant`"), v_hint.clone());
     let v_inner_type: Rc<T_ast__Type> = if ((v_hint.clone() != Rc::new(T_ast__Type::V_Unknown)) && f_checker__fits(((v_inner.clone()).f_expr.clone()).f_ty.clone(), v_hint.clone())) {
         v_hint.clone()
     } else {
@@ -4729,8 +4935,8 @@ fn f_checker__check_record_update(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Ex
     match &*(v_ty.clone()) {
         T_ast__Type::V_Named(t1) => { let v_name = t1.clone(); {
             let v_index: i64 = f_checker__type_index(v_after.clone(), v_name.clone());
-            if ((v_index.clone() >= 0i64) && (!(t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1604:35 in function `checker__check_record_update`")).f_is_enum.clone())) {
-                v_fields = (t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1605:30 in function `checker__check_record_update`")).f_fields.clone();
+            if ((v_index.clone() >= 0i64) && (!(t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1645:35 in function `checker__check_record_update`")).f_is_enum.clone())) {
+                v_fields = (t_index(&(v_after.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1646:30 in function `checker__check_record_update`")).f_fields.clone();
                 v_valid = true;
             }
         } }
@@ -4761,13 +4967,42 @@ fn f_checker__check_record_update(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Ex
     })
 }
 
+fn f_checker__shorthand_error(v_variant: Rc<String>, v_span: Rc<T_source__Span>, v_expected: Rc<T_ast__Type>) -> Rc<T_source__Diagnostic> {
+    let v_context: Rc<String> = if (v_expected.clone() == Rc::new(T_ast__Type::V_Unknown)) {
+        t_text("no type is expected here")
+    } else {
+        t_concat(t_concat(t_text("a `"), f_ast__type_text(v_expected.clone())), t_text("` is expected here"))
+    };
+    f_source__error_help(t_text("E0518"), v_span.clone(), t_concat(t_concat(t_concat(t_text("cannot tell which type `."), v_variant.clone()), t_text("` belongs to: ")), v_context.clone()), t_concat(t_concat(t_concat(t_concat(t_text("write the type in front, e.g. `MyEnum."), v_variant.clone()), t_text("`, or use `.")), v_variant.clone()), t_text("` where an enum, `Option` or `Result` is expected")))
+}
+
+// note: `.Variant` takes its type from the context: the expected enum, `Option` or `Result`.
+fn f_checker__check_shorthand_variant(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_variant: Rc<String>, v_variant_span: Rc<T_source__Span>, v_args: Rc<Vec<Rc<T_ast__Expr>>>, v_expected: Rc<T_ast__Type>) -> Rc<T_checker__Checked> {
+    match &*(v_expected.clone()) {
+        T_ast__Type::V_Option(_) => { f_checker__check_option_variant(v_c.clone(), v_e.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone(), v_expected.clone()) }
+        T_ast__Type::V_Result(_, _) => { f_checker__check_result_variant(v_c.clone(), v_e.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone(), v_expected.clone()) }
+        T_ast__Type::V_Named(t1) => { let v_name = t1.clone(); {
+            let v_index: i64 = f_checker__type_index(v_c.clone(), v_name.clone());
+            if ((v_index.clone() >= 0i64) && (t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1684:31 in function `checker__check_shorthand_variant`")).f_is_enum.clone()) {
+                return f_checker__check_enum_variant(v_c.clone(), v_e.clone(), v_name.clone(), f_ast__display_name(v_name.clone()), v_variant.clone(), v_variant_span.clone(), v_args.clone())
+            };
+            let v_all: Rc<T_checker__CheckedArgs> = f_checker__check_all(f_checker__report(v_c.clone(), f_checker__shorthand_error(v_variant.clone(), (v_e.clone()).f_span.clone(), v_expected.clone())), v_args.clone());
+            f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t2 = Rc::unwrap_or_clone(v_e.clone()); t2.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text(""), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t2) }, Rc::new(T_ast__Type::V_Unknown))
+        } }
+        _ => { {
+            let v_all: Rc<T_checker__CheckedArgs> = f_checker__check_all(f_checker__report(v_c.clone(), f_checker__shorthand_error(v_variant.clone(), (v_e.clone()).f_span.clone(), v_expected.clone())), v_args.clone());
+            f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t3 = Rc::unwrap_or_clone(v_e.clone()); t3.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(t_text(""), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t3) }, Rc::new(T_ast__Type::V_Unknown))
+        } }
+    }
+}
+
 fn f_checker__check_variant(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_type_name: Rc<String>, v_variant: Rc<String>, v_variant_span: Rc<T_source__Span>, v_args: Rc<Vec<Rc<T_ast__Expr>>>) -> Rc<T_checker__Checked> {
     let v_lookup: Rc<T_checker__NameLookup> = f_checker__lookup_type(v_start.clone(), v_type_name.clone(), (v_e.clone()).f_span.clone());
-    let v_canonical: Rc<String> = (v_lookup.clone()).f_canonical.clone();
+    let v_canonical: Rc<String> = f_checker__resolved_name(v_lookup.clone());
     let v_c: Rc<T_checker__Checker> = f_checker__mark_window_event((v_lookup.clone()).f_checker.clone(), v_canonical.clone());
     let v_index: i64 = f_checker__type_index(v_c.clone(), v_canonical.clone());
     if (v_index.clone() < 0i64) {
-        let v_reported: Rc<T_checker__Checker> = if (v_lookup.clone()).f_reported.clone() {
+        let v_reported: Rc<T_checker__Checker> = if f_checker__already_reported(v_lookup.clone()) {
             v_c.clone()
         } else {
             f_checker__report(v_c.clone(), f_source__error(t_text("E0208"), (v_e.clone()).f_span.clone(), t_concat(t_concat(t_text("unknown type `"), v_type_name.clone()), t_text("`"))))
@@ -4775,32 +5010,38 @@ fn f_checker__check_variant(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr
         let v_all: Rc<T_checker__CheckedArgs> = f_checker__check_all(v_reported.clone(), v_args.clone());
         return f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t1 = Rc::unwrap_or_clone(v_e.clone()); t1.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_type_name.clone(), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t1) }, Rc::new(T_ast__Type::V_Unknown))
     };
-    let v_def: Rc<T_checker__TypeDef> = t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1641:15 in function `checker__check_variant`");
+    f_checker__check_enum_variant(v_c.clone(), v_e.clone(), v_canonical.clone(), v_type_name.clone(), v_variant.clone(), v_variant_span.clone(), v_args.clone())
+}
+
+// note: `shown` is the type name as the programmer wrote it (or would write it), for messages.
+fn f_checker__check_enum_variant(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_canonical: Rc<String>, v_shown: Rc<String>, v_variant: Rc<String>, v_variant_span: Rc<T_source__Span>, v_args: Rc<Vec<Rc<T_ast__Expr>>>) -> Rc<T_checker__Checked> {
+    let v_type_name: Rc<String> = v_shown.clone();
+    let v_def: Rc<T_checker__TypeDef> = t_index(&(v_c.clone()).f_type_defs.clone(), f_checker__type_index(v_c.clone(), v_canonical.clone()), "stage1/checker.tes:1713:15 in function `checker__check_enum_variant`");
     if (!(v_def.clone()).f_is_enum.clone()) {
         let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0209"), (v_e.clone()).f_span.clone(), t_concat(t_concat(t_text("`"), v_type_name.clone()), t_text("` is a record, not an enum")), t_concat(t_concat(t_text("build it with `"), v_type_name.clone()), t_text(" { field: value }`")));
         return f_checker__checked(f_checker__report(v_c.clone(), v_d.clone()), v_e.clone(), Rc::new(T_ast__Type::V_Unknown))
     };
     let v_fields: Rc<Vec<Rc<T_checker__FieldType>>> = match &(f_checker__find_variant((v_def.clone()).f_variants.clone(), v_variant.clone())) {
-        Some(t2) => { let v_found = t2.clone(); (v_found.clone()).f_fields.clone() }
+        Some(t1) => { let v_found = t1.clone(); (v_found.clone()).f_fields.clone() }
         None => { {
             let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0209"), v_variant_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("enum `"), v_type_name.clone()), t_text("` has no variant `")), v_variant.clone()), t_text("`")), t_concat(t_text("available variants: "), f_checker__quoted_names(f_checker__variant_names((v_def.clone()).f_variants.clone()))));
             let v_all: Rc<T_checker__CheckedArgs> = f_checker__check_all(f_checker__report(v_c.clone(), v_d.clone()), v_args.clone());
-            return f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t3 = Rc::unwrap_or_clone(v_e.clone()); t3.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_type_name.clone(), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t3) }, Rc::new(T_ast__Type::V_Unknown))
+            return f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t2 = Rc::unwrap_or_clone(v_e.clone()); t2.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_type_name.clone(), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t2) }, Rc::new(T_ast__Type::V_Unknown))
         } }
     };
     if (t_list_length(&v_args.clone()) != t_list_length(&v_fields.clone())) {
         let v_d: Rc<T_source__Diagnostic> = f_source__error(t_text("E0502"), (v_e.clone()).f_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("`"), v_type_name.clone()), t_text(".")), v_variant.clone()), t_text("` takes ")), t_int_to_text(t_list_length(&v_fields.clone()))), t_text(" value(s), but ")), t_int_to_text(t_list_length(&v_args.clone()))), t_text(" were given")));
         let v_all: Rc<T_checker__CheckedArgs> = f_checker__check_all(f_checker__report(v_c.clone(), v_d.clone()), v_args.clone());
-        return f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t4 = Rc::unwrap_or_clone(v_e.clone()); t4.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_canonical.clone(), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t4) }, Rc::new(T_ast__Type::V_Named(v_canonical.clone())))
+        return f_checker__checked((v_all.clone()).f_checker.clone(), { let mut t3 = Rc::unwrap_or_clone(v_e.clone()); t3.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_canonical.clone(), v_variant.clone(), v_variant_span.clone(), (v_all.clone()).f_args.clone())); Rc::new(t3) }, Rc::new(T_ast__Type::V_Named(v_canonical.clone())))
     };
     let mut v_after: Rc<T_checker__Checker> = v_c.clone();
     let mut v_typed: Rc<Vec<Rc<T_ast__Expr>>> = Rc::new(Vec::<Rc<T_ast__Expr>>::new());
-    for v_position in t_iter(t_range(0i64, t_list_length(&v_args.clone()), "stage1/checker.tes:1661:21 in function `checker__check_variant`")) {
-        let v_result: Rc<T_checker__Checked> = f_checker__expect_expr(v_after.clone(), t_index(&v_args.clone(), v_position.clone(), "stage1/checker.tes:1662:41 in function `checker__check_variant`"), (t_index(&v_fields.clone(), v_position.clone(), "stage1/checker.tes:1662:57 in function `checker__check_variant`")).f_ty.clone());
+    for v_position in t_iter(t_range(0i64, t_list_length(&v_args.clone()), "stage1/checker.tes:1733:21 in function `checker__check_enum_variant`")) {
+        let v_result: Rc<T_checker__Checked> = f_checker__expect_expr(v_after.clone(), t_index(&v_args.clone(), v_position.clone(), "stage1/checker.tes:1734:41 in function `checker__check_enum_variant`"), (t_index(&v_fields.clone(), v_position.clone(), "stage1/checker.tes:1734:57 in function `checker__check_enum_variant`")).f_ty.clone());
         v_after = (v_result.clone()).f_checker.clone();
         v_typed = t_append(std::mem::take(&mut v_typed), (v_result.clone()).f_expr.clone());
     }
-    f_checker__checked(v_after.clone(), { let mut t5 = Rc::unwrap_or_clone(v_e.clone()); t5.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_canonical.clone(), v_variant.clone(), v_variant_span.clone(), v_typed.clone())); Rc::new(t5) }, Rc::new(T_ast__Type::V_Named(v_canonical.clone())))
+    f_checker__checked(v_after.clone(), { let mut t4 = Rc::unwrap_or_clone(v_e.clone()); t4.f_kind = Rc::new(T_ast__ExprKind::V_VariantLiteral(v_canonical.clone(), v_variant.clone(), v_variant_span.clone(), v_typed.clone())); Rc::new(t4) }, Rc::new(T_ast__Type::V_Named(v_canonical.clone())))
 }
 
 fn f_checker__check_match(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, v_scrutinee: Rc<T_ast__Expr>, v_arms: Rc<Vec<Rc<T_ast__Arm>>>, v_expected: Rc<T_ast__Type>) -> Rc<T_checker__Checked> {
@@ -4826,8 +5067,8 @@ fn f_checker__check_match(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>,
         } }
         T_ast__Type::V_Named(t4) => { let v_name = t4.clone(); {
             let v_index: i64 = f_checker__type_index(v_c.clone(), v_name.clone());
-            if ((v_index.clone() >= 0i64) && (t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1694:31 in function `checker__check_match`")).f_is_enum.clone()) {
-                v_enum_variants = (t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1695:37 in function `checker__check_match`")).f_variants.clone();
+            if ((v_index.clone() >= 0i64) && (t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1766:31 in function `checker__check_match`")).f_is_enum.clone()) {
+                v_enum_variants = (t_index(&(v_c.clone()).f_type_defs.clone(), v_index.clone(), "stage1/checker.tes:1767:37 in function `checker__check_match`")).f_variants.clone();
                 v_is_enum_match = true;
                 v_is_valid = true;
                 v_scrutinee_type_name = v_name.clone();
@@ -4886,21 +5127,37 @@ fn f_checker__check_match(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>,
             } }
             T_ast__PatternKind::V_VariantPattern(t8, t9, t10) => { let v_type_name = t8.clone(); let v_variant = t9.clone(); let v_bindings = t10.clone(); {
                 let v_built_in: bool = ((v_type_name.clone() == t_text("Option")) || (v_type_name.clone() == t_text("Result")));
+                let v_shorthand: bool = (v_type_name.clone() == t_text(""));
+                if ((v_shorthand.clone() && (!v_is_enum_match.clone())) && (v_st.clone() != Rc::new(T_ast__Type::V_Unknown))) {
+                    v_c = f_checker__report(v_c.clone(), f_checker__shorthand_error(v_variant.clone(), v_pattern_span.clone(), v_st.clone()));
+                };
                 let v_lookup: Rc<T_checker__NameLookup> = if v_built_in.clone() {
-                    Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_canonical: v_type_name.clone(), f_found: true, f_reported: false })
+                    Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_result: Result::<Rc<String>, Rc<T_checker__Unresolved>>::Ok(v_type_name.clone()) })
+                } else if v_shorthand.clone() {
+                    Rc::new(T_checker__NameLookup { f_checker: v_c.clone(), f_result: if v_is_enum_match.clone() {
+                        Result::<Rc<String>, Rc<T_checker__Unresolved>>::Ok(v_scrutinee_type_name.clone())
+                    } else {
+                        Result::<Rc<String>, Rc<T_checker__Unresolved>>::Err(Rc::new(T_checker__Unresolved::V_Reported))
+                    } })
                 } else {
                     f_checker__lookup_type(v_c.clone(), v_type_name.clone(), v_pattern_span.clone())
                 };
-                v_c = f_checker__mark_window_event((v_lookup.clone()).f_checker.clone(), (v_lookup.clone()).f_canonical.clone());
-                v_typed_pattern = { let mut t11 = Rc::unwrap_or_clone((v_arm.clone()).f_pattern.clone()); t11.f_kind = Rc::new(T_ast__PatternKind::V_VariantPattern((v_lookup.clone()).f_canonical.clone(), v_variant.clone(), v_bindings.clone())); Rc::new(t11) };
+                let v_shown: Rc<String> = if v_shorthand.clone() {
+                    f_checker__type_name_for_message(v_st.clone())
+                } else {
+                    v_type_name.clone()
+                };
+                let v_pattern_type_name: Rc<String> = f_checker__resolved_name(v_lookup.clone());
+                v_c = f_checker__mark_window_event((v_lookup.clone()).f_checker.clone(), v_pattern_type_name.clone());
+                v_typed_pattern = { let mut t11 = Rc::unwrap_or_clone((v_arm.clone()).f_pattern.clone()); t11.f_kind = Rc::new(T_ast__PatternKind::V_VariantPattern(v_pattern_type_name.clone(), v_variant.clone(), v_bindings.clone())); Rc::new(t11) };
                 let mut v_resolved: Option<Rc<T_checker__VariantType>> = Option::<Rc<T_checker__VariantType>>::None;
-                if (v_is_enum_match.clone() && (v_scrutinee_type_name.clone() == (v_lookup.clone()).f_canonical.clone())) {
+                if (v_is_enum_match.clone() && (v_scrutinee_type_name.clone() == v_pattern_type_name.clone())) {
                     v_resolved = f_checker__find_variant(v_enum_variants.clone(), v_variant.clone());
                     if (v_resolved.clone() == Option::<Rc<T_checker__VariantType>>::None) {
-                        v_c = f_checker__report(v_c.clone(), f_source__error_help(t_text("E0209"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("enum `"), v_type_name.clone()), t_text("` has no variant `")), v_variant.clone()), t_text("`")), t_concat(t_text("available variants: "), f_checker__quoted_names(f_checker__variant_names(v_enum_variants.clone())))));
+                        v_c = f_checker__report(v_c.clone(), f_source__error_help(t_text("E0209"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("enum `"), v_shown.clone()), t_text("` has no variant `")), v_variant.clone()), t_text("`")), t_concat(t_text("available variants: "), f_checker__quoted_names(f_checker__variant_names(v_enum_variants.clone())))));
                     }
-                } else if ((v_st.clone() != Rc::new(T_ast__Type::V_Unknown)) && (!(v_lookup.clone()).f_reported.clone())) {
-                    v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0513"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("pattern of type `"), v_type_name.clone()), t_text("` cannot match a value of type `")), f_ast__type_text(v_st.clone())), t_text("`"))));
+                } else if ((v_st.clone() != Rc::new(T_ast__Type::V_Unknown)) && (!f_checker__already_reported(v_lookup.clone()))) {
+                    v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0513"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("pattern of type `"), v_shown.clone()), t_text("` cannot match a value of type `")), f_ast__type_text(v_st.clone())), t_text("`"))));
                 };
                 let v_fields: Rc<Vec<Rc<T_checker__FieldType>>> = match &(v_resolved.clone()) {
                     Some(t12) => { let v_found = t12.clone(); (v_found.clone()).f_fields.clone() }
@@ -4908,20 +5165,20 @@ fn f_checker__check_match(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>,
                 };
                 if (v_resolved.clone() != Option::<Rc<T_checker__VariantType>>::None) {
                     if f_source__contains_text(v_covered.clone(), v_variant.clone()) {
-                        v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0510"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("`"), v_type_name.clone()), t_text(".")), v_variant.clone()), t_text("` is already matched by an earlier arm"))));
+                        v_c = f_checker__report(v_c.clone(), f_source__error(t_text("E0510"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_text("`"), v_shown.clone()), t_text(".")), v_variant.clone()), t_text("` is already matched by an earlier arm"))));
                     };
                     v_covered = t_append(std::mem::take(&mut v_covered), v_variant.clone());
                     if (t_list_length(&v_bindings.clone()) != t_list_length(&v_fields.clone())) {
-                        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0513"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("`"), v_type_name.clone()), t_text(".")), v_variant.clone()), t_text("` has ")), t_int_to_text(t_list_length(&v_fields.clone()))), t_text(" field(s), but the pattern binds ")), t_int_to_text(t_list_length(&v_bindings.clone()))), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("write `"), v_type_name.clone()), t_text(".")), v_variant.clone()), t_text("(")), t_join(&f_checker__field_names(v_fields.clone()), &t_text(", "))), t_text(")`")));
+                        let v_d: Rc<T_source__Diagnostic> = f_source__error_help(t_text("E0513"), v_pattern_span.clone(), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("`"), v_shown.clone()), t_text(".")), v_variant.clone()), t_text("` has ")), t_int_to_text(t_list_length(&v_fields.clone()))), t_text(" field(s), but the pattern binds ")), t_int_to_text(t_list_length(&v_bindings.clone()))), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("write `"), v_shown.clone()), t_text(".")), v_variant.clone()), t_text("(")), t_join(&f_checker__field_names(v_fields.clone()), &t_text(", "))), t_text(")`")));
                         v_c = f_checker__report(v_c.clone(), v_d.clone());
                     };
                     let mut v_position: i64 = 0i64;
                     while ((v_position.clone() < t_list_length(&v_bindings.clone())) && (v_position.clone() < t_list_length(&v_fields.clone()))) {
-                        let v_b: Rc<T_ast__Binding> = t_index(&v_bindings.clone(), v_position.clone(), "stage1/checker.tes:1780:33 in function `checker__check_match`");
+                        let v_b: Rc<T_ast__Binding> = t_index(&v_bindings.clone(), v_position.clone(), "stage1/checker.tes:1858:33 in function `checker__check_match`");
                         if ((v_b.clone()).f_name.clone() != t_text("_")) {
-                            v_c = f_checker__declare(v_c.clone(), (v_b.clone()).f_name.clone(), (v_b.clone()).f_span.clone(), (t_index(&v_fields.clone(), v_position.clone(), "stage1/checker.tes:1782:64 in function `checker__check_match`")).f_ty.clone(), false, t_text("binding"));
+                            v_c = f_checker__declare(v_c.clone(), (v_b.clone()).f_name.clone(), (v_b.clone()).f_span.clone(), (t_index(&v_fields.clone(), v_position.clone(), "stage1/checker.tes:1860:64 in function `checker__check_match`")).f_ty.clone(), false, t_text("binding"));
                         };
-                        v_position = t_add(v_position.clone(), 1i64, "stage1/checker.tes:1784:49 in function `checker__check_match`");
+                        v_position = t_add(v_position.clone(), 1i64, "stage1/checker.tes:1862:49 in function `checker__check_match`");
                     }
                 } else {
                     for v_b in t_iter(v_bindings.clone()) {
@@ -5022,8 +5279,8 @@ fn f_checker__arity_error(v_c: Rc<T_checker__Checker>, v_name: Rc<String>, v_arg
 fn f_checker__expect_args(v_start: Rc<T_checker__Checker>, v_args: Rc<Vec<Rc<T_ast__Expr>>>, v_params: Rc<Vec<Rc<T_ast__Type>>>) -> Rc<T_checker__CheckedArgs> {
     let mut v_c: Rc<T_checker__Checker> = v_start.clone();
     let mut v_typed: Rc<Vec<Rc<T_ast__Expr>>> = Rc::new(Vec::<Rc<T_ast__Expr>>::new());
-    for v_index in t_iter(t_range(0i64, t_list_length(&v_args.clone()), "stage1/checker.tes:1887:18 in function `checker__expect_args`")) {
-        let v_result: Rc<T_checker__Checked> = f_checker__expect_expr(v_c.clone(), t_index(&v_args.clone(), v_index.clone(), "stage1/checker.tes:1888:37 in function `checker__expect_args`"), t_index(&v_params.clone(), v_index.clone(), "stage1/checker.tes:1888:50 in function `checker__expect_args`"));
+    for v_index in t_iter(t_range(0i64, t_list_length(&v_args.clone()), "stage1/checker.tes:1965:18 in function `checker__expect_args`")) {
+        let v_result: Rc<T_checker__Checked> = f_checker__expect_expr(v_c.clone(), t_index(&v_args.clone(), v_index.clone(), "stage1/checker.tes:1966:37 in function `checker__expect_args`"), t_index(&v_params.clone(), v_index.clone(), "stage1/checker.tes:1966:50 in function `checker__expect_args`"));
         v_c = (v_result.clone()).f_checker.clone();
         v_typed = t_append(std::mem::take(&mut v_typed), (v_result.clone()).f_expr.clone());
     }
@@ -5062,13 +5319,13 @@ fn f_checker__check_generic_call(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Exp
                 Rc::new(T_ast__Type::V_Int)
             })
         };
-        let v_result: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1929:36 in function `checker__check_generic_call`"), Rc::new(T_ast__Type::V_Unknown));
+        let v_result: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:2007:36 in function `checker__check_generic_call`"), Rc::new(T_ast__Type::V_Unknown));
         let v_t: Rc<T_ast__Type> = ((v_result.clone()).f_expr.clone()).f_ty.clone();
         let mut v_after: Rc<T_checker__Checker> = (v_result.clone()).f_checker.clone();
         let v_base_ok: bool = ((v_t.clone() == Rc::new(T_ast__Type::V_Unknown)) || (v_t.clone() == Rc::new(T_ast__Type::V_Never)));
         if (v_name.clone() == t_text("to_text")) {
-            if (!((v_base_ok.clone() || (v_t.clone() == Rc::new(T_ast__Type::V_Int))) || (v_t.clone() == Rc::new(T_ast__Type::V_Bool)))) {
-                v_after = f_checker__report(v_after.clone(), f_source__error(t_text("E0501"), (t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1935:65 in function `checker__check_generic_call`")).f_span.clone(), t_concat(t_concat(t_text("`to_text` accepts `Int` or `Bool`, found `"), f_ast__type_text(v_t.clone())), t_text("`"))));
+            if (!(((v_base_ok.clone() || (v_t.clone() == Rc::new(T_ast__Type::V_Int))) || (v_t.clone() == Rc::new(T_ast__Type::V_Bool))) || (v_t.clone() == Rc::new(T_ast__Type::V_Text)))) {
+                v_after = f_checker__report(v_after.clone(), f_source__error_help(t_text("E0501"), (t_index(&v_args.clone(), 0i64, "stage1/checker.tes:2013:70 in function `checker__check_generic_call`")).f_span.clone(), t_concat(t_concat(t_text("`to_text` (also used by `\\(...)` in text) accepts `Int`, `Bool` or `Text`, found `"), f_ast__type_text(v_t.clone())), t_text("`")), t_text("convert the value to `Text` first")));
             };
             return f_checker__call_result(v_after.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), Rc::new(vec![(v_result.clone()).f_expr.clone()]), Rc::new(T_ast__Type::V_Text))
         };
@@ -5077,7 +5334,7 @@ fn f_checker__check_generic_call(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Exp
             _ => { false }
         };
         if (!((v_base_ok.clone() || v_is_list.clone()) || (v_t.clone() == Rc::new(T_ast__Type::V_Text)))) {
-            v_after = f_checker__report(v_after.clone(), f_source__error(t_text("E0501"), (t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1944:61 in function `checker__check_generic_call`")).f_span.clone(), t_concat(t_concat(t_text("`length` accepts a list or `Text`, found `"), f_ast__type_text(v_t.clone())), t_text("`"))));
+            v_after = f_checker__report(v_after.clone(), f_source__error(t_text("E0501"), (t_index(&v_args.clone(), 0i64, "stage1/checker.tes:2022:61 in function `checker__check_generic_call`")).f_span.clone(), t_concat(t_concat(t_text("`length` accepts a list or `Text`, found `"), f_ast__type_text(v_t.clone())), t_text("`"))));
         };
         return f_checker__call_result(v_after.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), Rc::new(vec![(v_result.clone()).f_expr.clone()]), Rc::new(T_ast__Type::V_Int))
     };
@@ -5086,7 +5343,7 @@ fn f_checker__check_generic_call(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Exp
             let v_all: Rc<T_checker__CheckedArgs> = f_checker__arity_error(v_c.clone(), v_name.clone(), v_args.clone(), 2i64, v_span.clone());
             return f_checker__call_result((v_all.clone()).f_checker.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), (v_all.clone()).f_args.clone(), Rc::new(T_ast__Type::V_Unknown))
         };
-        let v_option: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1953:36 in function `checker__check_generic_call`"), if (v_expected.clone() == Rc::new(T_ast__Type::V_Unknown)) {
+        let v_option: Rc<T_checker__Checked> = f_checker__check_expr(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:2031:36 in function `checker__check_generic_call`"), if (v_expected.clone() == Rc::new(T_ast__Type::V_Unknown)) {
             Rc::new(T_ast__Type::V_Unknown)
         } else {
             Rc::new(T_ast__Type::V_Option(v_expected.clone()))
@@ -5102,10 +5359,10 @@ fn f_checker__check_generic_call(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Exp
             T_ast__Type::V_Never => { {
             } }
             _ => { {
-                v_after = f_checker__report(v_after.clone(), f_source__error(t_text("E0501"), (t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1963:65 in function `checker__check_generic_call`")).f_span.clone(), t_concat(t_concat(t_text("`value_or` needs an `Option`, found `"), f_ast__type_text(((v_option.clone()).f_expr.clone()).f_ty.clone())), t_text("`"))));
+                v_after = f_checker__report(v_after.clone(), f_source__error(t_text("E0501"), (t_index(&v_args.clone(), 0i64, "stage1/checker.tes:2041:65 in function `checker__check_generic_call`")).f_span.clone(), t_concat(t_concat(t_text("`value_or` needs an `Option`, found `"), f_ast__type_text(((v_option.clone()).f_expr.clone()).f_ty.clone())), t_text("`"))));
             } }
         };
-        let v_fallback: Rc<T_checker__Checked> = f_checker__expect_expr(v_after.clone(), t_index(&v_args.clone(), 1i64, "stage1/checker.tes:1966:43 in function `checker__check_generic_call`"), v_element.clone());
+        let v_fallback: Rc<T_checker__Checked> = f_checker__expect_expr(v_after.clone(), t_index(&v_args.clone(), 1i64, "stage1/checker.tes:2044:43 in function `checker__check_generic_call`"), v_element.clone());
         let v_result_type: Rc<T_ast__Type> = if (v_element.clone() == Rc::new(T_ast__Type::V_Unknown)) {
             ((v_fallback.clone()).f_expr.clone()).f_ty.clone()
         } else {
@@ -5122,7 +5379,7 @@ fn f_checker__check_generic_call(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Exp
         let v_all: Rc<T_checker__CheckedArgs> = f_checker__arity_error(v_c.clone(), v_name.clone(), v_args.clone(), v_count.clone(), v_span.clone());
         return f_checker__call_result((v_all.clone()).f_checker.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), (v_all.clone()).f_args.clone(), Rc::new(T_ast__Type::V_Unknown))
     };
-    let v_list: Rc<T_checker__ListArg> = f_checker__list_arg(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:1975:28 in function `checker__check_generic_call`"), v_expected.clone(), v_name.clone());
+    let v_list: Rc<T_checker__ListArg> = f_checker__list_arg(v_c.clone(), t_index(&v_args.clone(), 0i64, "stage1/checker.tes:2053:28 in function `checker__check_generic_call`"), v_expected.clone(), v_name.clone());
     let v_element: Rc<T_ast__Type> = (v_list.clone()).f_element.clone();
     let v_rest_types: Rc<Vec<Rc<T_ast__Type>>> = match (v_name.clone()).as_str() {
         "append" => { Rc::new(vec![v_element.clone()]) }
@@ -5130,7 +5387,7 @@ fn f_checker__check_generic_call(v_c: Rc<T_checker__Checker>, v_e: Rc<T_ast__Exp
         "slice" => { Rc::new(vec![Rc::new(T_ast__Type::V_Int), Rc::new(T_ast__Type::V_Int)]) }
         _ => { Rc::new(vec![Rc::new(T_ast__Type::V_Int), v_element.clone()]) }
     };
-    let v_rest: Rc<T_checker__CheckedArgs> = f_checker__expect_args((v_list.clone()).f_checker.clone(), t_slice(v_args.clone(), 1i64, v_count.clone(), "stage1/checker.tes:1983:42 in function `checker__check_generic_call`"), v_rest_types.clone());
+    let v_rest: Rc<T_checker__CheckedArgs> = f_checker__expect_args((v_list.clone()).f_checker.clone(), t_slice(v_args.clone(), 1i64, v_count.clone(), "stage1/checker.tes:2061:42 in function `checker__check_generic_call`"), v_rest_types.clone());
     f_checker__call_result((v_rest.clone()).f_checker.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), t_concat_lists(Rc::new(vec![(v_list.clone()).f_expr.clone()]), (v_rest.clone()).f_args.clone()), Rc::new(T_ast__Type::V_List(v_element.clone())))
 }
 
@@ -5156,10 +5413,11 @@ fn f_checker__check_call(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, 
         }
     }
     let v_lookup: Rc<T_checker__NameLookup> = f_checker__lookup_function(v_start.clone(), v_name.clone(), v_name_span.clone());
-    let v_sig: Rc<T_checker__Signature> = match &(f_checker__find_signature((v_lookup.clone()).f_checker.clone(), (v_lookup.clone()).f_canonical.clone())) {
+    let v_canonical: Rc<String> = f_checker__resolved_name(v_lookup.clone());
+    let v_sig: Rc<T_checker__Signature> = match &(f_checker__find_signature((v_lookup.clone()).f_checker.clone(), v_canonical.clone())) {
         Some(t1) => { let v_found = t1.clone(); v_found.clone() }
         None => { {
-            if (v_lookup.clone()).f_reported.clone() {
+            if f_checker__already_reported(v_lookup.clone()) {
                 let v_quiet: Rc<T_checker__CheckedArgs> = f_checker__check_all((v_lookup.clone()).f_checker.clone(), v_args.clone());
                 return f_checker__call_result((v_quiet.clone()).f_checker.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), (v_quiet.clone()).f_args.clone(), Rc::new(T_ast__Type::V_Unknown))
             };
@@ -5183,7 +5441,7 @@ fn f_checker__check_call(v_start: Rc<T_checker__Checker>, v_e: Rc<T_ast__Expr>, 
         return f_checker__call_result((v_all.clone()).f_checker.clone(), v_e.clone(), v_name.clone(), v_name_span.clone(), (v_all.clone()).f_args.clone(), (v_sig.clone()).f_return_type.clone())
     };
     let v_typed: Rc<T_checker__CheckedArgs> = f_checker__expect_args(v_c.clone(), v_args.clone(), (v_sig.clone()).f_params.clone());
-    f_checker__call_result((v_typed.clone()).f_checker.clone(), v_e.clone(), (v_lookup.clone()).f_canonical.clone(), v_name_span.clone(), (v_typed.clone()).f_args.clone(), (v_sig.clone()).f_return_type.clone())
+    f_checker__call_result((v_typed.clone()).f_checker.clone(), v_e.clone(), v_canonical.clone(), v_name_span.clone(), (v_typed.clone()).f_args.clone(), (v_sig.clone()).f_return_type.clone())
 }
 
 fn f_codegen__code(v_g: Rc<T_codegen__Gen>, v_text: Rc<String>) -> Rc<T_codegen__Code> {
@@ -5702,6 +5960,9 @@ fn f_codegen__gen_option(v_g: Rc<T_codegen__Gen>, v_e: Rc<T_ast__Expr>, v_varian
 }
 
 fn f_codegen__gen_variant(v_g: Rc<T_codegen__Gen>, v_type_name: Rc<String>, v_variant: Rc<String>, v_args: Rc<Vec<Rc<T_ast__Expr>>>, v_indent: i64) -> Rc<T_codegen__Code> {
+    if (v_type_name.clone() == t_text("")) {
+        return t_user_fail(t_concat(t_concat(t_text("internal compiler error: unresolved `."), v_variant.clone()), t_text("` shorthand reached code generation")), "stage1/codegen.tes:497:16 in function `codegen__gen_variant`")
+    };
     if (t_list_length(&v_args.clone()) == 0i64) {
         return f_codegen__code(v_g.clone(), t_concat(t_concat(t_concat(t_concat(t_text("Rc::new(T_"), v_type_name.clone()), t_text("::V_")), v_variant.clone()), t_text(")")))
     };
@@ -5761,7 +6022,7 @@ fn f_codegen__gen_match(v_start: Rc<T_codegen__Gen>, v_scrutinee: Rc<T_ast__Expr
                         if ((v_b.clone()).f_name.clone() == t_text("_")) {
                             v_parts = t_append(std::mem::take(&mut v_parts), t_text("_"));
                         } else {
-                            v_g = { let mut t7 = Rc::unwrap_or_clone(v_g.clone()); t7.f_tmp = t_add((v_g.clone()).f_tmp.clone(), 1i64, "stage1/codegen.tes:550:57 in function `codegen__gen_match`"); Rc::new(t7) };
+                            v_g = { let mut t7 = Rc::unwrap_or_clone(v_g.clone()); t7.f_tmp = t_add((v_g.clone()).f_tmp.clone(), 1i64, "stage1/codegen.tes:553:57 in function `codegen__gen_match`"); Rc::new(t7) };
                             let v_tmp: Rc<String> = t_concat(t_text("t"), t_int_to_text((v_g.clone()).f_tmp.clone()));
                             v_prefix = t_concat(t_concat(t_concat(t_concat(t_concat(std::mem::take(&mut v_prefix), t_text("let v_")), (v_b.clone()).f_name.clone()), t_text(" = ")), v_tmp.clone()), t_text(".clone(); "));
                             v_parts = t_append(std::mem::take(&mut v_parts), v_tmp.clone());
@@ -5782,9 +6043,9 @@ fn f_codegen__gen_match(v_start: Rc<T_codegen__Gen>, v_scrutinee: Rc<T_ast__Expr
                 }
             } }
         };
-        let v_body: Rc<T_codegen__Code> = f_codegen__gen_expr(v_g.clone(), (v_arm.clone()).f_body.clone(), t_add(v_indent.clone(), 1i64, "stage1/codegen.tes:563:49 in function `codegen__gen_match`"));
+        let v_body: Rc<T_codegen__Code> = f_codegen__gen_expr(v_g.clone(), (v_arm.clone()).f_body.clone(), t_add(v_indent.clone(), 1i64, "stage1/codegen.tes:566:49 in function `codegen__gen_match`"));
         v_g = (v_body.clone()).f_gen.clone();
-        v_out = t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(std::mem::take(&mut v_out), f_codegen__pad(t_add(v_indent.clone(), 1i64, "stage1/codegen.tes:565:36 in function `codegen__gen_match`"))), v_pattern.clone()), t_text(" => { ")), v_prefix.clone()), (v_body.clone()).f_text.clone()), t_text(" }\n"));
+        v_out = t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(std::mem::take(&mut v_out), f_codegen__pad(t_add(v_indent.clone(), 1i64, "stage1/codegen.tes:568:36 in function `codegen__gen_match`"))), v_pattern.clone()), t_text(" => { ")), v_prefix.clone()), (v_body.clone()).f_text.clone()), t_text(" }\n"));
     }
     f_codegen__code(v_g.clone(), t_concat(t_concat(v_out.clone(), f_codegen__pad(v_indent.clone())), t_text("}")))
 }
@@ -5804,15 +6065,15 @@ fn f_codegen__gen_call(v_g: Rc<T_codegen__Gen>, v_name: Rc<String>, v_args: Rc<V
     let v_text: Rc<String> = match (v_name.clone()).as_str() {
         "print" => { f_codegen__call_plain(t_text("t_print"), v_a.clone()) }
         "print_error" => { f_codegen__call_plain(t_text("t_print_error"), v_a.clone()) }
-        "to_text" => { if ((t_index(&v_args.clone(), 0i64, "stage1/codegen.tes:581:25 in function `codegen__gen_call`")).f_ty.clone() == Rc::new(T_ast__Type::V_Bool)) {
-            f_codegen__call_plain(t_text("t_bool_to_text"), v_a.clone())
-        } else {
-            f_codegen__call_plain(t_text("t_int_to_text"), v_a.clone())
+        "to_text" => { match &*((t_index(&v_args.clone(), 0i64, "stage1/codegen.tes:584:28 in function `codegen__gen_call`")).f_ty.clone()) {
+            T_ast__Type::V_Bool => { f_codegen__call_plain(t_text("t_bool_to_text"), v_a.clone()) }
+            T_ast__Type::V_Text => { t_concat(t_concat(t_text("("), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:586:36 in function `codegen__gen_call`")), t_text(")")) }
+            _ => { f_codegen__call_plain(t_text("t_int_to_text"), v_a.clone()) }
         } }
-        "length" => { if ((t_index(&v_args.clone(), 0i64, "stage1/codegen.tes:582:24 in function `codegen__gen_call`")).f_ty.clone() == Rc::new(T_ast__Type::V_Text)) {
-            t_concat(t_concat(t_text("t_text_length(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:582:74 in function `codegen__gen_call`")), t_text(")"))
+        "length" => { if ((t_index(&v_args.clone(), 0i64, "stage1/codegen.tes:589:24 in function `codegen__gen_call`")).f_ty.clone() == Rc::new(T_ast__Type::V_Text)) {
+            t_concat(t_concat(t_text("t_text_length(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:589:74 in function `codegen__gen_call`")), t_text(")"))
         } else {
-            t_concat(t_concat(t_text("t_list_length(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:582:114 in function `codegen__gen_call`")), t_text(")"))
+            t_concat(t_concat(t_text("t_list_length(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:589:114 in function `codegen__gen_call`")), t_text(")"))
         } }
         "append" => { f_codegen__call_plain(t_text("t_append"), v_a.clone()) }
         "concat" => { f_codegen__call_plain(t_text("t_concat_lists"), v_a.clone()) }
@@ -5820,10 +6081,10 @@ fn f_codegen__gen_call(v_g: Rc<T_codegen__Gen>, v_name: Rc<String>, v_args: Rc<V
         "replace_at" => { f_codegen__call_with_location(t_text("t_replace_at"), v_a.clone(), v_loc.clone()) }
         "value_or" => { f_codegen__call_plain(t_text("t_value_or"), v_a.clone()) }
         "range" => { f_codegen__call_with_location(t_text("t_range"), v_a.clone(), v_loc.clone()) }
-        "code_points" => { t_concat(t_concat(t_text("t_code_points(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:589:46 in function `codegen__gen_call`")), t_text(")")) }
+        "code_points" => { t_concat(t_concat(t_text("t_code_points(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:596:46 in function `codegen__gen_call`")), t_text(")")) }
         "from_code_point" => { f_codegen__call_with_location(t_text("t_from_code_point"), v_a.clone(), v_loc.clone()) }
-        "from_code_points" => { t_concat(t_concat(t_concat(t_concat(t_text("t_from_code_points(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:591:56 in function `codegen__gen_call`")), t_text(", ")), v_loc.clone()), t_text(")")) }
-        "join" => { t_concat(t_concat(t_concat(t_concat(t_text("t_join(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:592:32 in function `codegen__gen_call`")), t_text(", &")), t_index(&v_a.clone(), 1i64, "stage1/codegen.tes:592:47 in function `codegen__gen_call`")), t_text(")")) }
+        "from_code_points" => { t_concat(t_concat(t_concat(t_concat(t_text("t_from_code_points(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:598:56 in function `codegen__gen_call`")), t_text(", ")), v_loc.clone()), t_text(")")) }
+        "join" => { t_concat(t_concat(t_concat(t_concat(t_text("t_join(&"), t_index(&v_a.clone(), 0i64, "stage1/codegen.tes:599:32 in function `codegen__gen_call`")), t_text(", &")), t_index(&v_a.clone(), 1i64, "stage1/codegen.tes:599:47 in function `codegen__gen_call`")), t_text(")")) }
         "read_file" => { f_codegen__call_with_location(t_text("t_read_file"), v_a.clone(), v_loc.clone()) }
         "write_file" => { f_codegen__call_with_location(t_text("t_write_file"), v_a.clone(), v_loc.clone()) }
         "args" => { f_codegen__call_with_location(t_text("t_args"), v_a.clone(), v_loc.clone()) }

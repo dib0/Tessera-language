@@ -1,0 +1,53 @@
+enum Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Rect(width: Int, height: Int)
+}
+
+fn parse_int(text: Text) -> Int {
+    var value = 0
+    for code in code_points(text) {
+        set value = value * 10 + (code - 48)
+    }
+    value
+}
+
+fn after(text: Text, separator: Int) -> List[Text] {
+    let codes = code_points(text)
+    for index in range(0, length(codes)) {
+        if codes[index] == separator {
+            return [from_code_points(slice(codes, 0, index)), from_code_points(slice(codes, index + 1, length(codes)))]
+        }
+    }
+    [text, ""]
+}
+
+fn parse(text: Text) -> Shape {
+    let parts = after(text, 58)
+    match parts[0] {
+        "circle" => Shape.Circle(parse_int(parts[1]))
+        "square" => Shape.Square(parse_int(parts[1]))
+        _ => {
+            let size = after(parts[1], 120)
+            Shape.Rect(parse_int(size[0]), parse_int(size[1]))
+        }
+    }
+}
+
+fn area(shape: Shape) -> Int {
+    match shape {
+        Shape.Circle(radius) => 3 * radius * radius
+        Shape.Square(side) => side * side
+        Shape.Rect(width, height) => width * height
+    }
+}
+
+fn main() -> Unit uses io, env {
+    var total = 0
+    for argument in args() {
+        let value = area(parse(argument))
+        set total = total + value
+        print(to_text(value))
+    }
+    print("total: " + to_text(total))
+}
