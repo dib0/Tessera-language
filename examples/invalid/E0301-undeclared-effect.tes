@@ -1,0 +1,6 @@
+// Expected: error E0301, `print` uses `io` but `shout` does not declare it.
+fn shout(message: Text) -> Unit {
+    print(message + "!")
+}
+
+fn main() -> Unit uses io = shout("hello")

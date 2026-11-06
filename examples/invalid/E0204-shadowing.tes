@@ -1,0 +1,8 @@
+// Expected: error E0204, `count` is already defined.
+fn main() -> Unit uses io {
+    let count = 1
+    if count > 0 {
+        let count = 2
+        print(to_text(count))
+    }
+}

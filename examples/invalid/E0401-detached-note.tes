@@ -1,0 +1,4 @@
+// Expected: error E0401, a note must be followed by a function.
+fn main() -> Unit uses io = print("hi")
+
+note "This note describes nothing."
