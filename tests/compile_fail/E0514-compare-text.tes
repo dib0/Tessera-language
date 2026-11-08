@@ -1,3 +1,3 @@
 fn main() -> Unit uses io {
-    if "a" < "b" { print("less") }
+if "a" < "b" { print("less") }
 }

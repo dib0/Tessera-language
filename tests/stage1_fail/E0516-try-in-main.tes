@@ -1,5 +1,5 @@
 fn parse(text: Text) -> Result[Int, Text] = if text == "" { Result.Error("empty") } else { Result.Ok(1) }
 fn main() -> Unit uses io {
-    let value = try parse("1")
-    print(to_text(value))
+let value = try parse("1")
+print(to_text(value))
 }

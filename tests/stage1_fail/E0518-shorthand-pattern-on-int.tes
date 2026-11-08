@@ -1,7 +1,7 @@
 fn name(n: Int) -> Text {
-    match n {
-        .Some(x) => "some"
-        _ => "other"
-    }
+match n {
+.Some(x) => "some"
+_ => "other"
+}
 }
 fn main() -> Unit uses io = print(name(1))

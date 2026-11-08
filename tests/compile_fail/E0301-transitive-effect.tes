@@ -1,6 +1,6 @@
 fn log(message: Text) -> Unit uses io = print(message)
 fn compute(x: Int) -> Int {
-    log("computing")
-    x * 2
+log("computing")
+x * 2
 }
 fn main() -> Unit uses io = print(to_text(compute(2)))

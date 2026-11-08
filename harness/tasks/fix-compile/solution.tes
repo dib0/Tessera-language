@@ -1,27 +1,27 @@
 fn parse(text: Text) -> Int {
-    var value = 0
-    for code in code_points(text) {
-        set value = value * 10 + (code - 48)
-    }
-    value
+var value = 0
+for code in code_points(text) {
+set value = value * 10 + (code - 48)
+}
+value
 }
 
 fn report(numbers: List[Int]) -> Unit uses io {
-    if length(numbers) == 0 {
-        print("no numbers")
-        return
-    }
-    var total = 0
-    for number in numbers {
-        set total = total + number
-    }
-    print("average: " + to_text(total / length(numbers)))
+if length(numbers) == 0 {
+print("no numbers")
+return
+}
+var total = 0
+for number in numbers {
+set total = total + number
+}
+print("average: " + to_text(total / length(numbers)))
 }
 
 fn main() -> Unit uses io, env {
-    var numbers: List[Int] = []
-    for argument in args() {
-        set numbers = append(numbers, parse(argument))
-    }
-    report(numbers)
+var numbers: List[Int] = []
+for argument in args() {
+set numbers = append(numbers, parse(argument))
+}
+report(numbers)
 }

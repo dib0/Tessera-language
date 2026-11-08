@@ -1,5 +1,5 @@
 // Expected: compiles; at runtime stops with R001 and exit code 70.
 fn main() -> Unit uses io {
-    let names = ["Ada", "Grace"]
-    print(names[2])
+let names = ["Ada", "Grace"]
+print(names[2])
 }

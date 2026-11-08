@@ -1,4 +1,4 @@
 type Result {
-    ok: Bool
+ok: Bool
 }
 fn main() -> Unit uses io = print("x")

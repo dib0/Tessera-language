@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let count = 2
-    print("count: \(cuont) items")
+let count = 2
+print("count: \(cuont) items")
 }

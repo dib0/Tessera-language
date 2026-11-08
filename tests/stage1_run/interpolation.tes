@@ -1,8 +1,8 @@
 // Text interpolation with \(...) (draft 0.8, stage 1 only).
 
 type Item {
-    name: Text
-    count: Int
+name: Text
+count: Int
 }
 
 fn plural(word: Text, count: Int) -> Text = if count == 1 { word } else { "\(word)s" }
@@ -10,15 +10,15 @@ fn plural(word: Text, count: Int) -> Text = if count == 1 { word } else { "\(wor
 fn describe(item: Item) -> Text = "\(item.count) \(plural(item.name, item.count))"
 
 fn main() -> Unit uses io {
-    let items = [Item { name: "apple", count: 3 }, Item { name: "pear", count: 1 }]
-    for item in items {
-        print("- \(describe(item))")
-    }
-    let total = 4
-    print("total: \(total), even: \(total % 2 == 0)")
-    print("\(total)")
-    print("nested: \("inner \(total + 1)")!")
-    print("braces stay literal: {x} and \\(not interpolated)")
-    print("joined: \(join(["a", "b"], ", "))")
-    print("" + "empty \("")end")
+let items = [Item { name: "apple", count: 3 }, Item { name: "pear", count: 1 }]
+for item in items {
+print("- \(describe(item))")
+}
+let total = 4
+print("total: \(total), even: \(total % 2 == 0)")
+print("\(total)")
+print("nested: \("inner \(total + 1)")!")
+print("braces stay literal: {x} and \\(not interpolated)")
+print("joined: \(join(["a", "b"], ", "))")
+print("" + "empty \("")end")
 }

@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let name = "Ada"
-    print(name[0])
+let name = "Ada"
+print(name[0])
 }

@@ -1,12 +1,12 @@
 enum Color {
-    Red
-    Green
-    Blue
+Red
+Green
+Blue
 }
 fn name(c: Color) -> Text {
-    match c {
-        Color.Red => "red"
-        Color.Green => "green"
-    }
+match c {
+Color.Red => "red"
+Color.Green => "green"
+}
 }
 fn main() -> Unit uses io = print(name(Color.Blue))

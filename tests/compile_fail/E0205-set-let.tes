@@ -1,5 +1,5 @@
 fn main() -> Unit uses io {
-    let count = 1
-    set count = 2
-    print(to_text(count))
+let count = 1
+set count = 2
+print(to_text(count))
 }

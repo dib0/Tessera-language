@@ -1,63 +1,63 @@
 // `.Variant` shorthand: the type comes from the context (draft 0.8, stage 1 only).
 
 enum Color {
-    Red
-    Green
-    Custom(name: Text)
+Red
+Green
+Custom(name: Text)
 }
 
 type Pixel {
-    color: Color
-    bright: Bool
+color: Color
+bright: Bool
 }
 
 fn name_of(color: Color) -> Text {
-    match color {
-        .Red => "red"
-        .Green => "green"
-        .Custom(name) => name
-    }
+match color {
+.Red => "red"
+.Green => "green"
+.Custom(name) => name
+}
 }
 
 fn parse(text: Text) -> Option[Color] {
-    match text {
-        "red" => .Some(.Red)
-        "green" => .Some(.Green)
-        "" => .None
-        _ => .Some(.Custom(text))
-    }
+match text {
+"red" => .Some(.Red)
+"green" => .Some(.Green)
+"" => .None
+_ => .Some(.Custom(text))
+}
 }
 
 fn safe_divide(a: Int, b: Int) -> Result[Int, Text] {
-    if b == 0 {
-        return .Error("division by zero")
-    }
-    .Ok(a / b)
+if b == 0 {
+return .Error("division by zero")
+}
+.Ok(a / b)
 }
 
 fn describe(result: Result[Int, Text]) -> Text {
-    match result {
-        .Ok(value) => "ok " + to_text(value)
-        .Error(message) => "error: " + message
-    }
+match result {
+.Ok(value) => "ok " + to_text(value)
+.Error(message) => "error: " + message
+}
 }
 
 fn main() -> Unit uses io {
-    let pixel = Pixel { color: .Green, bright: true }
-    print(name_of(pixel.color) + " " + name_of(.Custom("teal")))
-    let favourite: Color = .Red
-    print(to_text(favourite == .Red) + " " + to_text(pixel.color != .Red))
-    let colors: List[Color] = [.Red, .Custom("navy")]
-    for color in colors {
-        print(name_of(color))
-    }
-    for text in ["green", "", "plum"] {
-        match parse(text) {
-            .Some(color) => print("parsed " + name_of(color))
-            .None => print("nothing")
-        }
-    }
-    print(describe(safe_divide(7, 2)) + ", " + describe(safe_divide(1, 0)))
-    let changed = pixel with { color: .Custom("gold") }
-    print(name_of(changed.color))
+let pixel = Pixel { color: .Green, bright: true }
+print(name_of(pixel.color) + " " + name_of(.Custom("teal")))
+let favourite: Color = .Red
+print(to_text(favourite == .Red) + " " + to_text(pixel.color != .Red))
+let colors: List[Color] = [.Red, .Custom("navy")]
+for color in colors {
+print(name_of(color))
+}
+for text in ["green", "", "plum"] {
+match parse(text) {
+.Some(color) => print("parsed " + name_of(color))
+.None => print("nothing")
+}
+}
+print(describe(safe_divide(7, 2)) + ", " + describe(safe_divide(1, 0)))
+let changed = pixel with { color: .Custom("gold") }
+print(name_of(changed.color))
 }

@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let items = []
-    print(to_text(length(items)))
+let items = []
+print(to_text(length(items)))
 }

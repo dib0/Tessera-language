@@ -1,53 +1,53 @@
 fn parse(text: Text) -> Result[Int, Text] {
-    let codes = code_points(text)
-    var start = 0
-    var sign = 1
-    if length(codes) > 0 and codes[0] == 45 {
-        set start = 1
-        set sign = -1
-    }
-    if length(codes) == start {
-        return Result.Error(text)
-    }
-    var value = 0
-    for index in range(start, length(codes)) {
-        let digit = codes[index] - 48
-        if digit < 0 or digit > 9 {
-            return Result.Error(text)
-        }
-        set value = value * 10 + digit
-    }
-    Result.Ok(sign * value)
+let codes = code_points(text)
+var start = 0
+var sign = 1
+if length(codes) > 0 and codes[0] == 45 {
+set start = 1
+set sign = -1
+}
+if length(codes) == start {
+return Result.Error(text)
+}
+var value = 0
+for index in range(start, length(codes)) {
+let digit = codes[index] - 48
+if digit < 0 or digit > 9 {
+return Result.Error(text)
+}
+set value = value * 10 + digit
+}
+Result.Ok(sign * value)
 }
 
 fn insert_sorted(sorted: List[Int], value: Int) -> List[Int] {
-    var index = 0
-    while index < length(sorted) and sorted[index] <= value {
-        set index = index + 1
-    }
-    concat(append(slice(sorted, 0, index), value), slice(sorted, index, length(sorted)))
+var index = 0
+while index < length(sorted) and sorted[index] <= value {
+set index = index + 1
+}
+concat(append(slice(sorted, 0, index), value), slice(sorted, index, length(sorted)))
 }
 
 fn sort_all(texts: List[Text]) -> Result[List[Int], Text] {
-    var sorted: List[Int] = []
-    for text in texts {
-        set sorted = insert_sorted(sorted, try parse(text))
-    }
-    Result.Ok(sorted)
+var sorted: List[Int] = []
+for text in texts {
+set sorted = insert_sorted(sorted, try parse(text))
+}
+Result.Ok(sorted)
 }
 
 fn main() -> Unit uses io, env {
-    match sort_all(args()) {
-        Result.Ok(sorted) => {
-            var parts: List[Text] = []
-            for value in sorted {
-                set parts = append(parts, to_text(value))
-            }
-            print(join(parts, " "))
-        }
-        Result.Error(bad) => {
-            print("error: not a number: " + bad)
-            exit(1)
-        }
-    }
+match sort_all(args()) {
+Result.Ok(sorted) => {
+var parts: List[Text] = []
+for value in sorted {
+set parts = append(parts, to_text(value))
+}
+print(join(parts, " "))
+}
+Result.Error(bad) => {
+print("error: not a number: " + bad)
+exit(1)
+}
+}
 }

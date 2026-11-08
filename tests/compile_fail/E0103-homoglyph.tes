@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let nаme = "Cyrillic a"
-    print(nаme)
+let nаme = "Cyrillic a"
+print(nаme)
 }

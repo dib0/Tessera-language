@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let n = 5
-    print(to_text(n with { value: 1 }))
+let n = 5
+print(to_text(n with { value: 1 }))
 }

@@ -1,6 +1,6 @@
 enum Color {
-    Red
-    Green
+Red
+Green
 }
 fn is_red(color: Color) -> Bool = .Red == color
 fn main() -> Unit uses io = print(to_text(is_red(Color.Green)))

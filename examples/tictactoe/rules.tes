@@ -1,101 +1,101 @@
 // Tic-tac-toe rules and the computer player. Pure: imported with `uses nothing`.
 
 pub enum Mark {
-    Empty
-    Cross
-    Circle
+Empty
+Cross
+Circle
 }
 
 pub enum Outcome {
-    Playing
-    Won(winner: Mark, line: Int)
-    Draw
+Playing
+Won(winner: Mark, line: Int)
+Draw
 }
 
 pub type Game {
-    board: List[Mark]
-    outcome: Outcome
+board: List[Mark]
+outcome: Outcome
 }
 
 note "The eight ways to get three in a row, as board indexes (row by row, 0 to 8)."
 pub fn lines() -> List[List[Int]] {
-    [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
+[[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
 }
 
 pub fn new_game() -> Game {
-    let board = [Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty]
-    Game { board: board, outcome: Outcome.Playing }
+let board = [Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty, Mark.Empty]
+Game { board: board, outcome: Outcome.Playing }
 }
 
 fn outcome_of(board: List[Mark]) -> Outcome {
-    let all_lines = lines()
-    for index in range(0, length(all_lines)) {
-        let line = all_lines[index]
-        let first = board[line[0]]
-        if first != Mark.Empty and board[line[1]] == first and board[line[2]] == first {
-            return Outcome.Won(first, index)
-        }
-    }
-    for cell in board {
-        if cell == Mark.Empty {
-            return Outcome.Playing
-        }
-    }
-    Outcome.Draw
+let all_lines = lines()
+for index in range(0, length(all_lines)) {
+let line = all_lines[index]
+let first = board[line[0]]
+if first != Mark.Empty and board[line[1]] == first and board[line[2]] == first {
+return Outcome.Won(first, index)
+}
+}
+for cell in board {
+if cell == Mark.Empty {
+return Outcome.Playing
+}
+}
+Outcome.Draw
 }
 
 fn opponent(mark: Mark) -> Mark = if mark == Mark.Cross { Mark.Circle } else { Mark.Cross }
 
 note "Minimax score from the computer's (Circle's) point of view; quicker wins score higher."
 fn score(board: List[Mark], to_move: Mark, depth: Int) -> Int {
-    match outcome_of(board) {
-        Outcome.Won(winner, _) => if winner == Mark.Circle { 10 - depth } else { depth - 10 }
-        Outcome.Draw => 0
-        Outcome.Playing => {
-            var best = if to_move == Mark.Circle { -100 } else { 100 }
-            for cell in range(0, 9) {
-                if board[cell] == Mark.Empty {
-                    let value = score(replace_at(board, cell, to_move), opponent(to_move), depth + 1)
-                    let better = if to_move == Mark.Circle { value > best } else { value < best }
-                    if better {
-                        set best = value
-                    }
-                }
-            }
-            best
-        }
-    }
+match outcome_of(board) {
+Outcome.Won(winner, _) => if winner == Mark.Circle { 10 - depth } else { depth - 10 }
+Outcome.Draw => 0
+Outcome.Playing => {
+var best = if to_move == Mark.Circle { -100 } else { 100 }
+for cell in range(0, 9) {
+if board[cell] == Mark.Empty {
+let value = score(replace_at(board, cell, to_move), opponent(to_move), depth + 1)
+let better = if to_move == Mark.Circle { value > best } else { value < best }
+if better {
+set best = value
+}
+}
+}
+best
+}
+}
 }
 
 note "The computer never loses: it picks the square with the best minimax score (first one on ties)."
 fn computer_move(board: List[Mark]) -> Int {
-    var best_cell = -1
-    var best_score = -100
-    for cell in range(0, 9) {
-        if board[cell] == Mark.Empty {
-            let value = score(replace_at(board, cell, Mark.Circle), Mark.Cross, 1)
-            if value > best_score {
-                set best_score = value
-                set best_cell = cell
-            }
-        }
-    }
-    best_cell
+var best_cell = -1
+var best_score = -100
+for cell in range(0, 9) {
+if board[cell] == Mark.Empty {
+let value = score(replace_at(board, cell, Mark.Circle), Mark.Cross, 1)
+if value > best_score {
+set best_score = value
+set best_cell = cell
+}
+}
+}
+best_cell
 }
 
 fn place(game: Game, cell: Int, mark: Mark) -> Game {
-    let board = replace_at(game.board, cell, mark)
-    Game { board: board, outcome: outcome_of(board) }
+let board = replace_at(game.board, cell, mark)
+Game { board: board, outcome: outcome_of(board) }
 }
 
 note "A human move is followed directly by the computer's answer, unless the game is over."
 pub fn play(game: Game, cell: Int) -> Game {
-    if game.outcome != Outcome.Playing or game.board[cell] != Mark.Empty {
-        return game
-    }
-    let after_human = place(game, cell, Mark.Cross)
-    if after_human.outcome != Outcome.Playing {
-        return after_human
-    }
-    place(after_human, computer_move(after_human.board), Mark.Circle)
+if game.outcome != Outcome.Playing or game.board[cell] != Mark.Empty {
+return game
+}
+let after_human = place(game, cell, Mark.Cross)
+if after_human.outcome != Outcome.Playing {
+return after_human
+}
+place(after_human, computer_move(after_human.board), Mark.Circle)
 }

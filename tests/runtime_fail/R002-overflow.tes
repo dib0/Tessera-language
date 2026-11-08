@@ -1,5 +1,5 @@
 fn main() -> Unit uses io {
-    var x = 9223372036854775807
-    set x = x + 1
-    print(to_text(x))
+var x = 9223372036854775807
+set x = x + 1
+print(to_text(x))
 }

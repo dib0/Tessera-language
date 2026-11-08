@@ -1,77 +1,77 @@
 // Result[T, E] and `try` (draft 0.7, stage 1 only). Expected output in the .out file.
 
 enum ParseError {
-    Empty
-    NotADigit(position: Int)
-    TooLarge
+Empty
+NotADigit(position: Int)
+TooLarge
 }
 
 fn describe(error: ParseError) -> Text {
-    match error {
-        ParseError.Empty => "empty input"
-        ParseError.NotADigit(position) => "not a digit at position " + to_text(position)
-        ParseError.TooLarge => "number too large"
-    }
+match error {
+ParseError.Empty => "empty input"
+ParseError.NotADigit(position) => "not a digit at position " + to_text(position)
+ParseError.TooLarge => "number too large"
+}
 }
 
 fn parse_number(text: Text) -> Result[Int, ParseError] {
-    let codes = code_points(text)
-    if length(codes) == 0 {
-        return Result.Error(ParseError.Empty)
-    }
-    var value = 0
-    for index in range(0, length(codes)) {
-        let digit = codes[index] - 48
-        if digit < 0 or digit > 9 {
-            return Result.Error(ParseError.NotADigit(index))
-        }
-        if value > 100_000_000 {
-            return Result.Error(ParseError.TooLarge)
-        }
-        set value = value * 10 + digit
-    }
-    Result.Ok(value)
+let codes = code_points(text)
+if length(codes) == 0 {
+return Result.Error(ParseError.Empty)
+}
+var value = 0
+for index in range(0, length(codes)) {
+let digit = codes[index] - 48
+if digit < 0 or digit > 9 {
+return Result.Error(ParseError.NotADigit(index))
+}
+if value > 100_000_000 {
+return Result.Error(ParseError.TooLarge)
+}
+set value = value * 10 + digit
+}
+Result.Ok(value)
 }
 
 note "`try` returns the first error; the rest of the function only sees numbers."
 fn add_all(texts: List[Text]) -> Result[Int, ParseError] {
-    var total = 0
-    for text in texts {
-        set total = total + try parse_number(text)
-    }
-    Result.Ok(total)
+var total = 0
+for text in texts {
+set total = total + try parse_number(text)
+}
+Result.Ok(total)
 }
 
 fn first_even(numbers: List[Int]) -> Option[Int] {
-    for n in numbers {
-        if n % 2 == 0 {
-            return Option.Some(n)
-        }
-    }
-    Option.None
+for n in numbers {
+if n % 2 == 0 {
+return Option.Some(n)
+}
+}
+Option.None
 }
 
 note "`try` on an Option stops at the first missing value."
 fn half_of_first_even(numbers: List[Int]) -> Option[Int] {
-    let even = try first_even(numbers)
-    Option.Some(even / 2)
+let even = try first_even(numbers)
+Option.Some(even / 2)
 }
 
 fn show(result: Result[Int, ParseError]) -> Text {
-    match result {
-        Result.Ok(value) => "ok " + to_text(value)
-        Result.Error(error) => "error: " + describe(error)
-    }
+match result {
+Result.Ok(value) => "ok " + to_text(value)
+Result.Error(error) => "error: " + describe(error)
+}
 }
 
 fn main() -> Unit uses io {
-    print(show(parse_number("1234")))
-    print(show(parse_number("12x4")))
-    print(show(parse_number("")))
-    print(show(add_all(["1", "20", "300"])))
-    print(show(add_all(["1", "oops", "300"])))
-    print(show(parse_number("99999999999")))
-    print(to_text(value_or(half_of_first_even([3, 5, 8, 10]), -1)) + " " + to_text(value_or(half_of_first_even([1, 3]), -1)))
-    let same: Result[Int, Text] = Result.Ok(1)
-    print(to_text(same == Result.Ok(1)) + " " + to_text(same == Result.Error("x")))
+print(show(parse_number("1234")))
+print(show(parse_number("12x4")))
+print(show(parse_number("")))
+print(show(add_all(["1", "20", "300"])))
+print(show(add_all(["1", "oops", "300"])))
+print(show(parse_number("99999999999")))
+print(to_text(value_or(half_of_first_even([3, 5, 8, 10]), -1)) + " " + to_text(value_or(half_of_first_even([1, 3]), -1)))
+let same: Result[Int, Text] = Result.Ok(1)
+print(to_text(same == Result.Ok(1)) + " " + to_text(same == Result.Error("x")))
 }

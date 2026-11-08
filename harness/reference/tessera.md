@@ -7,10 +7,10 @@ Tessera is a statically typed, expression-oriented language. Programs compile to
 ```tessera
 note "Optional design note; must be directly above the declaration it describes."
 fn main() -> Unit uses io, env {
-    let names = args()
-    for name in names {
-        print("Hello, " + name)
-    }
+let names = args()
+for name in names {
+print("Hello, " + name)
+}
 }
 ```
 
@@ -49,8 +49,8 @@ There are no implicit conversions: `"n = " + to_text(n)`, and conditions must be
 fn square(x: Int) -> Int = x * x
 
 fn describe(x: Int) -> Text {
-    let squared = square(x)
-    to_text(x) + " squared is " + to_text(squared)
+let squared = square(x)
+to_text(x) + " squared is " + to_text(squared)
 }
 ```
 
@@ -92,19 +92,19 @@ Precedence from high to low: call `f(x)`, index `xs[i]`, field `r.f`, `with`; un
 let kind = if count == 0 { "none" } else if count == 1 { "one" } else { "many" }
 
 for item in items {
-    if item < 0 {
-        continue
-    }
-    print(to_text(item))
+if item < 0 {
+continue
+}
+print(to_text(item))
 }
 
 var i = 0
 while i < 10 {
-    set i = i + 1
+set i = i + 1
 }
 
 for index in range(0, length(items)) {
-    print(to_text(index) + ": " + items[index])
+print(to_text(index) + ": " + items[index])
 }
 ```
 
@@ -114,8 +114,8 @@ for index in range(0, length(items)) {
 
 ```tessera
 type Point {
-    x: Int
-    y: Int
+x: Int
+y: Int
 }
 
 let p = Point { x: 1, y: 2 }
@@ -130,28 +130,28 @@ print(to_text(moved.x))
 
 ```tessera
 enum Shape {
-    Circle(radius: Int)
-    Square(side: Int)
-    Empty
+Circle(radius: Int)
+Square(side: Int)
+Empty
 }
 
 fn area(shape: Shape) -> Int {
-    match shape {
-        Shape.Circle(radius) => 3 * radius * radius
-        Shape.Square(side) => side * side
-        Shape.Empty => 0
-    }
+match shape {
+Shape.Circle(radius) => 3 * radius * radius
+Shape.Square(side) => side * side
+Shape.Empty => 0
+}
 }
 
 fn total_area(shapes: List[Shape]) -> Int {
-    var total = 0
-    for shape in shapes {
-        match shape {
-            Shape.Empty => continue
-            _ => set total = total + area(shape)
-        }
-    }
-    total
+var total = 0
+for shape in shapes {
+match shape {
+Shape.Empty => continue
+_ => set total = total + area(shape)
+}
+}
+total
 }
 ```
 
@@ -165,41 +165,41 @@ fn total_area(shapes: List[Shape]) -> Int {
 
 ```tessera
 fn find_index(items: List[Text], wanted: Text) -> Option[Int] {
-    for index in range(0, length(items)) {
-        if items[index] == wanted {
-            return Option.Some(index)
-        }
-    }
-    Option.None
+for index in range(0, length(items)) {
+if items[index] == wanted {
+return Option.Some(index)
+}
+}
+Option.None
 }
 
 enum ParseError {
-    Empty
-    NotADigit(position: Int)
+Empty
+NotADigit(position: Int)
 }
 
 fn parse_number(text: Text) -> Result[Int, ParseError] {
-    let codes = code_points(text)
-    if length(codes) == 0 {
-        return Result.Error(ParseError.Empty)
-    }
-    var value = 0
-    for index in range(0, length(codes)) {
-        let digit = codes[index] - 48
-        if digit < 0 or digit > 9 {
-            return Result.Error(ParseError.NotADigit(index))
-        }
-        set value = value * 10 + digit
-    }
-    Result.Ok(value)
+let codes = code_points(text)
+if length(codes) == 0 {
+return Result.Error(ParseError.Empty)
+}
+var value = 0
+for index in range(0, length(codes)) {
+let digit = codes[index] - 48
+if digit < 0 or digit > 9 {
+return Result.Error(ParseError.NotADigit(index))
+}
+set value = value * 10 + digit
+}
+Result.Ok(value)
 }
 
 fn sum(texts: List[Text]) -> Result[Int, ParseError] {
-    var total = 0
-    for text in texts {
-        set total = total + try parse_number(text)
-    }
-    Result.Ok(total)
+var total = 0
+for text in texts {
+set total = total + try parse_number(text)
+}
+Result.Ok(total)
 }
 ```
 

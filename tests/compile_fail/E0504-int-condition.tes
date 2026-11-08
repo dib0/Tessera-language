@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let count = 3
-    if count { print("yes") }
+let count = 3
+if count { print("yes") }
 }

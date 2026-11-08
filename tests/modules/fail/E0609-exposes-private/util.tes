@@ -1,5 +1,5 @@
 type Secret {
-    value: Int
+value: Int
 }
 
 pub fn make() -> Secret = Secret { value: 1 }

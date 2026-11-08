@@ -5,10 +5,10 @@ Where the expected type is already known, write a variant without its type: `.Re
 
 ```tessera
 fn name_of(color: Color) -> Text {
-    match color {
-        .Red => "red"
-        .Custom(name) => name
-    }
+match color {
+.Red => "red"
+.Custom(name) => name
+}
 }
 
 fn parse(text: Text) -> Option[Color] = if text == "red" { .Some(.Red) } else { .None }
@@ -16,7 +16,7 @@ fn parse(text: Text) -> Option[Color] = if text == "red" { .Some(.Red) } else { 
 let favourite: Color = .Red
 let pixel = Pixel { color: .Red, bright: true }
 if favourite == .Red {
-    print("red")
+print("red")
 }
 ```
 

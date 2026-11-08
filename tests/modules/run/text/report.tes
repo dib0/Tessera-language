@@ -3,9 +3,9 @@ import geometry/shapes
 
 note "One line per shape, used by the entry module."
 pub fn line(shape: shapes.Shape) -> Text {
-    let kind = match shape {
-        shapes.Shape.Circle(_) => "circle"
-        shapes.Shape.Square(_) => "square"
-    }
-    kind + " with area " + to_text(shapes.area(shape))
+let kind = match shape {
+shapes.Shape.Circle(_) => "circle"
+shapes.Shape.Square(_) => "square"
+}
+kind + " with area " + to_text(shapes.area(shape))
 }

@@ -1,14 +1,18 @@
 """Writes harness/tasks/<id>/{task.md,task.json,solution.tes[,starter.tes]} (part 1: write-from-scratch tasks)."""
-import json, os, sys
+import json, os, re, sys
 ROOT = os.path.join(os.path.dirname(__file__), "..", "tasks")
+
+def unindent(code):
+    """Tessera's canonical layout has no indentation; the harness indents per variant."""
+    return "\n".join(line.lstrip(" ") for line in code.split("\n"))
 
 def task(tid, kind, prompt, tests, solution, starter=None, effects=("io", "env")):
     d = os.path.join(ROOT, tid)
     os.makedirs(d, exist_ok=True)
-    open(os.path.join(d, "task.md"), "w").write(prompt.strip() + "\n")
-    open(os.path.join(d, "solution.tes"), "w").write(solution.lstrip("\n"))
+    open(os.path.join(d, "task.md"), "w").write(re.sub(r"```tessera\n.*?```", lambda m: unindent(m.group(0)), prompt.strip(), flags=re.S) + "\n")
+    open(os.path.join(d, "solution.tes"), "w").write(unindent(solution.lstrip("\n")))
     if starter:
-        open(os.path.join(d, "starter.tes"), "w").write(starter.lstrip("\n"))
+        open(os.path.join(d, "starter.tes"), "w").write(unindent(starter.lstrip("\n")))
     json.dump({"kind": kind, "effects": list(effects), "tests": tests}, open(os.path.join(d, "task.json"), "w"), indent=2)
 
 def t(args, stdout, exit=0):

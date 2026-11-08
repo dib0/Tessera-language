@@ -1,6 +1,6 @@
 // Only a bare `_` marks an unused binding; other names start with a letter.
 fn main() -> Unit uses io {
-    for _index in range(0, 2) {
-        print("a")
-    }
+for _index in range(0, 2) {
+print("a")
+}
 }

@@ -1,74 +1,74 @@
 enum Kind {
-    Deposit
-    Withdraw
+Deposit
+Withdraw
 }
 
 type Transaction {
-    kind: Kind
-    amount: Int
+kind: Kind
+amount: Int
 }
 
 fn split_colon(text: Text) -> List[Text] {
-    let codes = code_points(text)
-    for index in range(0, length(codes)) {
-        if codes[index] == 58 {
-            return [from_code_points(slice(codes, 0, index)), from_code_points(slice(codes, index + 1, length(codes)))]
-        }
-    }
-    [text]
+let codes = code_points(text)
+for index in range(0, length(codes)) {
+if codes[index] == 58 {
+return [from_code_points(slice(codes, 0, index)), from_code_points(slice(codes, index + 1, length(codes)))]
+}
+}
+[text]
 }
 
 fn parse_amount(text: Text) -> Option[Int] {
-    let codes = code_points(text)
-    if length(codes) == 0 {
-        return Option.None
-    }
-    var value = 0
-    for code in codes {
-        if code < 48 or code > 57 {
-            return Option.None
-        }
-        set value = value * 10 + (code - 48)
-    }
-    if value == 0 { Option.None } else { Option.Some(value) }
+let codes = code_points(text)
+if length(codes) == 0 {
+return Option.None
+}
+var value = 0
+for code in codes {
+if code < 48 or code > 57 {
+return Option.None
+}
+set value = value * 10 + (code - 48)
+}
+if value == 0 { Option.None } else { Option.Some(value) }
 }
 
 fn parse(text: Text) -> Option[Transaction] {
-    let parts = split_colon(text)
-    if length(parts) != 2 {
-        return Option.None
-    }
-    let amount = try parse_amount(parts[1])
-    match parts[0] {
-        "deposit" => Option.Some(Transaction { kind: Kind.Deposit, amount: amount })
-        "withdraw" => Option.Some(Transaction { kind: Kind.Withdraw, amount: amount })
-        _ => Option.None
-    }
+let parts = split_colon(text)
+if length(parts) != 2 {
+return Option.None
+}
+let amount = try parse_amount(parts[1])
+match parts[0] {
+"deposit" => Option.Some(Transaction { kind: Kind.Deposit, amount: amount })
+"withdraw" => Option.Some(Transaction { kind: Kind.Withdraw, amount: amount })
+_ => Option.None
+}
 }
 
 fn main() -> Unit uses io, env {
-    var balance = 0
-    let arguments = args()
-    for index in range(0, length(arguments)) {
-        let number = to_text(index + 1)
-        match parse(arguments[index]) {
-            Option.None => {
-                print("error: invalid transaction at " + number)
-                exit(1)
-            }
-            Option.Some(transaction) => match transaction.kind {
-                Kind.Deposit => {
-                    set balance = balance + transaction.amount
-                }
-                Kind.Withdraw => {
-                    if transaction.amount > balance {
-                        print("error: insufficient funds at transaction " + number)
-                        exit(1)
-                    }
-                    set balance = balance - transaction.amount
-                }
-            }
-        }
-    }
-    print("balance: " + to_text(balance))
+var balance = 0
+let arguments = args()
+for index in range(0, length(arguments)) {
+let number = to_text(index + 1)
+match parse(arguments[index]) {
+Option.None => {
+print("error: invalid transaction at " + number)
+exit(1)
+}
+Option.Some(transaction) => match transaction.kind {
+Kind.Deposit => {
+set balance = balance + transaction.amount
+}
+Kind.Withdraw => {
+if transaction.amount > balance {
+print("error: insufficient funds at transaction " + number)
+exit(1)
+}
+set balance = balance - transaction.amount
+}
+}
+}
+}
+print("balance: " + to_text(balance))
 }

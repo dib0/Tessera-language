@@ -11,225 +11,225 @@ import parser uses nothing
 import checker uses nothing
 
 type Gen {
-    paths: List[Text]
-    type_defs: List[checker.TypeDef]
-    function_name: Text
-    tmp: Int
-    take_var: Text
+paths: List[Text]
+type_defs: List[checker.TypeDef]
+function_name: Text
+tmp: Int
+take_var: Text
 }
 
 type Code {
-    gen: Gen
-    text: Text
+gen: Gen
+text: Text
 }
 
 type CodeList {
-    gen: Gen
-    texts: List[Text]
+gen: Gen
+texts: List[Text]
 }
 
 type Usage {
-    count: Int
-    has_jump_or_loop: Bool
+count: Int
+has_jump_or_loop: Bool
 }
 
 fn code(g: Gen, text: Text) -> Code = Code { gen: g, text: text }
 
 fn rust_type(ty: ast.Type) -> Text {
-    match ty {
-        .Int => "i64"
-        .Bool => "bool"
-        .Text => "Rc<String>"
-        .Unit => "()"
-        .Never => "()"
-        .Unknown => "()"
-        .List(element) => "Rc<Vec<" + rust_type(element) + ">>"
-        .Option(element) => "Option<" + rust_type(element) + ">"
-        .Result(value, error) => "Result<" + rust_type(value) + ", " + rust_type(error) + ">"
-        .Named(name) => "Rc<T_" + name + ">"
-    }
+match ty {
+.Int => "i64"
+.Bool => "bool"
+.Text => "Rc<String>"
+.Unit => "()"
+.Never => "()"
+.Unknown => "()"
+.List(element) => "Rc<Vec<" + rust_type(element) + ">>"
+.Option(element) => "Option<" + rust_type(element) + ">"
+.Result(value, error) => "Result<" + rust_type(value) + ", " + rust_type(error) + ">"
+.Named(name) => "Rc<T_" + name + ">"
+}
 }
 
 fn pad(indent: Int) -> Text = source.repeat_text("    ", indent)
 
 fn find_type_def(defs: List[checker.TypeDef], name: Text) -> Option[checker.TypeDef] {
-    for def in defs {
-        if def.name == name {
-            return .Some(def)
-        }
-    }
-    .None
+for def in defs {
+if def.name == name {
+return .Some(def)
+}
+}
+.None
 }
 
 fn definition_of(defs: List[checker.TypeDef], name: Text) -> Text {
-    match find_type_def(defs, name) {
-        .Some(def) => type_definition(def)
-        .None => fail("no type definition for `\(name)`")
-    }
+match find_type_def(defs, name) {
+.Some(def) => type_definition(def)
+.None => fail("no type definition for `\(name)`")
+}
 }
 
 note "Resolve a type expression the checker already validated."
 fn resolve_simple(te: ast.TypeExpr, defs: List[checker.TypeDef]) -> ast.Type {
-    match te.name {
-        "Int" => .Int
-        "Bool" => .Bool
-        "Text" => .Text
-        "Unit" => .Unit
-        "List" => if length(te.args) > 0 { .List(resolve_simple(te.args[0], defs)) } else { .List(.Unknown) }
-        "Option" => if length(te.args) > 0 { .Option(resolve_simple(te.args[0], defs)) } else { .Option(.Unknown) }
-        "Result" => if length(te.args) > 1 { .Result(resolve_simple(te.args[0], defs), resolve_simple(te.args[1], defs)) } else { .Result(.Unknown, .Unknown) }
-        _ => if find_type_def(defs, te.name) != .None { .Named(te.name) } else { .Unknown }
-    }
+match te.name {
+"Int" => .Int
+"Bool" => .Bool
+"Text" => .Text
+"Unit" => .Unit
+"List" => if length(te.args) > 0 { .List(resolve_simple(te.args[0], defs)) } else { .List(.Unknown) }
+"Option" => if length(te.args) > 0 { .Option(resolve_simple(te.args[0], defs)) } else { .Option(.Unknown) }
+"Result" => if length(te.args) > 1 { .Result(resolve_simple(te.args[0], defs), resolve_simple(te.args[1], defs)) } else { .Result(.Unknown, .Unknown) }
+_ => if find_type_def(defs, te.name) != .None { .Named(te.name) } else { .Unknown }
+}
 }
 
 fn replace_newlines(text: Text) -> Text {
-    var out: List[Int] = []
-    for c in code_points(text) {
-        set out = append(out, if c == 10 { 32 } else { c })
-    }
-    from_code_points(out)
+var out: List[Int] = []
+for c in code_points(text) {
+set out = append(out, if c == 10 { 32 } else { c })
+}
+from_code_points(out)
 }
 
 // ---------- program ----------
 
 fn type_definition(def: checker.TypeDef) -> Text {
-    if def.is_enum {
-        var out = "#[derive(Clone, PartialEq)]\nenum T_\(def.name) {\n"
-        for v in def.variants {
-            if length(v.fields) == 0 {
-                set out = "\(out)    V_\(v.name),\n"
-            } else {
-                var types: List[Text] = []
-                for f in v.fields {
-                    set types = append(types, rust_type(f.ty))
-                }
-                set out = "\(out)    V_\(v.name)(\(join(types, ", "))),\n"
-            }
-        }
-        return "\(out)}\n\n"
-    }
-    var out = "#[derive(Clone, PartialEq)]\nstruct T_\(def.name) {\n"
-    for f in def.fields {
-        set out = "\(out)    f_\(f.name): \(rust_type(f.ty)),\n"
-    }
-    "\(out)}\n\n"
+if def.is_enum {
+var out = "#[derive(Clone, PartialEq)]\nenum T_\(def.name) {\n"
+for v in def.variants {
+if length(v.fields) == 0 {
+set out = "\(out)    V_\(v.name),\n"
+} else {
+var types: List[Text] = []
+for f in v.fields {
+set types = append(types, rust_type(f.ty))
+}
+set out = "\(out)    V_\(v.name)(\(join(types, ", "))),\n"
+}
+}
+return "\(out)}\n\n"
+}
+var out = "#[derive(Clone, PartialEq)]\nstruct T_\(def.name) {\n"
+for f in def.fields {
+set out = "\(out)    f_\(f.name): \(rust_type(f.ty)),\n"
+}
+"\(out)}\n\n"
 }
 
 pub fn generate(program: checker.CheckedProgram, paths: List[Text], core: Text, ui: Text) -> Text {
-    var out = "// Generated by the Tessera compiler. Do not edit.\n\(core)"
-    if program.uses_ui {
-        set out = out + ui
-    }
-    set out = "\(out)\n"
-    if program.uses_ui {
-        set out = out + definition_of(program.type_defs, "WindowEvent")
-    }
-    for item in program.items {
-        match item {
-            .RecordItem(r) => {
-                set out = out + definition_of(program.type_defs, r.name)
-            }
-            .EnumItem(e) => {
-                set out = out + definition_of(program.type_defs, e.name)
-            }
-            .FunctionItem(_) => {}
-            .ImportItem(_) => {}
-        }
-    }
-    var g = Gen { paths: paths, type_defs: program.type_defs, function_name: "", tmp: 0, take_var: "" }
-    for item in program.items {
-        match item {
-            .FunctionItem(f) => {
-                let result = gen_function(g, f)
-                set g = result.gen
-                set out = "\(out)\(result.text)\n"
-            }
-            _ => {}
-        }
-    }
-    "\(out)fn main() {\n    t_run(f_main);\n}\n"
+var out = "// Generated by the Tessera compiler. Do not edit.\n\(core)"
+if program.uses_ui {
+set out = out + ui
+}
+set out = "\(out)\n"
+if program.uses_ui {
+set out = out + definition_of(program.type_defs, "WindowEvent")
+}
+for item in program.items {
+match item {
+.RecordItem(r) => {
+set out = out + definition_of(program.type_defs, r.name)
+}
+.EnumItem(e) => {
+set out = out + definition_of(program.type_defs, e.name)
+}
+.FunctionItem(_) => {}
+.ImportItem(_) => {}
+}
+}
+var g = Gen { paths: paths, type_defs: program.type_defs, function_name: "", tmp: 0, take_var: "" }
+for item in program.items {
+match item {
+.FunctionItem(f) => {
+let result = gen_function(g, f)
+set g = result.gen
+set out = "\(out)\(result.text)\n"
+}
+_ => {}
+}
+}
+"\(out)fn main() {\n    t_run(f_main);\n}\n"
 }
 
 fn gen_function(start: Gen, f: ast.Function) -> Code {
-    let g = start with { function_name: f.name, tmp: 0, take_var: "" }
-    var out = ""
-    for n in f.notes {
-        set out = "\(out)// note: \(replace_newlines(n.text))\n"
-    }
-    var params: List[Text] = []
-    for p in f.params {
-        set params = append(params, "v_\(p.name): \(rust_type(resolve_simple(p.type_expr, g.type_defs)))")
-    }
-    let ret = rust_type(resolve_simple(f.return_type, g.type_defs))
-    let body = match f.body.kind {
-        .BlockExpr(block) => gen_block(g, block, 0)
-        _ => {
-            let inner = gen_expr(g, f.body, 1)
-            code(inner.gen, "{\n    \(inner.text)\n}")
-        }
-    }
-    code(body.gen, "\(out)fn f_\(f.name)(\(join(params, ", "))) -> \(ret) \(body.text)\n")
+let g = start with { function_name: f.name, tmp: 0, take_var: "" }
+var out = ""
+for n in f.notes {
+set out = "\(out)// note: \(replace_newlines(n.text))\n"
+}
+var params: List[Text] = []
+for p in f.params {
+set params = append(params, "v_\(p.name): \(rust_type(resolve_simple(p.type_expr, g.type_defs)))")
+}
+let ret = rust_type(resolve_simple(f.return_type, g.type_defs))
+let body = match f.body.kind {
+.BlockExpr(block) => gen_block(g, block, 0)
+_ => {
+let inner = gen_expr(g, f.body, 1)
+code(inner.gen, "{\n    \(inner.text)\n}")
+}
+}
+code(body.gen, "\(out)fn f_\(f.name)(\(join(params, ", "))) -> \(ret) \(body.text)\n")
 }
 
 fn gen_block(start: Gen, block: ast.Block, indent: Int) -> Code {
-    var g = start
-    var out = "{\n"
-    for statement in block.statements {
-        let line = gen_statement(g, statement, indent + 1)
-        set g = line.gen
-        set out = "\(out)\(pad(indent + 1))\(line.text)\n"
-    }
-    match block.tail {
-        .Some(tail) => {
-            let result = gen_expr(g, tail, indent + 1)
-            set g = result.gen
-            set out = "\(out)\(pad(indent + 1))\(result.text)\n"
-        }
-        .None => {}
-    }
-    code(g, "\(out)\(pad(indent))}")
+var g = start
+var out = "{\n"
+for statement in block.statements {
+let line = gen_statement(g, statement, indent + 1)
+set g = line.gen
+set out = "\(out)\(pad(indent + 1))\(line.text)\n"
+}
+match block.tail {
+.Some(tail) => {
+let result = gen_expr(g, tail, indent + 1)
+set g = result.gen
+set out = "\(out)\(pad(indent + 1))\(result.text)\n"
+}
+.None => {}
+}
+code(g, "\(out)\(pad(indent))}")
 }
 
 fn gen_statement(g: Gen, statement: ast.Statement, indent: Int) -> Code {
-    match statement {
-        .Let(name, _, _, value, mutable) => {
-            let v = gen_expr(g, value, indent)
-            if name == "_" {
-                return code(v.gen, "let _ = \(v.text);")
-            }
-            let m = if mutable { "mut " } else { "" }
-            if value.ty == .Never {
-                return code(v.gen, "let \(m)v_\(name) = \(v.text);")
-            }
-            code(v.gen, "let \(m)v_\(name): \(rust_type(value.ty)) = \(v.text);")
-        }
-        .Set(name, _, value) => {
-            let usage = scan_expr(value, name)
-            let movable = match value.ty {
-                .Text => true
-                .List(_) => true
-                _ => false
-            }
-            let prepared = if movable and usage.count == 1 and not usage.has_jump_or_loop { g with { take_var: name } } else { g }
-            let v = gen_expr(prepared, value, indent)
-            code(v.gen with { take_var: "" }, "v_\(name) = \(v.text);")
-        }
-        .For(variable, _, iterable, body) => {
-            let it = gen_expr(g, iterable, indent)
-            let b = gen_block(it.gen, body, indent)
-            let binding = if variable == "_" { "_" } else { "v_\(variable)" }
-            code(b.gen, "for \(binding) in t_iter(\(it.text)) \(b.text)")
-        }
-        .While(condition, body) => {
-            let c = gen_expr(g, condition, indent)
-            let b = gen_block(c.gen, body, indent)
-            code(b.gen, "while \(c.text) \(b.text)")
-        }
-        .ExprStatement(expr) => {
-            let e = gen_expr(g, expr, indent)
-            code(e.gen, "\(e.text);")
-        }
-    }
+match statement {
+.Let(name, _, _, value, mutable) => {
+let v = gen_expr(g, value, indent)
+if name == "_" {
+return code(v.gen, "let _ = \(v.text);")
+}
+let m = if mutable { "mut " } else { "" }
+if value.ty == .Never {
+return code(v.gen, "let \(m)v_\(name) = \(v.text);")
+}
+code(v.gen, "let \(m)v_\(name): \(rust_type(value.ty)) = \(v.text);")
+}
+.Set(name, _, value) => {
+let usage = scan_expr(value, name)
+let movable = match value.ty {
+.Text => true
+.List(_) => true
+_ => false
+}
+let prepared = if movable and usage.count == 1 and not usage.has_jump_or_loop { g with { take_var: name } } else { g }
+let v = gen_expr(prepared, value, indent)
+code(v.gen with { take_var: "" }, "v_\(name) = \(v.text);")
+}
+.For(variable, _, iterable, body) => {
+let it = gen_expr(g, iterable, indent)
+let b = gen_block(it.gen, body, indent)
+let binding = if variable == "_" { "_" } else { "v_\(variable)" }
+code(b.gen, "for \(binding) in t_iter(\(it.text)) \(b.text)")
+}
+.While(condition, body) => {
+let c = gen_expr(g, condition, indent)
+let b = gen_block(c.gen, body, indent)
+code(b.gen, "while \(c.text) \(b.text)")
+}
+.ExprStatement(expr) => {
+let e = gen_expr(g, expr, indent)
+code(e.gen, "\(e.text);")
+}
+}
 }
 
 // ---------- move analysis ----------
@@ -237,338 +237,338 @@ fn gen_statement(g: Gen, statement: ast.Statement, indent: Int) -> Code {
 fn no_usage() -> Usage = Usage { count: 0, has_jump_or_loop: false }
 
 fn add_usage(a: Usage, b: Usage) -> Usage {
-    Usage { count: a.count + b.count, has_jump_or_loop: a.has_jump_or_loop or b.has_jump_or_loop }
+Usage { count: a.count + b.count, has_jump_or_loop: a.has_jump_or_loop or b.has_jump_or_loop }
 }
 
 fn with_jump(u: Usage) -> Usage = u with { has_jump_or_loop: true }
 
 fn scan_list(exprs: List[ast.Expr], name: Text) -> Usage {
-    var total = no_usage()
-    for e in exprs {
-        set total = add_usage(total, scan_expr(e, name))
-    }
-    total
+var total = no_usage()
+for e in exprs {
+set total = add_usage(total, scan_expr(e, name))
+}
+total
 }
 
 fn scan_block(block: ast.Block, name: Text) -> Usage {
-    var total = no_usage()
-    for statement in block.statements {
-        let part = match statement {
-            .Let(_, _, _, value, _) => scan_expr(value, name)
-            .Set(target, _, value) => {
-                let inner = scan_expr(value, name)
-                if target == name { inner with { count: inner.count + 2 } } else { inner }
-            }
-            .ExprStatement(expr) => scan_expr(expr, name)
-            .For(_, _, iterable, body) => with_jump(add_usage(scan_expr(iterable, name), scan_block(body, name)))
-            .While(condition, body) => with_jump(add_usage(scan_expr(condition, name), scan_block(body, name)))
-        }
-        set total = add_usage(total, part)
-    }
-    match block.tail {
-        .Some(tail) => add_usage(total, scan_expr(tail, name))
-        .None => total
-    }
+var total = no_usage()
+for statement in block.statements {
+let part = match statement {
+.Let(_, _, _, value, _) => scan_expr(value, name)
+.Set(target, _, value) => {
+let inner = scan_expr(value, name)
+if target == name { inner with { count: inner.count + 2 } } else { inner }
+}
+.ExprStatement(expr) => scan_expr(expr, name)
+.For(_, _, iterable, body) => with_jump(add_usage(scan_expr(iterable, name), scan_block(body, name)))
+.While(condition, body) => with_jump(add_usage(scan_expr(condition, name), scan_block(body, name)))
+}
+set total = add_usage(total, part)
+}
+match block.tail {
+.Some(tail) => add_usage(total, scan_expr(tail, name))
+.None => total
+}
 }
 
 fn scan_expr(e: ast.Expr, name: Text) -> Usage {
-    match e.kind {
-        .Name(n) => if n == name { Usage { count: 1, has_jump_or_loop: false } } else { no_usage() }
-        .ListLiteral(items) => scan_list(items, name)
-        .Call(_, _, args) => scan_list(args, name)
-        .VariantLiteral(_, _, _, args) => scan_list(args, name)
-        .Index(target, index) => add_usage(scan_expr(target, name), scan_expr(index, name))
-        .FieldAccess(target, _, _) => scan_expr(target, name)
-        .Unary(_, operand) => scan_expr(operand, name)
-        .Binary(_, _, left, right) => add_usage(scan_expr(left, name), scan_expr(right, name))
-        .If(condition, then_block, else_branch) => {
-            let both = add_usage(scan_expr(condition, name), scan_block(then_block, name))
-            match else_branch {
-                .Some(else_expr) => add_usage(both, scan_expr(else_expr, name))
-                .None => both
-            }
-        }
-        .BlockExpr(block) => scan_block(block, name)
-        .Match(scrutinee, arms) => {
-            var total = scan_expr(scrutinee, name)
-            for arm in arms {
-                set total = add_usage(total, scan_expr(arm.body, name))
-            }
-            total
-        }
-        .RecordUpdate(target, fields) => {
-            var total = scan_expr(target, name)
-            for f in fields {
-                set total = add_usage(total, scan_expr(f.value, name))
-            }
-            total
-        }
-        .RecordLiteral(_, _, fields) => {
-            var total = no_usage()
-            for f in fields {
-                set total = add_usage(total, scan_expr(f.value, name))
-            }
-            total
-        }
-        .Return(value) => match value {
-            .Some(v) => with_jump(scan_expr(v, name))
-            .None => with_jump(no_usage())
-        }
-        .Try(operand) => with_jump(scan_expr(operand, name))
-        .Break => with_jump(no_usage())
-        .Continue => with_jump(no_usage())
-        _ => no_usage()
-    }
+match e.kind {
+.Name(n) => if n == name { Usage { count: 1, has_jump_or_loop: false } } else { no_usage() }
+.ListLiteral(items) => scan_list(items, name)
+.Call(_, _, args) => scan_list(args, name)
+.VariantLiteral(_, _, _, args) => scan_list(args, name)
+.Index(target, index) => add_usage(scan_expr(target, name), scan_expr(index, name))
+.FieldAccess(target, _, _) => scan_expr(target, name)
+.Unary(_, operand) => scan_expr(operand, name)
+.Binary(_, _, left, right) => add_usage(scan_expr(left, name), scan_expr(right, name))
+.If(condition, then_block, else_branch) => {
+let both = add_usage(scan_expr(condition, name), scan_block(then_block, name))
+match else_branch {
+.Some(else_expr) => add_usage(both, scan_expr(else_expr, name))
+.None => both
+}
+}
+.BlockExpr(block) => scan_block(block, name)
+.Match(scrutinee, arms) => {
+var total = scan_expr(scrutinee, name)
+for arm in arms {
+set total = add_usage(total, scan_expr(arm.body, name))
+}
+total
+}
+.RecordUpdate(target, fields) => {
+var total = scan_expr(target, name)
+for f in fields {
+set total = add_usage(total, scan_expr(f.value, name))
+}
+total
+}
+.RecordLiteral(_, _, fields) => {
+var total = no_usage()
+for f in fields {
+set total = add_usage(total, scan_expr(f.value, name))
+}
+total
+}
+.Return(value) => match value {
+.Some(v) => with_jump(scan_expr(v, name))
+.None => with_jump(no_usage())
+}
+.Try(operand) => with_jump(scan_expr(operand, name))
+.Break => with_jump(no_usage())
+.Continue => with_jump(no_usage())
+_ => no_usage()
+}
 }
 
 // ---------- expressions ----------
 
 fn location(g: Gen, span: source.Span) -> Text {
-    source.rust_string("\(g.paths[span.file]):\(span.line):\(span.col) in function `\(g.function_name)`")
+source.rust_string("\(g.paths[span.file]):\(span.line):\(span.col) in function `\(g.function_name)`")
 }
 
 fn gen_list(start: Gen, exprs: List[ast.Expr], indent: Int) -> CodeList {
-    var g = start
-    var texts: List[Text] = []
-    for e in exprs {
-        let result = gen_expr(g, e, indent)
-        set g = result.gen
-        set texts = append(texts, result.text)
-    }
-    CodeList { gen: g, texts: texts }
+var g = start
+var texts: List[Text] = []
+for e in exprs {
+let result = gen_expr(g, e, indent)
+set g = result.gen
+set texts = append(texts, result.text)
+}
+CodeList { gen: g, texts: texts }
 }
 
 fn int_literal(value: Int) -> Text {
-    if value == parser.min_int() {
-        return "i64::MIN"
-    }
-    if value < 0 {
-        return "(\(value)i64)"
-    }
-    "\(value)i64"
+if value == parser.min_int() {
+return "i64::MIN"
+}
+if value < 0 {
+return "(\(value)i64)"
+}
+"\(value)i64"
 }
 
 fn gen_expr(g: Gen, e: ast.Expr, indent: Int) -> Code {
-    match e.kind {
-        .IntLiteral(value) => code(g, int_literal(value))
-        .BoolLiteral(value) => code(g, to_text(value))
-        .TextLiteral(value) => code(g, "t_text(\(source.rust_string(value)))")
-        .UnitLiteral => code(g, "()")
-        .Name(name) => {
-            if g.take_var == name {
-                return code(g with { take_var: "" }, "std::mem::take(&mut v_\(name))")
-            }
-            code(g, "v_\(name).clone()")
-        }
-        .ListLiteral(items) => {
-            if length(items) == 0 {
-                let element = match e.ty {
-                    .List(t) => rust_type(t)
-                    _ => "()"
-                }
-                return code(g, "Rc::new(Vec::<\(element)>::new())")
-            }
-            let parts = gen_list(g, items, indent)
-            code(parts.gen, "Rc::new(vec![\(join(parts.texts, ", "))])")
-        }
-        .Call(name, _, args) => gen_call(g, name, args, e.span, indent)
-        .Index(target, index) => {
-            let t = gen_expr(g, target, indent)
-            let i = gen_expr(t.gen, index, indent)
-            code(i.gen, "t_index(&\(t.text), \(i.text), \(location(g, e.span)))")
-        }
-        .FieldAccess(target, name, _) => {
-            let t = gen_expr(g, target, indent)
-            code(t.gen, "(\(t.text)).f_\(name).clone()")
-        }
-        .Unary(op, operand) => {
-            let o = gen_expr(g, operand, indent)
-            match op {
-                .Negate => code(o.gen, "t_neg(\(o.text), \(location(g, e.span)))")
-                .Not => code(o.gen, "(!\(o.text))")
-            }
-        }
-        .Binary(op, op_span, left, right) => {
-            let l = gen_expr(g, left, indent)
-            let r = gen_expr(l.gen, right, indent)
-            let loc = location(g, op_span)
-            let a = l.text
-            let b = r.text
-            let text = match op {
-                .Add => if e.ty == .Text { "t_concat(\(a), \(b))" } else { "t_add(\(a), \(b), \(loc))" }
-                .Subtract => "t_sub(" + a + ", " + b + ", " + loc + ")"
-                .Multiply => "t_mul(" + a + ", " + b + ", " + loc + ")"
-                .Divide => "t_div(" + a + ", " + b + ", " + loc + ")"
-                .Remainder => "t_rem(" + a + ", " + b + ", " + loc + ")"
-                .Equal => "(" + a + " == " + b + ")"
-                .NotEqual => "(" + a + " != " + b + ")"
-                .Less => "(" + a + " < " + b + ")"
-                .LessEqual => "(" + a + " <= " + b + ")"
-                .Greater => "(" + a + " > " + b + ")"
-                .GreaterEqual => "(" + a + " >= " + b + ")"
-                .And => "(" + a + " && " + b + ")"
-                .Or => "(" + a + " || " + b + ")"
-            }
-            code(r.gen, text)
-        }
-        .If(condition, then_block, else_branch) => {
-            let c = gen_expr(g, condition, indent)
-            let t = gen_block(c.gen, then_block, indent)
-            match else_branch {
-                .None => code(t.gen, "if \(c.text) \(t.text)")
-                .Some(else_expr) => {
-                    let el = gen_expr(t.gen, else_expr, indent)
-                    code(el.gen, "if \(c.text) \(t.text) else \(el.text)")
-                }
-            }
-        }
-        .BlockExpr(block) => gen_block(g, block, indent)
-        .Match(scrutinee, arms) => gen_match(g, scrutinee, arms, indent)
-        .RecordLiteral(type_name, _, fields) => {
-            var current = g
-            var parts: List[Text] = []
-            for f in fields {
-                let v = gen_expr(current, f.value, indent)
-                set current = v.gen
-                set parts = append(parts, "f_\(f.name): \(v.text)")
-            }
-            code(current, "Rc::new(T_\(type_name) { \(join(parts, ", ")) })")
-        }
-        .RecordUpdate(target, fields) => {
-            let t = gen_expr(g, target, indent)
-            var current = t.gen with { tmp: t.gen.tmp + 1 }
-            let tmp = "t\(current.tmp)"
-            var out = "{ let mut \(tmp) = Rc::unwrap_or_clone(\(t.text)); "
-            for f in fields {
-                let v = gen_expr(current, f.value, indent)
-                set current = v.gen
-                set out = "\(out)\(tmp).f_\(f.name) = \(v.text); "
-            }
-            code(current, "\(out)Rc::new(\(tmp)) }")
-        }
-        .VariantLiteral(type_name, variant, _, args) => match type_name {
-            "Option" => gen_option(g, e, variant, args, indent)
-            "Result" => {
-                let value = gen_expr(g, args[0], indent)
-                let constructor = if variant == "Ok" { "Ok" } else { "Err" }
-                let turbofish = match e.ty {
-                    .Result(ok_type, error_type) => "Result::<" + rust_type(ok_type) + ", " + rust_type(error_type) + ">"
-                    _ => "Result::<(), ()>"
-                }
-                code(value.gen, "\(turbofish)::\(constructor)(\(value.text))")
-            }
-            _ => gen_variant(g, type_name, variant, args, indent)
-        }
-        .Try(operand) => {
-            let value = gen_expr(g, operand, indent)
-            match operand.ty {
-                .Option(_) => code(value.gen, "match \(value.text) { Some(ok_value) => ok_value, None => return None }")
-                _ => code(value.gen, "match \(value.text) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) }")
-            }
-        }
-        .Return(value) => match value {
-            .Some(v) => {
-                let result = gen_expr(g, v, indent)
-                code(result.gen, "return \(result.text)")
-            }
-            .None => code(g, "return ()")
-        }
-        .Break => code(g, "break")
-        .Continue => code(g, "continue")
-    }
+match e.kind {
+.IntLiteral(value) => code(g, int_literal(value))
+.BoolLiteral(value) => code(g, to_text(value))
+.TextLiteral(value) => code(g, "t_text(\(source.rust_string(value)))")
+.UnitLiteral => code(g, "()")
+.Name(name) => {
+if g.take_var == name {
+return code(g with { take_var: "" }, "std::mem::take(&mut v_\(name))")
+}
+code(g, "v_\(name).clone()")
+}
+.ListLiteral(items) => {
+if length(items) == 0 {
+let element = match e.ty {
+.List(t) => rust_type(t)
+_ => "()"
+}
+return code(g, "Rc::new(Vec::<\(element)>::new())")
+}
+let parts = gen_list(g, items, indent)
+code(parts.gen, "Rc::new(vec![\(join(parts.texts, ", "))])")
+}
+.Call(name, _, args) => gen_call(g, name, args, e.span, indent)
+.Index(target, index) => {
+let t = gen_expr(g, target, indent)
+let i = gen_expr(t.gen, index, indent)
+code(i.gen, "t_index(&\(t.text), \(i.text), \(location(g, e.span)))")
+}
+.FieldAccess(target, name, _) => {
+let t = gen_expr(g, target, indent)
+code(t.gen, "(\(t.text)).f_\(name).clone()")
+}
+.Unary(op, operand) => {
+let o = gen_expr(g, operand, indent)
+match op {
+.Negate => code(o.gen, "t_neg(\(o.text), \(location(g, e.span)))")
+.Not => code(o.gen, "(!\(o.text))")
+}
+}
+.Binary(op, op_span, left, right) => {
+let l = gen_expr(g, left, indent)
+let r = gen_expr(l.gen, right, indent)
+let loc = location(g, op_span)
+let a = l.text
+let b = r.text
+let text = match op {
+.Add => if e.ty == .Text { "t_concat(\(a), \(b))" } else { "t_add(\(a), \(b), \(loc))" }
+.Subtract => "t_sub(" + a + ", " + b + ", " + loc + ")"
+.Multiply => "t_mul(" + a + ", " + b + ", " + loc + ")"
+.Divide => "t_div(" + a + ", " + b + ", " + loc + ")"
+.Remainder => "t_rem(" + a + ", " + b + ", " + loc + ")"
+.Equal => "(" + a + " == " + b + ")"
+.NotEqual => "(" + a + " != " + b + ")"
+.Less => "(" + a + " < " + b + ")"
+.LessEqual => "(" + a + " <= " + b + ")"
+.Greater => "(" + a + " > " + b + ")"
+.GreaterEqual => "(" + a + " >= " + b + ")"
+.And => "(" + a + " && " + b + ")"
+.Or => "(" + a + " || " + b + ")"
+}
+code(r.gen, text)
+}
+.If(condition, then_block, else_branch) => {
+let c = gen_expr(g, condition, indent)
+let t = gen_block(c.gen, then_block, indent)
+match else_branch {
+.None => code(t.gen, "if \(c.text) \(t.text)")
+.Some(else_expr) => {
+let el = gen_expr(t.gen, else_expr, indent)
+code(el.gen, "if \(c.text) \(t.text) else \(el.text)")
+}
+}
+}
+.BlockExpr(block) => gen_block(g, block, indent)
+.Match(scrutinee, arms) => gen_match(g, scrutinee, arms, indent)
+.RecordLiteral(type_name, _, fields) => {
+var current = g
+var parts: List[Text] = []
+for f in fields {
+let v = gen_expr(current, f.value, indent)
+set current = v.gen
+set parts = append(parts, "f_\(f.name): \(v.text)")
+}
+code(current, "Rc::new(T_\(type_name) { \(join(parts, ", ")) })")
+}
+.RecordUpdate(target, fields) => {
+let t = gen_expr(g, target, indent)
+var current = t.gen with { tmp: t.gen.tmp + 1 }
+let tmp = "t\(current.tmp)"
+var out = "{ let mut \(tmp) = Rc::unwrap_or_clone(\(t.text)); "
+for f in fields {
+let v = gen_expr(current, f.value, indent)
+set current = v.gen
+set out = "\(out)\(tmp).f_\(f.name) = \(v.text); "
+}
+code(current, "\(out)Rc::new(\(tmp)) }")
+}
+.VariantLiteral(type_name, variant, _, args) => match type_name {
+"Option" => gen_option(g, e, variant, args, indent)
+"Result" => {
+let value = gen_expr(g, args[0], indent)
+let constructor = if variant == "Ok" { "Ok" } else { "Err" }
+let turbofish = match e.ty {
+.Result(ok_type, error_type) => "Result::<" + rust_type(ok_type) + ", " + rust_type(error_type) + ">"
+_ => "Result::<(), ()>"
+}
+code(value.gen, "\(turbofish)::\(constructor)(\(value.text))")
+}
+_ => gen_variant(g, type_name, variant, args, indent)
+}
+.Try(operand) => {
+let value = gen_expr(g, operand, indent)
+match operand.ty {
+.Option(_) => code(value.gen, "match \(value.text) { Some(ok_value) => ok_value, None => return None }")
+_ => code(value.gen, "match \(value.text) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) }")
+}
+}
+.Return(value) => match value {
+.Some(v) => {
+let result = gen_expr(g, v, indent)
+code(result.gen, "return \(result.text)")
+}
+.None => code(g, "return ()")
+}
+.Break => code(g, "break")
+.Continue => code(g, "continue")
+}
 }
 
 note "Rust names of the variants of the built-in `Option` and `Result`."
 fn rust_variant(variant: Text) -> Text = if variant == "Error" { "Err" } else { variant }
 
 fn gen_option(g: Gen, e: ast.Expr, variant: Text, args: List[ast.Expr], indent: Int) -> Code {
-    if variant == "None" {
-        let element = match e.ty {
-            .Option(t) => rust_type(t)
-            _ => "()"
-        }
-        return code(g, "Option::<\(element)>::None")
-    }
-    let value = gen_expr(g, args[0], indent)
-    code(value.gen, "Some(\(value.text))")
+if variant == "None" {
+let element = match e.ty {
+.Option(t) => rust_type(t)
+_ => "()"
+}
+return code(g, "Option::<\(element)>::None")
+}
+let value = gen_expr(g, args[0], indent)
+code(value.gen, "Some(\(value.text))")
 }
 
 fn gen_variant(g: Gen, type_name: Text, variant: Text, args: List[ast.Expr], indent: Int) -> Code {
-    if type_name == "" {
-        return fail("internal compiler error: unresolved `.\(variant)` shorthand reached code generation")
-    }
-    if length(args) == 0 {
-        return code(g, "Rc::new(T_\(type_name)::V_\(variant))")
-    }
-    let parts = gen_list(g, args, indent)
-    code(parts.gen, "Rc::new(T_\(type_name)::V_\(variant)(\(join(parts.texts, ", "))))")
+if type_name == "" {
+return fail("internal compiler error: unresolved `.\(variant)` shorthand reached code generation")
+}
+if length(args) == 0 {
+return code(g, "Rc::new(T_\(type_name)::V_\(variant))")
+}
+let parts = gen_list(g, args, indent)
+code(parts.gen, "Rc::new(T_\(type_name)::V_\(variant)(\(join(parts.texts, ", "))))")
 }
 
 fn variant_has_fields(defs: List[checker.TypeDef], type_name: Text, variant: Text) -> Bool {
-    match find_type_def(defs, type_name) {
-        .Some(def) => {
-            for v in def.variants {
-                if v.name == variant {
-                    return length(v.fields) > 0
-                }
-            }
-            false
-        }
-        .None => false
-    }
+match find_type_def(defs, type_name) {
+.Some(def) => {
+for v in def.variants {
+if v.name == variant {
+return length(v.fields) > 0
+}
+}
+false
+}
+.None => false
+}
 }
 
 fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) -> Code {
-    let s = gen_expr(start, scrutinee, indent)
-    var g = s.gen
-    let head = match scrutinee.ty {
-        .Named(_) => "match &*(" + s.text + ")"
-        .Option(_) => "match &(" + s.text + ")"
-        .Result(_, _) => "match &(" + s.text + ")"
-        .Text => "match (" + s.text + ").as_str()"
-        _ => "match " + s.text
-    }
-    var out = "\(head) {\n"
-    for arm in arms {
-        var prefix = ""
-        var pattern = "_"
-        match arm.pattern.kind {
-            .Wildcard => {}
-            .IntPattern(value) => {
-                set pattern = if value == parser.min_int() { "i64::MIN" } else { to_text(value) }
-            }
-            .TextPattern(value) => {
-                set pattern = source.rust_string(value)
-            }
-            .BoolPattern(value) => {
-                set pattern = to_text(value)
-            }
-            .VariantPattern(type_name, variant, bindings) => {
-                let is_option = type_name == "Option" or type_name == "Result"
-                if (is_option and variant != "None") or variant_has_fields(g.type_defs, type_name, variant) {
-                    var parts: List[Text] = []
-                    for b in bindings {
-                        if b.name == "_" {
-                            set parts = append(parts, "_")
-                        } else {
-                            set g = g with { tmp: g.tmp + 1 }
-                            let tmp = "t\(g.tmp)"
-                            set prefix = "\(prefix)let v_\(b.name) = \(tmp).clone(); "
-                            set parts = append(parts, tmp)
-                        }
-                    }
-                    let constructor = if is_option { rust_variant(variant) } else { "T_\(type_name)::V_\(variant)" }
-                    set pattern = "\(constructor)(\(join(parts, ", ")))"
-                } else {
-                    set pattern = if is_option { variant } else { "T_\(type_name)::V_\(variant)" }
-                }
-            }
-        }
-        let body = gen_expr(g, arm.body, indent + 1)
-        set g = body.gen
-        set out = "\(out)\(pad(indent + 1))\(pattern) => { \(prefix)\(body.text) }\n"
-    }
-    code(g, "\(out)\(pad(indent))}")
+let s = gen_expr(start, scrutinee, indent)
+var g = s.gen
+let head = match scrutinee.ty {
+.Named(_) => "match &*(" + s.text + ")"
+.Option(_) => "match &(" + s.text + ")"
+.Result(_, _) => "match &(" + s.text + ")"
+.Text => "match (" + s.text + ").as_str()"
+_ => "match " + s.text
+}
+var out = "\(head) {\n"
+for arm in arms {
+var prefix = ""
+var pattern = "_"
+match arm.pattern.kind {
+.Wildcard => {}
+.IntPattern(value) => {
+set pattern = if value == parser.min_int() { "i64::MIN" } else { to_text(value) }
+}
+.TextPattern(value) => {
+set pattern = source.rust_string(value)
+}
+.BoolPattern(value) => {
+set pattern = to_text(value)
+}
+.VariantPattern(type_name, variant, bindings) => {
+let is_option = type_name == "Option" or type_name == "Result"
+if (is_option and variant != "None") or variant_has_fields(g.type_defs, type_name, variant) {
+var parts: List[Text] = []
+for b in bindings {
+if b.name == "_" {
+set parts = append(parts, "_")
+} else {
+set g = g with { tmp: g.tmp + 1 }
+let tmp = "t\(g.tmp)"
+set prefix = "\(prefix)let v_\(b.name) = \(tmp).clone(); "
+set parts = append(parts, tmp)
+}
+}
+let constructor = if is_option { rust_variant(variant) } else { "T_\(type_name)::V_\(variant)" }
+set pattern = "\(constructor)(\(join(parts, ", ")))"
+} else {
+set pattern = if is_option { variant } else { "T_\(type_name)::V_\(variant)" }
+}
+}
+}
+let body = gen_expr(g, arm.body, indent + 1)
+set g = body.gen
+set out = "\(out)\(pad(indent + 1))\(pattern) => { \(prefix)\(body.text) }\n"
+}
+code(g, "\(out)\(pad(indent))}")
 }
 
 fn call_with_location(name: Text, args: List[Text], loc: Text) -> Text = "\(name)(\(join(append(args, loc), ", ")))"
@@ -576,47 +576,47 @@ fn call_with_location(name: Text, args: List[Text], loc: Text) -> Text = "\(name
 fn call_plain(name: Text, args: List[Text]) -> Text = "\(name)(\(join(args, ", ")))"
 
 fn gen_call(g: Gen, name: Text, args: List[ast.Expr], span: source.Span, indent: Int) -> Code {
-    let generated = gen_list(g, args, indent)
-    let a = generated.texts
-    let loc = location(g, span)
-    let text = match name {
-        "print" => call_plain("t_print", a)
-        "print_error" => call_plain("t_print_error", a)
-        "to_text" => match args[0].ty {
-            .Bool => call_plain("t_bool_to_text", a)
-            .Text => "(" + a[0] + ")"
-            _ => call_plain("t_int_to_text", a)
-        }
-        "length" => if args[0].ty == .Text { "t_text_length(&\(a[0]))" } else { "t_list_length(&\(a[0]))" }
-        "append" => call_plain("t_append", a)
-        "concat" => call_plain("t_concat_lists", a)
-        "slice" => call_with_location("t_slice", a, loc)
-        "replace_at" => call_with_location("t_replace_at", a, loc)
-        "value_or" => call_plain("t_value_or", a)
-        "range" => call_with_location("t_range", a, loc)
-        "code_points" => "t_code_points(&" + a[0] + ")"
-        "from_code_point" => call_with_location("t_from_code_point", a, loc)
-        "from_code_points" => "t_from_code_points(&" + a[0] + ", " + loc + ")"
-        "join" => "t_join(&" + a[0] + ", &" + a[1] + ")"
-        "read_file" => call_with_location("t_read_file", a, loc)
-        "write_file" => call_with_location("t_write_file", a, loc)
-        "args" => call_with_location("t_args", a, loc)
-        "exit" => call_with_location("t_exit", a, loc)
-        "fail" => call_with_location("t_user_fail", a, loc)
-        "file_exists" => call_plain("t_file_exists", a)
-        "environment_variable" => call_plain("t_environment_variable", a)
-        "run_process" => call_plain("t_run_process", a)
-        "rgb" => call_with_location("t_rgb", a, loc)
-        "open_window" => call_with_location("t_open_window", a, loc)
-        "fill_rectangle" => call_with_location("t_fill_rectangle", a, loc)
-        "draw_line" => call_with_location("t_draw_line", a, loc)
-        "draw_circle" => call_with_location("t_draw_circle", a, loc)
-        "fill_circle" => call_with_location("t_fill_circle", a, loc)
-        "draw_text" => call_with_location("t_draw_text", a, loc)
-        "text_width" => call_with_location("t_text_width", a, loc)
-        "present" => call_with_location("t_present", a, loc)
-        "next_event" => call_with_location("t_next_event", a, loc)
-        _ => call_plain("f_\(name)", a)
-    }
-    code(generated.gen, text)
+let generated = gen_list(g, args, indent)
+let a = generated.texts
+let loc = location(g, span)
+let text = match name {
+"print" => call_plain("t_print", a)
+"print_error" => call_plain("t_print_error", a)
+"to_text" => match args[0].ty {
+.Bool => call_plain("t_bool_to_text", a)
+.Text => "(" + a[0] + ")"
+_ => call_plain("t_int_to_text", a)
+}
+"length" => if args[0].ty == .Text { "t_text_length(&\(a[0]))" } else { "t_list_length(&\(a[0]))" }
+"append" => call_plain("t_append", a)
+"concat" => call_plain("t_concat_lists", a)
+"slice" => call_with_location("t_slice", a, loc)
+"replace_at" => call_with_location("t_replace_at", a, loc)
+"value_or" => call_plain("t_value_or", a)
+"range" => call_with_location("t_range", a, loc)
+"code_points" => "t_code_points(&" + a[0] + ")"
+"from_code_point" => call_with_location("t_from_code_point", a, loc)
+"from_code_points" => "t_from_code_points(&" + a[0] + ", " + loc + ")"
+"join" => "t_join(&" + a[0] + ", &" + a[1] + ")"
+"read_file" => call_with_location("t_read_file", a, loc)
+"write_file" => call_with_location("t_write_file", a, loc)
+"args" => call_with_location("t_args", a, loc)
+"exit" => call_with_location("t_exit", a, loc)
+"fail" => call_with_location("t_user_fail", a, loc)
+"file_exists" => call_plain("t_file_exists", a)
+"environment_variable" => call_plain("t_environment_variable", a)
+"run_process" => call_plain("t_run_process", a)
+"rgb" => call_with_location("t_rgb", a, loc)
+"open_window" => call_with_location("t_open_window", a, loc)
+"fill_rectangle" => call_with_location("t_fill_rectangle", a, loc)
+"draw_line" => call_with_location("t_draw_line", a, loc)
+"draw_circle" => call_with_location("t_draw_circle", a, loc)
+"fill_circle" => call_with_location("t_fill_circle", a, loc)
+"draw_text" => call_with_location("t_draw_text", a, loc)
+"text_width" => call_with_location("t_text_width", a, loc)
+"present" => call_with_location("t_present", a, loc)
+"next_event" => call_with_location("t_next_event", a, loc)
+_ => call_plain("f_\(name)", a)
+}
+code(generated.gen, text)
 }

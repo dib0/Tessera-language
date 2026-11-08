@@ -1,34 +1,34 @@
 fn cells(row: Text) -> List[Text] {
-    var out: List[Text] = []
-    var current: List[Int] = []
-    for code in code_points(row) {
-        if code == 44 {
-            set out = append(out, from_code_points(current))
-            set current = []
-        } else {
-            set current = append(current, code)
-        }
-    }
-    append(out, from_code_points(current))
+var out: List[Text] = []
+var current: List[Int] = []
+for code in code_points(row) {
+if code == 44 {
+set out = append(out, from_code_points(current))
+set current = []
+} else {
+set current = append(current, code)
+}
+}
+append(out, from_code_points(current))
 }
 
 fn main() -> Unit uses io, env {
-    var rows: List[List[Text]] = []
-    for argument in args() {
-        set rows = append(rows, cells(argument))
-    }
-    let width = length(rows[0])
-    for row in rows {
-        if length(row) != width {
-            print("error: ragged matrix")
-            exit(1)
-        }
-    }
-    for column in range(0, width) {
-        var parts: List[Text] = []
-        for row in rows {
-            set parts = append(parts, row[column])
-        }
-        print(join(parts, ","))
-    }
+var rows: List[List[Text]] = []
+for argument in args() {
+set rows = append(rows, cells(argument))
+}
+let width = length(rows[0])
+for row in rows {
+if length(row) != width {
+print("error: ragged matrix")
+exit(1)
+}
+}
+for column in range(0, width) {
+var parts: List[Text] = []
+for row in rows {
+set parts = append(parts, row[column])
+}
+print(join(parts, ","))
+}
 }

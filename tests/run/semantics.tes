@@ -1,129 +1,129 @@
 // Covers the language semantics; expected output is in semantics.out.
 
 type Pair {
-    first: Int
-    second: Text
+first: Int
+second: Text
 }
 
 enum Shape {
-    Circle(radius: Int)
-    Rectangle(width: Int, height: Int)
-    Empty
+Circle(radius: Int)
+Rectangle(width: Int, height: Int)
+Empty
 }
 
 fn area(shape: Shape) -> Int {
-    match shape {
-        Shape.Circle(radius) => 3 * radius * radius
-        Shape.Rectangle(width, height) => width * height
-        Shape.Empty => 0
-    }
+match shape {
+Shape.Circle(radius) => 3 * radius * radius
+Shape.Rectangle(width, height) => width * height
+Shape.Empty => 0
+}
 }
 
 fn classify(n: Int) -> Text {
-    match n {
-        0 => "zero"
-        1 => "one"
-        -1 => "minus one"
-        _ => if n < 0 { "negative" } else { "many" }
-    }
+match n {
+0 => "zero"
+1 => "one"
+-1 => "minus one"
+_ => if n < 0 { "negative" } else { "many" }
+}
 }
 
 fn first_negative(values: List[Int]) -> Int {
-    for value in values {
-        if value < 0 {
-            return value
-        }
-    }
-    0
+for value in values {
+if value < 0 {
+return value
+}
+}
+0
 }
 
 fn sum_until_stop(values: List[Int]) -> Int {
-    var total = 0
-    for value in values {
-        if value == 0 {
-            continue
-        }
-        if value > 100 {
-            break
-        }
-        set total = total + value
-    }
-    total
+var total = 0
+for value in values {
+if value == 0 {
+continue
+}
+if value > 100 {
+break
+}
+set total = total + value
+}
+total
 }
 
 fn word(flag: Bool) -> Text {
-    match flag {
-        true => "yes"
-        false => "no"
-    }
+match flag {
+true => "yes"
+false => "no"
+}
 }
 
 fn greeting(language: Text) -> Text {
-    match language {
-        "nl" => "Hallo"
-        "en" => "Hello"
-        _ => "?"
-    }
+match language {
+"nl" => "Hallo"
+"en" => "Hello"
+_ => "?"
+}
 }
 
 fn main() -> Unit uses io, fs {
-    // arithmetic: truncation toward zero, precedence
-    print(to_text(7 / 2) + " " + to_text(-7 / 2) + " " + to_text(-7 % 2) + " " + to_text(2 + 3 * 4))
-    print(to_text(-9223372036854775808))
-    // text
-    let name = "Zoë"
-    print(name + " has " + to_text(length(name)) + " characters")
-    print(to_text(code_points("A€")[1]) + " " + from_code_point(8364) + " " + from_code_points([72, 105]))
-    print(join(["a", "b", "c"], ", ") + " | escapes: tab[\t] quote[\"] unicode[\u{263A}]")
-    // lists
-    let numbers = [1, 2, 3, 4, 5]
-    print(to_text(length(numbers)) + " " + to_text(numbers[0]) + " " + to_text(numbers[4]))
-    let middle = slice(numbers, 1, 4)
-    print(to_text(length(middle)) + " " + to_text(middle[0]))
-    let changed = replace_at(numbers, 0, 100)
-    print(to_text(changed[0]) + " original still " + to_text(numbers[0]))
-    let joined = concat(numbers, [6, 7])
-    print(to_text(length(joined)))
-    var built: List[Text] = []
-    for i in range(0, 3) {
-        set built = append(built, "item" + to_text(i))
-    }
-    print(join(built, ","))
-    var text = ""
-    for code in code_points("abc") {
-        set text = text + from_code_point(code - 32)
-    }
-    print(text)
-    // equality is structural
-    print(to_text([1, 2] == [1, 2]) + " " + to_text(Pair { first: 1, second: "x" } == Pair { first: 1, second: "x" }))
-    print(to_text(Shape.Circle(1) == Shape.Circle(2)) + " " + to_text(Shape.Empty == Shape.Empty))
-    // records and enums
-    let pair = Pair { second: "two", first: 2 }
-    print(to_text(pair.first) + " " + pair.second)
-    print(to_text(area(Shape.Circle(2))) + " " + to_text(area(Shape.Rectangle(3, 4))) + " " + to_text(area(Shape.Empty)))
-    // match on Int, Text, Bool
-    print(classify(0) + ", " + classify(1) + ", " + classify(-1) + ", " + classify(-5) + ", " + classify(9))
-    print(word(true) + " " + word(false) + " " + greeting("nl") + " " + greeting("fr"))
-    // control flow
-    print(to_text(first_negative([3, 4, -2, -8])) + " " + to_text(first_negative([1])))
-    print(to_text(sum_until_stop([1, 0, 2, 200, 5])))
-    var countdown = 3
-    while countdown > 0 {
-        set countdown = countdown - 1
-    }
-    print("countdown " + to_text(countdown))
-    // short-circuit: the right side would fail
-    let safe = length(numbers) > 10 and numbers[10] == 0
-    print(to_text(safe) + " " + to_text(true or numbers[10] == 0))
-    // block expression
-    let area_value = {
-        let width = 4
-        let height = 5
-        width * height
-    }
-    print(to_text(area_value))
-    // files
-    write_file("/tmp/tessera-semantics-test.txt", "written\n")
-    print(read_file("/tmp/tessera-semantics-test.txt") + "read back")
-    let _ = area(Shape.Empty)
+// arithmetic: truncation toward zero, precedence
+print(to_text(7 / 2) + " " + to_text(-7 / 2) + " " + to_text(-7 % 2) + " " + to_text(2 + 3 * 4))
+print(to_text(-9223372036854775808))
+// text
+let name = "Zoë"
+print(name + " has " + to_text(length(name)) + " characters")
+print(to_text(code_points("A€")[1]) + " " + from_code_point(8364) + " " + from_code_points([72, 105]))
+print(join(["a", "b", "c"], ", ") + " | escapes: tab[\t] quote[\"] unicode[\u{263A}]")
+// lists
+let numbers = [1, 2, 3, 4, 5]
+print(to_text(length(numbers)) + " " + to_text(numbers[0]) + " " + to_text(numbers[4]))
+let middle = slice(numbers, 1, 4)
+print(to_text(length(middle)) + " " + to_text(middle[0]))
+let changed = replace_at(numbers, 0, 100)
+print(to_text(changed[0]) + " original still " + to_text(numbers[0]))
+let joined = concat(numbers, [6, 7])
+print(to_text(length(joined)))
+var built: List[Text] = []
+for i in range(0, 3) {
+set built = append(built, "item" + to_text(i))
+}
+print(join(built, ","))
+var text = ""
+for code in code_points("abc") {
+set text = text + from_code_point(code - 32)
+}
+print(text)
+// equality is structural
+print(to_text([1, 2] == [1, 2]) + " " + to_text(Pair { first: 1, second: "x" } == Pair { first: 1, second: "x" }))
+print(to_text(Shape.Circle(1) == Shape.Circle(2)) + " " + to_text(Shape.Empty == Shape.Empty))
+// records and enums
+let pair = Pair { second: "two", first: 2 }
+print(to_text(pair.first) + " " + pair.second)
+print(to_text(area(Shape.Circle(2))) + " " + to_text(area(Shape.Rectangle(3, 4))) + " " + to_text(area(Shape.Empty)))
+// match on Int, Text, Bool
+print(classify(0) + ", " + classify(1) + ", " + classify(-1) + ", " + classify(-5) + ", " + classify(9))
+print(word(true) + " " + word(false) + " " + greeting("nl") + " " + greeting("fr"))
+// control flow
+print(to_text(first_negative([3, 4, -2, -8])) + " " + to_text(first_negative([1])))
+print(to_text(sum_until_stop([1, 0, 2, 200, 5])))
+var countdown = 3
+while countdown > 0 {
+set countdown = countdown - 1
+}
+print("countdown " + to_text(countdown))
+// short-circuit: the right side would fail
+let safe = length(numbers) > 10 and numbers[10] == 0
+print(to_text(safe) + " " + to_text(true or numbers[10] == 0))
+// block expression
+let area_value = {
+let width = 4
+let height = 5
+width * height
+}
+print(to_text(area_value))
+// files
+write_file("/tmp/tessera-semantics-test.txt", "written\n")
+print(read_file("/tmp/tessera-semantics-test.txt") + "read back")
+let _ = area(Shape.Empty)
 }

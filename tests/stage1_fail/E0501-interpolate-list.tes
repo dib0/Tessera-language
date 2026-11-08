@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let items = [1, 2]
-    print("items: \(items)")
+let items = [1, 2]
+print("items: \(items)")
 }

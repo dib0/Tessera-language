@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    var count = 1
-    print(to_text(count))
+var count = 1
+print(to_text(count))
 }

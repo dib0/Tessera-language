@@ -1,9 +1,9 @@
 // A statement arm is `Unit`, so it cannot be mixed with arms that produce a value.
 fn pick(x: Int) -> Int {
-    var y = 0
-    match x {
-        0 => set y = 1
-        _ => 2
-    }
+var y = 0
+match x {
+0 => set y = 1
+_ => 2
+}
 }
 fn main() -> Unit uses io = print(to_text(pick(1)))

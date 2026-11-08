@@ -1,7 +1,7 @@
 fn name(n: Int) -> Text {
-    match n {
-        _ => "many"
-        1 => "one"
-    }
+match n {
+_ => "many"
+1 => "one"
+}
 }
 fn main() -> Unit uses io = print(name(1))

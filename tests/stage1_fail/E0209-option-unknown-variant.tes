@@ -1,4 +1,4 @@
 fn main() -> Unit uses io {
-    let value: Option[Int] = Option.Nothing
-    print(to_text(value_or(value, 0)))
+let value: Option[Int] = Option.Nothing
+print(to_text(value_or(value, 0)))
 }

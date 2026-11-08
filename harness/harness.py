@@ -53,14 +53,62 @@ def load_variants() -> dict[str, Variant]:
     return {name: Variant(name=name, **spec) for name, spec in raw.items()}
 
 
+OPEN, CLOSE = "{([", "})]"
+
+def brackets(line: str) -> list[bool]:
+    """The brackets of a line in order (True = opening), ignoring text literals, interpolation and comments."""
+    found, i, n = [], 0, len(line)
+    modes = []  # stack: "text", or an int = paren depth inside an interpolation
+    while i < n:
+        ch = line[i]
+        if modes and modes[-1] == "text":
+            if ch == "\\" and i + 1 < n and line[i + 1] == "(":
+                modes.append(0); i += 2; continue
+            if ch == "\\":
+                i += 2; continue
+            if ch == '"':
+                modes.pop()
+            i += 1; continue
+        if ch == '"':
+            modes.append("text")
+        elif ch == "/" and line[i:i + 2] == "//":
+            break
+        elif modes and ch == "(":
+            modes[-1] += 1
+        elif modes and ch == ")":
+            if modes[-1] == 0:
+                modes.pop()
+            else:
+                modes[-1] -= 1
+        elif ch in OPEN:
+            found.append(True)
+        elif ch in CLOSE:
+            found.append(False)
+        i += 1
+    return found
+
 def reindent(code: str, width: int) -> str:
-    """Re-indent Tessera code written with 4-space indentation to `width` spaces per level."""
+    """Indent Tessera code by nesting: one level per line that has a bracket still open, and a
+    line that starts with a closing bracket at the level of the line that opened it.
+    Existing indentation is ignored, so any input width works."""
+    open_lines: list[int] = []  # line number of each unclosed bracket
+    levels: list[int] = []      # indentation level of each line
     out = []
-    for line in code.split("\n"):
-        stripped = line.lstrip(" ")
-        spaces = len(line) - len(stripped)
-        level, rest = divmod(spaces, 4)
-        out.append(" " * (level * width + (rest if width else 0)) + stripped)
+    for number, line in enumerate(code.split("\n")):
+        text = line.lstrip(" ")
+        marks = brackets(text)
+        leading = len(text) - len(text.lstrip("})]"))
+        opener = None
+        for _ in range(min(leading, len(open_lines))):
+            opener = open_lines.pop()
+        level = levels[opener] if opener is not None else len(set(open_lines))
+        levels.append(level)
+        out.append(" " * (level * width) + text if text else "")
+        for opening in marks[leading:]:
+            if opening:
+                open_lines.append(number)
+            elif open_lines:
+                open_lines.pop()
     return "\n".join(out)
 
 
@@ -429,17 +477,17 @@ def corpus(name: str) -> list[str]:
 
 def tokens(args: argparse.Namespace) -> None:
     model = Model(args.model, "medium")
-    widths = [4, 2, 0]
+    widths = [0, 2, 4]
     print(f"Tokens counted with {args.model} via the token counting API (a constant message overhead of a few tokens per file is included).\n")
-    print("| Corpus | Files | Characters (4 spaces) | " + " | ".join(f"Tokens, indent {w}" for w in widths) + " |")
+    print("| Corpus | Files | Characters (no indentation) | " + " | ".join(f"Tokens, indent {w}" for w in widths) + " |")
     print("|---|---|---|" + "---|" * len(widths))
     for name in args.corpora:
         files = corpus(name)
         texts = [open(p).read() for p in files]
         counts = [sum(model.count_tokens(reindent(t, w)) for t in texts) for w in widths]
         base = counts[0]
-        cells = [f"{c:,} ({(c - base) / base * 100:+.1f}%)" if w != 4 else f"{c:,}" for c, w in zip(counts, widths)]
-        print(f"| {name} | {len(files)} | {sum(len(t) for t in texts):,} | " + " | ".join(cells) + " |")
+        cells = [f"{c:,} ({(c - base) / base * 100:+.1f}%)" if w != 0 else f"{c:,}" for c, w in zip(counts, widths)]
+        print(f"| {name} | {len(files)} | {sum(len(reindent(t, 0)) for t in texts):,} | " + " | ".join(cells) + " |")
     if args.compare:
         print("\n| Directory | Characters | Tokens | Change |\n|---|---|---|---|")
         first = None
