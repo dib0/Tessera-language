@@ -224,14 +224,17 @@ class Model:
         self.effort = effort
 
     def answer(self, system: str, messages: list[dict]) -> tuple[str, dict]:
-        response = self.client.messages.create(
+        # Streaming: the SDK refuses non-streaming requests with a max_tokens this large.
+        with self.client.messages.stream(
             model=self.name,
             max_tokens=32000,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
             thinking={"type": "adaptive"},
             output_config={"effort": self.effort},
-        )
+        ) as stream:
+            response = stream.get_final_message()
+            request_id = stream.request_id
         text = "".join(block.text for block in response.content if block.type == "text")
         usage = response.usage
         return text, {
@@ -241,7 +244,7 @@ class Model:
             "cache_read_input_tokens": usage.cache_read_input_tokens or 0,
             "stop_reason": response.stop_reason,
             "model": response.model,
-            "request_id": response._request_id,
+            "request_id": request_id,
         }
 
     def count_tokens(self, text: str) -> int:
