@@ -1,0 +1,52 @@
+// `for _ in` for an unused loop variable, and a single statement as a match arm (draft 0.9, stage 1 only).
+
+enum Op {
+    Push(value: Int)
+    Add
+    Drop
+}
+
+fn run(ops: List[Op]) -> List[Int] {
+    var stack: List[Int] = []
+    for op in ops {
+        let n = length(stack)
+        match op {
+            Op.Push(value) => set stack = append(stack, value)
+            Op.Add => set stack = append(slice(stack, 0, n - 2), stack[n - 2] + stack[n - 1])
+            Op.Drop => set stack = slice(stack, 0, n - 1)
+        }
+    }
+    stack
+}
+
+fn repeat(text: Text, times: Int) -> Text {
+    var out = ""
+    for _ in range(0, times) {
+        set out = out + text
+    }
+    out
+}
+
+fn main() -> Unit uses io {
+    let stack = run([Op.Push(2), Op.Push(3), Op.Add, Op.Push(9), Op.Drop])
+    print(to_text(stack[0]))
+    print(repeat("ab", 3))
+    var count = 0
+    for _ in range(0, 2) {
+        for _ in range(0, 3) {
+            set count = count + 1
+        }
+    }
+    print(to_text(count))
+    let found: Option[Int] = Option.Some(2)
+    match found {
+        Option.Some(times) => for _ in range(0, times) {
+            print("hit")
+        }
+        Option.None => print("none")
+    }
+    match count {
+        6 => let _ = repeat("x", 1)
+        _ => print("unexpected")
+    }
+}

@@ -1358,7 +1358,9 @@ fn check_statement(c: Checker, statement: ast.Statement) -> CheckedStatement {
                 }
             }
             let mark = length(after.locals)
-            set after = declare(after, variable, variable_span, element, false, "loop variable")
+            if variable != "_" {
+                set after = declare(after, variable, variable_span, element, false, "loop variable")
+            }
             set after = after with { loop_depth: after.loop_depth + 1 }
             let body_result = check_loop_body(after, body, "for")
             set after = body_result.checker with { loop_depth: body_result.checker.loop_depth - 1 }

@@ -1,0 +1,6 @@
+// `_` is not a value.
+fn main() -> Unit uses io {
+    for _ in range(0, 2) {
+        print(to_text(_))
+    }
+}

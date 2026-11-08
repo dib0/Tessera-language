@@ -217,7 +217,8 @@ fn gen_statement(g: Gen, statement: ast.Statement, indent: Int) -> Code {
         .For(variable, _, iterable, body) => {
             let it = gen_expr(g, iterable, indent)
             let b = gen_block(it.gen, body, indent)
-            code(b.gen, "for v_\(variable) in t_iter(\(it.text)) \(b.text)")
+            let binding = if variable == "_" { "_" } else { "v_\(variable)" }
+            code(b.gen, "for \(binding) in t_iter(\(it.text)) \(b.text)")
         }
         .While(condition, body) => {
             let c = gen_expr(g, condition, indent)

@@ -19,13 +19,14 @@ fn main() -> Unit uses io, env {
 - Comments start with `//`. There are no block comments.
 - Statements end at the end of a line. No semicolons. A line continues only if it ends with an operator, `=`, `,`, `(`, `[` or `{`, or inside open `(` or `[`.
 - Blocks use braces. `else` must be on the same line as the `}` before it: `} else {`.
-- Tabs are not allowed; indent with spaces.
+- Indentation has no meaning. Tabs are not allowed.
 
 ## Names
 
 - Functions, parameters, variables, fields: `snake_case` (enforced).
 - Types and enum variants: `PascalCase` (enforced).
-- ASCII letters, digits and `_` only.
+- ASCII letters, digits and `_` only. Names start with a letter.
+- `_` alone marks a binding that is not used: `let _ = f()`, `for _ in range(0, n)`, `Type.Variant(_, y)`. It cannot be read; `_x` is not a valid name.
 - Keywords: `fn type enum let var set if else match for in while return break continue note uses and or not true false import pub with try`.
 
 ## Types
@@ -141,10 +142,21 @@ fn area(shape: Shape) -> Int {
         Shape.Empty => 0
     }
 }
+
+fn total_area(shapes: List[Shape]) -> Int {
+    var total = 0
+    for shape in shapes {
+        match shape {
+            Shape.Empty => continue
+            _ => set total = total + area(shape)
+        }
+    }
+    total
+}
 ```
 
 - Variants are always written with their type: `Shape.Circle(2)`, `Shape.Empty`.
-- `match` works on enums, `Option`, `Result`, `Int`, `Text` and `Bool`. One arm per line: `pattern => expression` (use a block `{ ... }` for several statements).
+- `match` works on enums, `Option`, `Result`, `Int`, `Text` and `Bool`. One arm per line: `pattern => expression`, or one statement such as `pattern => set total = total + 1`. Use a block `{ ... }` for several statements. Statement arms make the match `Unit`.
 - Patterns: `_`, a literal (`0`, `-1`, `"text"`, `true`), or `Type.Variant(binding, _)`. Patterns do not nest.
 - A match must be exhaustive: every enum variant (or a final `_`); `Int` and `Text` need `_`.
 - Enums may be recursive (`Node(left: Tree, right: Tree)`).

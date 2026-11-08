@@ -639,7 +639,7 @@ fn tokenize_range(codes: List[Int], start: Int, end: Int, file: Int, first_line:
             continue
         }
         if code == 95 {
-            set diagnostics = append(diagnostics, source.error("E0103", here, "names must start with a letter"))
+            set diagnostics = append(diagnostics, source.error_help("E0103", here, "names must start with a letter", "for an unused binding write `_` alone, e.g. `for _ in range(0, n)`"))
             set index = index + 1
             set col = col + 1
             while index < count and (source.is_alphanumeric(codes[index]) or codes[index] == 95) {

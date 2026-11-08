@@ -532,6 +532,14 @@ fn parse_block(start: Parser) -> BlockResult {
     BlockResult { parser: p, block: ast.Block { statements: statements, tail: tail, span: source.span_to(open_span, close_span) } }
 }
 
+note "A loop variable is a name or `_` (unused)."
+fn loop_variable(p: Parser) -> NameResult {
+    if at(p, .Underscore) {
+        return NameResult { parser: advance(p), name: "_", span: current_span(p) }
+    }
+    identifier(p, "a loop variable name or `_`")
+}
+
 fn dummy_statement(p: Parser) -> StatementResult = StatementResult { parser: p, statement: .ExprStatement(dummy_expr(p)) }
 
 fn parse_statement(p: Parser) -> StatementResult {
@@ -572,7 +580,7 @@ fn parse_statement(p: Parser) -> StatementResult {
         return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, value.expr) }
     }
     if kind == .For {
-        let variable = identifier(advance(p), "a loop variable name")
+        let variable = loop_variable(advance(p))
         let iterable = parse_expr(expect(variable.parser, .In), false)
         if iterable.parser.failed {
             return dummy_statement(iterable.parser)
@@ -913,6 +921,7 @@ fn parse_primary(p: Parser, allow_record: Bool) -> ExprResult {
         .Dot => parse_shorthand_variant(p)
         .Continue => expr_result(advance(p), .Continue, start)
         .Ident => parse_name(p, t, allow_record)
+        .Underscore => failed_expr(fail_parse(p, source.error_help("E0110", start, "`_` cannot be used as a value", "`_` marks a binding that is not used; give it a name to use it")))
         _ => failed_expr(unexpected(p, "an expression"))
     }
 }
@@ -1100,7 +1109,7 @@ fn parse_match(p: Parser) -> ExprResult {
             break
         }
         let pattern = parse_pattern(q)
-        let body = parse_expr(expect(pattern.parser, .FatArrow), true)
+        let body = parse_arm_body(expect(pattern.parser, .FatArrow))
         if body.parser.failed {
             return body
         }
@@ -1112,6 +1121,24 @@ fn parse_match(p: Parser) -> ExprResult {
     }
     let close = current_span(q)
     expr_result(advance(q), .Match(scrutinee.expr, arms), source.span_to(start, close))
+}
+
+note "An arm body is an expression, or one statement (`set`, `let`, `for`, `while`) that becomes a `Unit` block."
+fn parse_arm_body(p: Parser) -> ExprResult {
+    if p.failed {
+        return failed_expr(p)
+    }
+    let kind = peek(p)
+    if kind != .Set and kind != .Let and kind != .Var and kind != .For and kind != .While {
+        return parse_expr(p, true)
+    }
+    let start = current_span(p)
+    let statement = parse_statement(p)
+    if statement.parser.failed {
+        return failed_expr(statement.parser)
+    }
+    let span = source.span_to(start, previous_span(statement.parser))
+    expr_result(statement.parser, .BlockExpr(ast.Block { statements: [statement.statement], tail: .None, span: span }), span)
 }
 
 fn pattern_result(p: Parser, kind: ast.PatternKind, start: source.Span) -> PatternResult {

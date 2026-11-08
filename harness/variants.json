@@ -1,8 +1,8 @@
 {
-  "baseline": {"indent": 4},
+  "baseline": {"indent": 0},
   "indent-2": {"indent": 2},
-  "indent-0": {"indent": 0},
-  "shorthand": {"indent": 4, "features": ["shorthand"]},
-  "interpolation": {"indent": 4, "features": ["interpolation"]},
+  "indent-4": {"indent": 4},
+  "shorthand": {"indent": 0, "features": ["shorthand"]},
+  "interpolation": {"indent": 0, "features": ["interpolation"]},
   "compact": {"indent": 0, "features": ["shorthand", "interpolation"]}
 }
