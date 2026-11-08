@@ -1,0 +1,5 @@
+// Map keys are Int or Text.
+fn main() -> Unit uses io {
+let m: Map[Bool, Int] = [:]
+print("\(length(m))")
+}

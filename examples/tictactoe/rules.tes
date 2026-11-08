@@ -18,7 +18,7 @@ outcome: Outcome
 }
 
 note "The eight ways to get three in a row, as board indexes (row by row, 0 to 8)."
-pub fn lines() -> List[List[Int]] {
+pub fn winning_lines() -> List[List[Int]] {
 [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
 }
 
@@ -28,7 +28,7 @@ Game { board: board, outcome: Outcome.Playing }
 }
 
 fn outcome_of(board: List[Mark]) -> Outcome {
-let all_lines = lines()
+let all_lines = winning_lines()
 for index in range(0, length(all_lines)) {
 let line = all_lines[index]
 let first = board[line[0]]

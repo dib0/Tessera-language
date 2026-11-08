@@ -1,0 +1,2 @@
+// `handle` must take an http.Request and return an http.Response.
+fn handle(path: Text) -> Text = path

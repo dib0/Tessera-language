@@ -1,0 +1,5 @@
+// An empty map needs its key and value types from context.
+fn main() -> Unit uses io {
+let m = [:]
+print("\(length(m))")
+}

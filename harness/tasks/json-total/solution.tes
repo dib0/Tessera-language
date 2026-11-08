@@ -1,0 +1,31 @@
+import std/json
+
+fn two_decimals(value: Decimal) -> Text {
+let parts = split(to_text(round(value, 2)), ".")
+let fraction = if length(parts) > 1 { parts[1] } else { "" }
+"\(parts[0]).\(pad_right(fraction, 2, "0"))"
+}
+
+fn main() -> Unit uses io, env {
+let arguments = args()
+if length(arguments) != 1 {
+exit_with(1, "error: invalid JSON")
+}
+let document = json.parse(arguments[0]) else exit_with(1, "error: invalid JSON")
+let items = match document {
+.Array(values) => values
+_ => exit_with(1, "error: invalid JSON")
+}
+var total = 0.0
+for index in range(0, length(items)) {
+let item = items[index]
+let problem = "error: invalid item \(index + 1)"
+let _ = json.text_field(item, "name") else exit_with(1, problem)
+let price_value = json.field(item, "price") else exit_with(1, problem)
+let price = json.as_decimal(price_value) else exit_with(1, problem)
+let quantity = json.int_field(item, "quantity") else exit_with(1, problem)
+set total += price * decimal(quantity)
+}
+print("items: \(length(items))")
+print("total: \(two_decimals(total))")
+}

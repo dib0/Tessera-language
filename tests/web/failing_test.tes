@@ -1,0 +1,9 @@
+// `tessera1 test` reports a failing test and exits with code 1.
+
+test "passes" {
+assert(length("abc") == 3)
+}
+
+test "fails" {
+assert(1 + 1 == 3)
+}

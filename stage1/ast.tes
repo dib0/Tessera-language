@@ -14,6 +14,11 @@ List(element: Type)
 Option(element: Type)
 Result(value: Type, error: Type)
 Named(name: Text)
+Map(key: Type, value: Type)
+Bytes
+Decimal
+Database
+Function(params: List[Type], result: Type, effects: List[Text])
 }
 
 pub type Note {
@@ -76,6 +81,11 @@ VariantLiteral(type_name: Text, variant: Text, variant_span: source.Span, args: 
 Return(value: Option[Expr])
 Break
 Continue
+DecimalLiteral(digits: Text)
+MapLiteral(keys: List[Expr], values: List[Expr])
+FunctionRef(name: Text)
+CallValue(callee: Expr, args: List[Expr])
+OrElse(value: Expr, otherwise: Expr)
 }
 
 pub type FieldInit {
@@ -187,6 +197,7 @@ FunctionItem(function: Function)
 RecordItem(record: RecordDecl)
 EnumItem(decl: EnumDecl)
 ImportItem(import_decl: Import)
+TestItem(name: Text, span: source.Span, body: Expr)
 }
 
 note "A module is one file, or for the entry module all files given on the command line. `prefix` makes its names unique in generated code; it is empty for the entry module."
@@ -223,6 +234,18 @@ match ty {
 .Option(element) => "Option[" + type_text(element) + "]"
 .Result(value, error) => "Result[" + type_text(value) + ", " + type_text(error) + "]"
 .Named(name) => display_name(name)
+.Map(key, value) => "Map[" + type_text(key) + ", " + type_text(value) + "]"
+.Bytes => "Bytes"
+.Decimal => "Decimal"
+.Database => "Database"
+.Function(params, result, effects) => {
+var names: List[Text] = []
+for p in params {
+set names = append(names, type_text(p))
+}
+let effect_text = if length(effects) == 0 { "" } else { " uses " + join(effects, ", ") }
+"fn(" + join(names, ", ") + ") -> " + type_text(result) + effect_text
+}
 }
 }
 

@@ -1,0 +1,5 @@
+// The else part of `let ... else` must stop.
+fn main() -> Unit uses io {
+let n = parse_int("4") else 0
+print("\(n)")
+}

@@ -1,0 +1,7 @@
+// A web application cannot print: standard output belongs to the server.
+import std/http
+
+fn handle(request: http.Request) -> http.Response uses io {
+print(request.path)
+http.text(200, "ok")
+}

@@ -1,0 +1,21 @@
+fn order_key(entry: Entry) -> Text = pad_left(to_text(1000000 - entry.count), 7, "0") + entry.word
+
+type Entry {
+word: Text
+count: Int
+}
+
+fn main() -> Unit uses io, env {
+var counts: Map[Text, Int] = [:]
+for word in args() {
+set counts = put(counts, word, value_or(get(counts, word), 0) + 1)
+}
+var entries: List[Entry] = []
+for word in keys(counts) {
+set entries += [Entry { word: word, count: value_or(get(counts, word), 0) }]
+}
+let sorted = sort_by(entries, order_key)
+for entry in slice(sorted, 0, if length(sorted) < 3 { length(sorted) } else { 3 }) {
+print("\(entry.word) \(entry.count)")
+}
+}

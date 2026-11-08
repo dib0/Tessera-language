@@ -1,0 +1,238 @@
+// std/http: requests, responses and helpers for web applications (draft 0.13).
+//
+// A web application is a program whose entry file has, instead of `main`:
+//     fn handle(request: http.Request) -> http.Response uses ...
+// The same program runs as CGI, as an HTTP server, as a FastCGI server, or inside nginx,
+// Apache and IIS; see hosts/README.md.
+
+import std/url
+
+pub type Header {
+name: Text
+value: Text
+}
+
+pub type Request {
+method: Text
+path: Text
+raw_path: Text
+query: Map[Text, Text]
+raw_query: Text
+headers: Map[Text, Text]
+body: Bytes
+remote_address: Text
+}
+
+pub type Response {
+status: Int
+headers: List[Header]
+body: Bytes
+}
+
+// ---------- reading requests ----------
+
+note "A request header by name (case-insensitive)."
+pub fn header(request: Request, name: Text) -> Option[Text] = get(request.headers, to_lower(name))
+
+note "The body as text; empty when it is not valid UTF-8."
+pub fn text_body(request: Request) -> Text = value_or(from_bytes(request.body), "")
+
+note "Fields of an `application/x-www-form-urlencoded` body (an HTML form)."
+pub fn form(request: Request) -> Map[Text, Text] = url.parse_query(text_body(request))
+
+pub fn cookies(request: Request) -> Map[Text, Text] {
+var result: Map[Text, Text] = [:]
+let line = header(request, "cookie") else return result
+for part in split(line, ";") {
+let pair = trim(part)
+let position = index_of(pair, "=") else continue
+let name = slice_text(pair, 0, position)
+if not contains(result, name) {
+set result = put(result, name, slice_text(pair, position + 1, length(pair)))
+}
+}
+result
+}
+
+pub fn cookie(request: Request, name: Text) -> Option[Text] = get(cookies(request), name)
+
+note "Matches a path against a pattern such as `/items/:id`; the result maps parameter names to decoded segments."
+pub fn match_path(pattern: Text, path: Text) -> Option[Map[Text, Text]] {
+let wanted = split(pattern, "/")
+let actual = split(path, "/")
+if length(wanted) != length(actual) {
+return .None
+}
+var parameters: Map[Text, Text] = [:]
+for index in range(0, length(wanted)) {
+if starts_with(wanted[index], ":") {
+let value = url.percent_decode(actual[index]) else return .None
+set parameters = put(parameters, slice_text(wanted[index], 1, length(wanted[index])), value)
+} else if wanted[index] != actual[index] {
+return .None
+}
+}
+.Some(parameters)
+}
+
+// ---------- building responses ----------
+
+fn security_headers() -> List[Header] = [Header { name: "x-content-type-options", value: "nosniff" }, Header { name: "referrer-policy", value: "same-origin" }]
+
+pub fn response(status: Int, content_type: Text, body: Text) -> Response {
+Response { status: status, headers: security_headers() + [Header { name: "content-type", value: content_type }], body: to_bytes(body) }
+}
+
+pub fn text(status: Int, body: Text) -> Response = response(status, "text/plain; charset=utf-8", body)
+
+note "HTML with a restrictive Content-Security-Policy and framing forbidden; escape user input with `html.escape`."
+pub fn html(status: Int, body: Text) -> Response {
+let base = response(status, "text/html; charset=utf-8", body)
+base with { headers: base.headers + [Header { name: "content-security-policy", value: "default-src 'self'; frame-ancestors 'none'" }, Header { name: "x-frame-options", value: "DENY" }] }
+}
+
+pub fn json(status: Int, body: Text) -> Response = response(status, "application/json", body)
+
+pub fn bytes_response(status: Int, content_type: Text, body: Bytes) -> Response {
+Response { status: status, headers: security_headers() + [Header { name: "content-type", value: content_type }], body: body }
+}
+
+note "303 See Other: after a form post, the browser follows with a GET."
+pub fn redirect(location: Text) -> Response = text(303, "") with { headers: security_headers() + [Header { name: "location", value: location }] }
+
+pub fn not_found() -> Response = text(404, "not found\n")
+
+pub fn with_header(r: Response, name: Text, value: Text) -> Response {
+let lower = to_lower(name)
+var kept: List[Header] = []
+for h in r.headers {
+if h.name != lower {
+set kept += [h]
+}
+}
+r with { headers: kept + [Header { name: lower, value: value }] }
+}
+
+note "Adds a cookie with safe defaults: HttpOnly, Secure, SameSite=Lax, path `/`. `max_age` in seconds; 0 deletes the cookie."
+pub fn with_cookie(r: Response, name: Text, value: Text, max_age: Int) -> Response {
+r with { headers: r.headers + [Header { name: "set-cookie", value: "\(name)=\(value); Max-Age=\(max_age); Path=/; HttpOnly; Secure; SameSite=Lax" }] }
+}
+
+// ---------- signed values, sessions and CSRF tokens ----------
+
+fn signature(secret: Text, value: Text) -> Text {
+replace(replace(replace(base64_encode(hmac_sha256(to_bytes(secret), to_bytes(value))), "+", "-"), "/", "_"), "=", "")
+}
+
+note "`value.signature`: tamper-proof (not secret) text for cookies, with an HMAC-SHA-256 under `secret`."
+pub fn sign(secret: Text, value: Text) -> Text = "\(value).\(signature(secret, value))"
+
+pub fn verify(secret: Text, signed: Text) -> Option[Text] {
+let parts = split(signed, ".")
+if length(parts) < 2 {
+return .None
+}
+let value = join(slice(parts, 0, length(parts) - 1), ".")
+let given = parts[length(parts) - 1]
+if equal_constant_time(to_bytes(signature(secret, value)), to_bytes(given)) { .Some(value) } else { .None }
+}
+
+note "A CSRF token bound to the session; put it in forms and check it with `check_csrf` on every state-changing request."
+pub fn csrf_token(secret: Text, session_id: Text) -> Text = signature(secret, "csrf:\(session_id)")
+
+pub fn check_csrf(secret: Text, session_id: Text, token: Text) -> Bool = equal_constant_time(to_bytes(csrf_token(secret, session_id)), to_bytes(token))
+
+// ---------- HTTP client (plain HTTP; effect `net`) ----------
+
+pub type ClientResponse {
+status: Int
+headers: Map[Text, Text]
+body: Bytes
+}
+
+fn find_header_end(data: Bytes) -> Option[Int] {
+if length(data) < 4 {
+return .None
+}
+for index in range(0, length(data) - 3) {
+if data[index] == 13 and data[index + 1] == 10 and data[index + 2] == 13 and data[index + 3] == 10 {
+return .Some(index)
+}
+}
+.None
+}
+
+pub fn fetch(method: Text, address: Text, headers: List[Header], body: Bytes) -> Result[ClientResponse, Text] uses net {
+var lines: List[Text] = []
+for h in headers {
+set lines += ["\(h.name): \(h.value)"]
+}
+let raw = try net_request(method, address, lines, body)
+let end = find_header_end(raw) else return .Error("malformed response")
+let head = value_or(from_bytes(slice(raw, 0, end)), "")
+let head_lines = split(head, "\u{D}\n")
+let status_parts = split(head_lines[0], " ")
+let status = if length(status_parts) > 1 { value_or(parse_int(status_parts[1]), 0) } else { 0 }
+var found: Map[Text, Text] = [:]
+for line in slice(head_lines, 1, length(head_lines)) {
+let position = index_of(line, ":") else continue
+set found = put(found, to_lower(trim(slice_text(line, 0, position))), trim(slice_text(line, position + 1, length(line))))
+}
+.Ok(ClientResponse { status: status, headers: found, body: slice(raw, end + 4, length(raw)) })
+}
+
+pub fn get_text(address: Text) -> Result[Text, Text] uses net {
+let r = try fetch("GET", address, [], to_bytes(""))
+.Ok(value_or(from_bytes(r.body), ""))
+}
+
+// ---------- used by the compiler's host glue; not needed in applications ----------
+
+pub fn from_raw(method: Text, raw_path: Text, raw_query: Text, remote: Text, names: List[Text], values: List[Text], body: Bytes) -> Request {
+var headers: Map[Text, Text] = [:]
+for index in range(0, length(names)) {
+let name = to_lower(names[index])
+let joined = match get(headers, name) {
+.Some(earlier) => if name == "cookie" { "\(earlier); \(values[index])" } else { "\(earlier), \(values[index])" }
+.None => values[index]
+}
+set headers = put(headers, name, joined)
+}
+Request { method: to_upper(method), path: value_or(url.percent_decode(raw_path), raw_path), raw_path: raw_path, query: url.parse_query(raw_query), raw_query: raw_query, headers: headers, body: body, remote_address: remote }
+}
+
+pub fn status_of(r: Response) -> Int = r.status
+
+pub fn header_names_of(r: Response) -> List[Text] {
+var out: List[Text] = []
+for h in r.headers {
+set out += [h.name]
+}
+out
+}
+
+pub fn header_values_of(r: Response) -> List[Text] {
+var out: List[Text] = []
+for h in r.headers {
+set out += [h.value]
+}
+out
+}
+
+pub fn body_of(r: Response) -> Bytes = r.body
+
+note "Builds a request for tests of `handle`: `http.request(\"GET\", \"/items?id=4\", \"\")`."
+pub fn request(method: Text, target: Text, body: Text) -> Request {
+let position = index_of(target, "?")
+let raw_path = match position {
+.Some(p) => slice_text(target, 0, p)
+.None => target
+}
+let raw_query = match position {
+.Some(p) => slice_text(target, p + 1, length(target))
+.None => ""
+}
+from_raw(method, raw_path, raw_query, "127.0.0.1", [], [], to_bytes(body))
+}
+
+pub fn response_text(r: Response) -> Text = value_or(from_bytes(r.body), "")

@@ -141,7 +141,7 @@ def system_prompt(variant: Variant) -> str:
         "and runs your program and reports compiler errors or failing tests back to you.\n\n"
         "Rules for every answer:\n"
         "- Reply with the complete program in a single ```tessera code block. Text outside the block is ignored.\n"
-        "- The program is one file with a `main` function. It may only use the effects `io` and `env`.\n"
+        "- The program is one file with a `main` function, or `handle` when the task asks for a web application. Its entry function may only use the effects `io` and `env` (a web application: none).\n"
         f"- {indent_rule(variant.indent)}\n"
         "- Output must match the task exactly, including spacing and line breaks.\n\n"
         "<tessera_reference>\n" + render_reference(variant) + "\n</tessera_reference>"
@@ -210,10 +210,21 @@ def extract_code(answer: str) -> str | None:
 
 
 def main_effects(code: str) -> list[str]:
-    match = re.search(r"fn\s+main\s*\(\s*\)\s*->\s*Unit(?:\s+uses\s+([a-z_,\s]+?))?\s*(?:=|\{)", code)
-    if not match or not match.group(1):
-        return []
-    return [e.strip() for e in match.group(1).split(",") if e.strip()]
+    """Effects declared by the entry function: `main`, or `handle` for web applications."""
+    found: list[str] = []
+    for pattern in (r"fn\s+main\s*\(\s*\)\s*->\s*Unit(?:\s+uses\s+([a-z_,\s]+?))?\s*(?:=|\{)",
+                    r"fn\s+handle\s*\([^)]*\)\s*->\s*[\w.]+(?:\s+uses\s+([a-z_,\s]+?))?\s*(?:=|\{)"):
+        match = re.search(pattern, code)
+        if match and match.group(1):
+            found += [e.strip() for e in match.group(1).split(",") if e.strip()]
+    return found
+
+
+def web_view(stdout: str) -> str:
+    """For web tasks the `request` test host prints status line, headers, a blank line and the body;
+    only the status line and the body are compared, so any correct choice of headers passes."""
+    head, separator, body = stdout.partition("\n\n")
+    return head.split("\n")[0] + "\n\n" + body if separator else stdout
 
 
 @dataclass
@@ -248,6 +259,8 @@ def check_answer(code: str | None, task: Task, workdir: str) -> Check:
             stderr = run.stderr
         except subprocess.TimeoutExpired:
             stdout, exit_code, stderr = "", None, f"(no result: the program ran longer than {RUN_TIMEOUT} seconds)"
+        if task.kind == "web":
+            stdout = web_view(stdout)
         # Standard error is only compared for tests that specify it (error cases).
         stderr_wrong = "stderr" in test and stderr != test["stderr"]
         if stdout != test["stdout"] or exit_code != test["exit"] or stderr_wrong:

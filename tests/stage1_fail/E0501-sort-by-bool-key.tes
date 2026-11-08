@@ -1,0 +1,6 @@
+// sort_by needs a key function returning Int, Text or Decimal.
+fn is_big(n: Int) -> Bool = n > 10
+fn main() -> Unit uses io {
+let sorted = sort_by([3, 1], is_big)
+print("\(length(sorted))")
+}

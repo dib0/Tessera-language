@@ -263,7 +263,7 @@ fn main() -> Unit uses io, env {
 """)
 
 task("word-count", "write", """
-Write a program that counts words. Every command-line argument is one word. Words are compared case-insensitively (only ASCII letters change case) and reported in lowercase. Print one line per distinct word, in order of first appearance, formatted as `word: count`.
+Write a program that counts words. Every command-line argument is one word. Words are compared case-insensitively and reported in lowercase. Print one line per distinct word, in order of first appearance, formatted as `word: count`.
 """, [t(["the", "cat", "The", "hat", "THE", "cat"], "the: 3\ncat: 2\nhat: 1\n"), t(["One"], "one: 1\n")], """
 fn lowercase(word: Text) -> Text {
     var out: List[Int] = []

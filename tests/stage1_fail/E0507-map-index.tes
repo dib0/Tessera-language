@@ -1,0 +1,5 @@
+// A map is read with get, not with [...].
+fn main() -> Unit uses io {
+let m = ["a": 1]
+print("\(m["a"])")
+}

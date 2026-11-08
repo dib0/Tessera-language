@@ -1,0 +1,53 @@
+// A web application (draft 0.13): run by compiler/tests/stage1.rs through the `request`, CGI and library hosts.
+
+import std/http
+import std/json
+import std/html
+
+note "Items are kept in SQLite; the database path comes from the environment."
+fn handle(request: http.Request) -> http.Response uses db, env, log, time {
+let route = http.match_path("/items/:id", request.path)
+if request.path == "/" {
+return http.html(200, "<h1>Hello \(html.escape(value_or(get(request.query, "name"), "world")))</h1>")
+}
+if request.path == "/items" and request.method == "POST" {
+let db = open_database() else return http.text(500, "no database\n")
+let name = value_or(get(http.form(request), "name"), "")
+if trim(name) == "" {
+return http.text(400, "name is required\n")
+}
+let _ = db_execute(db, "INSERT INTO items (name) VALUES (?1)", [name]) else return http.text(500, "insert failed\n")
+log("info", "added \(name)")
+return http.redirect("/items")
+}
+if request.path == "/items" {
+let db = open_database() else return http.text(500, "no database\n")
+let rows = db_query(db, "SELECT id, name FROM items ORDER BY id", []) else return http.text(500, "query failed\n")
+var items: List[json.Json] = []
+for row in rows {
+set items += [json.Json.Object(["id": json.Json.String(value_or(get(row, "id"), "")), "name": json.Json.String(value_or(get(row, "name"), ""))])]
+}
+return http.json(200, json.encode(.Array(items)))
+}
+match route {
+.Some(parameters) => http.text(200, "item \(value_or(get(parameters, "id"), "?")) at \(format_time(now()))\n")
+.None => if request.path == "/fail" { http.text(200, "\(1 / length(request.raw_query))") } else { http.not_found() }
+}
+}
+
+fn open_database() -> Option[Database] uses db, env {
+let path = environment_variable("APP_DB")
+let db = db_open(if path == "" { ":memory:" } else { path }) else return .None
+let _ = db_execute(db, "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)", []) else return .None
+.Some(db)
+}
+
+test "home page escapes the name" {
+let r = handle(http.request("GET", "/?name=<b>", ""))
+assert(r.status == 200)
+assert(contains(http.response_text(r), "&lt;b&gt;"))
+}
+
+test "unknown paths are 404" {
+assert(handle(http.request("GET", "/nope", "")).status == 404)
+}

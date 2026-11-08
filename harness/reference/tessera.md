@@ -41,8 +41,12 @@ print("Hello, \(name)")
 | `List[T]` | Immutable list, literal `[1, 2, 3]`; `[]` needs a known type |
 | `Option[T]` | `.Some(value)` or `.None` |
 | `Result[T, E]` | `.Ok(value)` or `.Error(error)` |
+| `Map[K, V]` | Immutable map sorted by key (`K` is `Int` or `Text`), literal `["a": 1, "b": 2]`; `[:]` is empty and needs a known type |
+| `Decimal` | Exact number with 9 decimal places, literal `19.99`; overflow is a runtime error |
+| `Bytes` | Immutable bytes, from `to_bytes(text)` |
+| `fn(A, B) -> C` | A function value, e.g. `fn(Int) -> Text`; with effects `fn(Text) -> Unit uses io` |
 
-There are no implicit conversions, and conditions must be `Bool`.
+There are no implicit conversions, and conditions must be `Bool`. `Decimal` and `Int` do not mix: `price * decimal(quantity)`.
 
 Inside a text literal, `\(expression)` inserts the value of an `Int`, `Bool` or `Text` expression: `"found \(count) items in \(name)"`. The expression may contain calls and text literals: `"\(join(parts, ", "))"`. Braces `{}` in text have no special meaning. Prefer interpolation over `+` with `to_text`.
 
@@ -65,7 +69,8 @@ let squared = square(x)
 |---|---|
 | `io` | `print`, `print_error`, `exit_with` |
 | `env` | `args`, `exit`, `exit_with`, `environment_variable` |
-| `fs` | `read_file`, `write_file`, `file_exists` |
+| `fs` | `read_file`, `write_file`, `file_exists`, `read_text`, `write_text`, `list_directory`, `create_directory`, `remove_file` |
+| `time`, `random`, `log`, `db`, `net` | `now`/`sleep`; `random_int`/`random_bytes`; `log`; SQLite through `db_open`; HTTP through `std/http` |
 
 ## Bindings
 
@@ -76,12 +81,14 @@ var count = 0                  // mutable
 set count = count * 2          // every change uses `set`
 set count += 1                 // short for `set count = count + 1`; also `-=`
 let _ = compute()              // discard a value explicitly
+let n = parse_int(text) else exit_with(1, "error: not a number")  // the value of an Option/Result, or stop
 ```
 
 - A `var` that is never `set` is an error. Parameters cannot be changed.
 - `set x += e` works where `x + e` works (`Int`, `Text`, lists: `set xs += [item]`), `set x -= e` for `Int`.
 - No shadowing: a name cannot be declared again while it is in scope (including in nested blocks).
 - An expression statement must not produce a value: use it, or `let _ = ...`.
+- `let x = value else stop`: `value` is an `Option` or `Result`; `x` is the value inside it. The `else` part must stop: `return ...`, `exit_with(...)`, `fail(...)`, `break` or `continue`.
 
 ## Operators
 
@@ -169,6 +176,32 @@ let shapes = [Shape.Circle(1), .Empty]
 - A match must be exhaustive: every enum variant (or a final `_`); `Int` and `Text` need `_`.
 - Enums may be recursive (`Node(left: Tree, right: Tree)`).
 
+## Maps and functions as values
+
+```tessera
+fn word_counts(words: List[Text]) -> Map[Text, Int] {
+var counts: Map[Text, Int] = [:]
+for word in words {
+set counts = put(counts, word, value_or(get(counts, word), 0) + 1)
+}
+counts
+}
+
+type Item {
+name: Text
+price: Int
+}
+
+fn price_of(item: Item) -> Int = item.price
+fn is_cheap(item: Item) -> Bool = item.price < 100
+
+fn cheapest_names(items: List[Item]) -> List[Text] = map(sort_by(filter(items, is_cheap), price_of), name_of)
+fn name_of(item: Item) -> Text = item.name
+```
+
+- `get(map, key)` gives an `Option`; `put` and `remove` give a changed map; `keys` and `values` are in key order; `contains(map, key)` and `length(map)` work too. `set m = put(m, k, v)` updates in place.
+- A function name without `(...)` is a function value; so are built-ins such as `to_text` and `trim`: `join(map(numbers, to_text), " ")`. A parameter `f: fn(Int) -> Int` is called as `f(x)`.
+
 ## Option, Result and try
 
 ```tessera
@@ -226,7 +259,18 @@ return .Some(word)
 | `range` | `(start: Int, end: Int) -> List[Int]` (end exclusive) |
 | `split` | `(text: Text, separator: Text) -> List[Text]` (keeps empty parts: `split("a,,b", ",")` is `["a", "", "b"]`; separator `""` gives the characters) |
 | `join` | `(parts: List[Text], separator: Text) -> Text` |
-| `to_lower`, `to_upper` | `(text: Text) -> Text` (Unicode rules) |
+| `to_lower`, `to_upper`, `trim` | `(text: Text) -> Text` (Unicode rules; `trim` removes outer whitespace) |
+| `starts_with`, `ends_with` | `(text: Text, part: Text) -> Bool` |
+| `replace` | `(text: Text, old: Text, new: Text) -> Text` (every occurrence) |
+| `slice_text` | `(text: Text, start: Int, end: Int) -> Text` (characters, end exclusive) |
+| `repeat` | `(text: Text, times: Int) -> Text` |
+| `pad_left`, `pad_right` | `(text: Text, width: Int, fill: Text) -> Text` (`pad_left("7", 3, "0")` is `"007"`) |
+| `lines` | `(text: Text) -> List[Text]` |
+| `map`, `filter`, `sort_by` | `(list: List[T], f: fn(T) -> U) -> List[U]`; `f: fn(T) -> Bool`; key `fn(T) -> Int/Text/Decimal` (stable) |
+| `get`, `put`, `remove`, `keys`, `values` | maps, see above |
+| `decimal`, `to_int`, `round`, `parse_decimal` | `Int -> Decimal`; `Decimal -> Int` (toward zero); `(Decimal, places: Int) -> Decimal`; `Text -> Option[Decimal]` |
+| `read_line`, `read_input` | `() -> Option[Text] uses io` (`.None` at end of input); `() -> Text uses io` (all of standard input) |
+| `read_text` | `(path: Text) -> Result[Text, FileError] uses fs` (`FileError` is `.NotFound`, `.PermissionDenied` or `.Other(message)`) |
 | `code_points` | `(text: Text) -> List[Int]` (Unicode code points) |
 | `from_code_point` | `(code: Int) -> Text` |
 | `from_code_points` | `(codes: List[Int]) -> Text` |
@@ -236,11 +280,22 @@ return .Some(word)
 | `exit_with` | `(code: Int, message: Text) -> Never uses io, env` (prints `message` and a newline to standard error, then exits) |
 | `fail` | `(message: Text) -> Never` (stops with a runtime error; for impossible states) |
 
-There is no string indexing and no map type. Characters are handled through `split(text, "")` or `code_points` (`"a"` is 97, `"0"` is 48, space is 32, newline is 10) and rebuilt with `join` or `from_code_point(s)`.
+There is no string indexing. Characters are handled through `split(text, "")` or `code_points` (`"a"` is 97, `"0"` is 48, space is 32, newline is 10) and rebuilt with `join` or `from_code_point(s)`.
 
-Building a list or text in a loop with `set xs += [item]` or `set text += piece` is efficient.
+Building a list, text or map in a loop with `set xs += [item]`, `set text += piece` or `set m = put(m, k, v)` is efficient.
 
 Error messages belong on standard error: `exit_with(1, "error: \(reason)")` reports and stops in one call, and its type `Never` fits anywhere, for example as a `match` arm that has no value to produce.
+
+## Standard modules
+
+`import std/json` (also `std/url`, `std/html`, `std/http`) and use names through the last path segment: `json.parse(text)`.
+
+- `std/json`: `enum Json { Null, Bool(value), Number(value: Decimal), String(value), Array(items), Object(fields: Map[Text, Json]) }`; `parse(text) -> Result[Json, Text]`, `encode(json) -> Text`, `field(json, name) -> Option[Json]`, `as_text`, `as_int`, `as_decimal`, `as_bool` (each `-> Option[...]`), `as_list(json) -> List[Json]`, `text_field(json, name)`, `int_field(json, name)`.
+- `std/url`: `percent_encode`, `percent_decode -> Option[Text]`, `parse_query(text) -> Map[Text, Text]`, `path_segments(path) -> List[Text]`.
+- `std/html`: `escape(text)`; use it for every user value placed in HTML.
+- `std/http`: a web application has `fn handle(request: http.Request) -> http.Response` instead of `main` (no `io`). `Request` has `method` (`"GET"`), `path` (decoded), `query: Map[Text, Text]`, `headers: Map[Text, Text]` (lowercase names), `body: Bytes`. Responses: `http.text(status, body)`, `http.html(status, body)`, `http.json(status, body)`, `http.redirect(location)`, `http.not_found()`; `http.match_path("/items/:id", request.path) -> Option[Map[Text, Text]]`, `http.form(request)`, `http.cookie(request, name)`, `http.with_header(response, name, value)`, `http.with_cookie(response, name, value, max_age)`.
+
+Tests: `test "name" { assert(condition) }` at the top level of a file, run with `tessera1 test file.tes`.
 
 ## Diagnostics
 

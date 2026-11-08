@@ -1,0 +1,14 @@
+# nginx add-module configuration for ngx_http_tessera_module.
+#   ./configure --with-threads --add-module=/path/to/hosts/nginx
+#   ./configure --with-threads --add-dynamic-module=/path/to/hosts/nginx
+ngx_addon_name=ngx_http_tessera_module
+
+ngx_module_type=HTTP
+ngx_module_name=ngx_http_tessera_module
+ngx_module_srcs="$ngx_addon_dir/ngx_http_tessera_module.c"
+ngx_module_incs="$ngx_addon_dir/../include"
+ngx_module_deps="$ngx_addon_dir/../include/tessera.h"
+# dlopen/dlsym live in libdl on older glibc (no-op on glibc >= 2.34)
+ngx_module_libs="-ldl"
+
+. auto/module

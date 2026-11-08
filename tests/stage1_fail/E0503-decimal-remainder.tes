@@ -1,0 +1,5 @@
+// Decimal has no %.
+fn main() -> Unit uses io {
+let d = 1.5 % 2.0
+print(to_text(d))
+}

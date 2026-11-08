@@ -99,11 +99,12 @@ items: List[ast.Item]
 type_defs: List[TypeDef]
 diagnostics: List[source.Diagnostic]
 uses_ui: Bool
+entry: Text
 }
 
-fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui"]
+fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui", "time", "random", "log", "db", "net"]
 
-fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or", "sort", "index_of", "contains"]
+fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or", "sort", "index_of", "contains", "get", "put", "remove", "keys", "values", "map", "filter", "sort_by"]
 
 fn list_of(element: ast.Type) -> ast.Type = .List(element)
 
@@ -124,6 +125,53 @@ builtin("split", [.Text, .Text], list_of(.Text), ""),
 builtin("parse_int", [.Text], .Option(.Int), ""),
 builtin("to_lower", [.Text], .Text, ""),
 builtin("to_upper", [.Text], .Text, ""),
+builtin("trim", [.Text], .Text, ""),
+builtin("starts_with", [.Text, .Text], .Bool, ""),
+builtin("ends_with", [.Text, .Text], .Bool, ""),
+builtin("replace", [.Text, .Text, .Text], .Text, ""),
+builtin("slice_text", [.Text, .Int, .Int], .Text, ""),
+builtin("repeat", [.Text, .Int], .Text, ""),
+builtin("pad_left", [.Text, .Int, .Text], .Text, ""),
+builtin("pad_right", [.Text, .Int, .Text], .Text, ""),
+builtin("lines", [.Text], list_of(.Text), ""),
+builtin("read_line", [], .Option(.Text), "io"),
+builtin("read_input", [], .Text, "io"),
+builtin("read_text", [.Text], .Result(.Text, .Named("FileError")), "fs"),
+builtin("write_text", [.Text, .Text], .Result(.Unit, .Named("FileError")), "fs"),
+builtin("list_directory", [.Text], .Result(list_of(.Text), .Named("FileError")), "fs"),
+builtin("create_directory", [.Text], .Result(.Unit, .Named("FileError")), "fs"),
+builtin("remove_file", [.Text], .Result(.Unit, .Named("FileError")), "fs"),
+builtin("log", [.Text, .Text], .Unit, "log"),
+builtin("to_bytes", [.Text], .Bytes, ""),
+builtin("from_bytes", [.Bytes], .Option(.Text), ""),
+builtin("bytes", [list_of(.Int)], .Bytes, ""),
+builtin("byte_values", [.Bytes], list_of(.Int), ""),
+builtin("decimal", [.Int], .Decimal, ""),
+builtin("parse_decimal", [.Text], .Option(.Decimal), ""),
+builtin("round", [.Decimal, .Int], .Decimal, ""),
+builtin("to_int", [.Decimal], .Int, ""),
+builtin("now", [], .Int, "time"),
+builtin("monotonic", [], .Int, "time"),
+builtin("sleep", [.Int], .Unit, "time"),
+builtin("format_time", [.Int], .Text, ""),
+builtin("parse_time", [.Text], .Option(.Int), ""),
+builtin("http_date", [.Int], .Text, ""),
+builtin("random_int", [.Int, .Int], .Int, "random"),
+builtin("random_bytes", [.Int], .Bytes, "random"),
+builtin("sha256", [.Bytes], .Bytes, ""),
+builtin("hmac_sha256", [.Bytes, .Bytes], .Bytes, ""),
+builtin("base64_encode", [.Bytes], .Text, ""),
+builtin("base64_decode", [.Text], .Option(.Bytes), ""),
+builtin("hex_encode", [.Bytes], .Text, ""),
+builtin("hex_decode", [.Text], .Option(.Bytes), ""),
+builtin("equal_constant_time", [.Bytes, .Bytes], .Bool, ""),
+builtin("password_hash", [.Text], .Text, "random"),
+builtin("password_verify", [.Text, .Text], .Bool, ""),
+builtin("db_open", [.Text], .Result(.Database, .Text), "db"),
+builtin("db_query", [.Database, .Text, list_of(.Text)], .Result(list_of(.Map(.Text, .Text)), .Text), "db"),
+builtin("db_execute", [.Database, .Text, list_of(.Text)], .Result(.Int, .Text), "db"),
+builtin("net_request", [.Text, .Text, list_of(.Text), .Bytes], .Result(.Bytes, .Text), "net"),
+builtin("assert", [.Bool], .Unit, ""),
 builtin("read_file", [.Text], .Text, "fs"),
 builtin("write_file", [.Text, .Text], .Unit, "fs"),
 builtin("args", [], list_of(.Text), "env"),
@@ -158,6 +206,14 @@ return true
 false
 }
 
+note "The error of the file functions that return a `Result`; runtime/extra.rs builds these values."
+fn file_error_type(span: source.Span) -> TypeDef {
+let not_found = VariantType { name: "NotFound", fields: [] }
+let denied = VariantType { name: "PermissionDenied", fields: [] }
+let other = VariantType { name: "Other", fields: [FieldType { name: "message", ty: .Text }] }
+TypeDef { name: "FileError", is_enum: true, fields: [], variants: [not_found, denied, other], span: span, public: true, prefix: "" }
+}
+
 note "The event type of the `ui` effect; the runtime in runtime/ui.rs builds these values."
 fn window_event_type(span: source.Span) -> TypeDef {
 let click = VariantType { name: "Click", fields: [FieldType { name: "x", ty: .Int }, FieldType { name: "y", ty: .Int }, FieldType { name: "button", ty: .Int }] }
@@ -186,6 +242,29 @@ _ => false
 }
 .Result(actual_value, actual_error) => match expected {
 .Result(expected_value, expected_error) => fits(actual_value, expected_value) and fits(actual_error, expected_error)
+_ => false
+}
+.Map(actual_key, actual_value) => match expected {
+.Map(expected_key, expected_value) => fits(actual_key, expected_key) and fits(actual_value, expected_value)
+_ => false
+}
+.Function(actual_params, actual_result, actual_effects) => match expected {
+.Function(expected_params, expected_result, expected_effects) => {
+if length(actual_params) != length(expected_params) or not fits(actual_result, expected_result) {
+return false
+}
+for index in range(0, length(actual_params)) {
+if not (actual_params[index] == expected_params[index] or expected_params[index] == .Unknown) {
+return false
+}
+}
+for effect in actual_effects {
+if not source.contains_text(expected_effects, effect) {
+return false
+}
+}
+true
+}
 _ => false
 }
 _ => actual == expected
@@ -226,6 +305,17 @@ if value == .None or error == .None {
 return .None
 }
 .Some(.Result(value_or(value, .Unknown), value_or(error, .Unknown)))
+}
+_ => .None
+}
+.Map(a_key, a_value) => match b {
+.Map(b_key, b_value) => {
+let key = join_types(a_key, b_key)
+let value = join_types(a_value, b_value)
+if key == .None or value == .None {
+return .None
+}
+.Some(.Map(value_or(key, .Unknown), value_or(value, .Unknown)))
 }
 _ => .None
 }
@@ -429,7 +519,7 @@ c
 
 // ---------- declarations ----------
 
-fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Result", "Never", "WindowEvent"]
+fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Result", "Never", "WindowEvent", "Map", "Bytes", "Decimal", "Database", "FileError"]
 
 fn resolve(start: Checker, te: ast.TypeExpr) -> ResolvedType {
 let name = te.name
@@ -441,6 +531,39 @@ return ResolvedType { checker: report(start, d), ty: .Unknown }
 let value = resolve(start, te.args[0])
 let error = resolve(value.checker, te.args[1])
 return ResolvedType { checker: error.checker, ty: .Result(value.ty, error.ty) }
+}
+if name == "Map" {
+if length(te.args) != 2 {
+let d = source.error_help("E0208", te.span, "`Map` needs a key type and a value type", "write e.g. `Map[Text, Int]`")
+return ResolvedType { checker: report(start, d), ty: .Unknown }
+}
+let key = resolve(start, te.args[0])
+let value = resolve(key.checker, te.args[1])
+var after = value.checker
+if not (key.ty == .Int or key.ty == .Text or key.ty == .Unknown) {
+set after = report(after, source.error_help("E0208", te.args[0].span, "map keys must be `Int` or `Text`, found `\(ast.type_text(key.ty))`", "use an `Int` or `Text` key, for example an id or a name"))
+}
+return ResolvedType { checker: after, ty: .Map(key.ty, value.ty) }
+}
+if name == "fn" {
+var c = start
+var params: List[ast.Type] = []
+let count = length(te.args)
+for index in range(0, count - 2) {
+let param = resolve(c, te.args[index])
+set c = param.checker
+set params = append(params, param.ty)
+}
+let result = resolve(c, te.args[count - 2])
+set c = result.checker
+var effects: List[Text] = []
+for e in te.args[count - 1].args {
+if not source.contains_text(effect_names(), e.name) {
+set c = report(c, source.error("E0303", e.span, "unknown effect `\(e.name)`"))
+}
+set effects = append(effects, e.name)
+}
+return ResolvedType { checker: c, ty: .Function(params, result.ty, effects) }
 }
 if name == "List" or name == "Option" {
 if length(te.args) != 1 {
@@ -461,6 +584,12 @@ set ty = ast.Type.Bool
 set ty = ast.Type.Text
 } else if name == "Unit" {
 set ty = ast.Type.Unit
+} else if name == "Bytes" {
+set ty = ast.Type.Bytes
+} else if name == "Decimal" {
+set ty = ast.Type.Decimal
+} else if name == "Database" {
+set ty = ast.Type.Database
 } else {
 let lookup = lookup_type(c, name, te.span)
 match lookup.result {
@@ -587,7 +716,7 @@ note "Resolves `Name` (this module) or `alias.Name` (an imported module) to a ca
 fn lookup_type(c: Checker, name: Text, span: source.Span) -> NameLookup {
 let parts = source.split_on(name, 46)
 if length(parts) == 1 {
-let canonical = if name == "WindowEvent" { name } else { c.prefix + name }
+let canonical = if name == "WindowEvent" or name == "FileError" { name } else { c.prefix + name }
 let result: Result[Text, Unresolved] = if type_index(c, canonical) >= 0 { .Ok(canonical) } else { .Error(.NotDeclared) }
 return NameLookup { checker: c, result: result }
 }
@@ -667,11 +796,14 @@ NameLookup { checker: report(mark_alias_used(c, alias), d), result: .Ok(canonica
 
 note "Canonical form of an already validated type expression, for the code generator."
 fn canonical_type_expr(c: Checker, te: ast.TypeExpr) -> ast.TypeExpr {
+if te.name == "uses" {
+return te
+}
 var args: List[ast.TypeExpr] = []
 for a in te.args {
 set args = append(args, canonical_type_expr(c, a))
 }
-let builtin_type = source.contains_text(["Int", "Bool", "Text", "Unit", "List", "Option", "Result"], te.name)
+let builtin_type = te.name == "fn" or (source.contains_text(builtin_type_names(), te.name) and te.name != "WindowEvent" and te.name != "FileError")
 let name = if builtin_type { te.name } else { resolved_name(lookup_type(c, te.name, te.span)) }
 ast.TypeExpr { name: name, args: args, span: te.span }
 }
@@ -746,9 +878,10 @@ let shown = ast.display_name(hidden[0])
 report(c, source.error_help("E0609", span, "public \(what) `\(name)` exposes private type `\(shown)`", "mark `\(shown)` as `pub`, or make `\(name)` private"))
 }
 
-pub fn check_program(modules: List[ast.Module]) -> CheckedProgram {
+note "`tests` is true for `tessera1 test`, where the program needs no `main` or `handle`."
+pub fn check_program(modules: List[ast.Module], tests: Bool) -> CheckedProgram {
 let nowhere = source.span_of(0, 1, 1, 2)
-var c = Checker { type_defs: [window_event_type(nowhere)], functions: [], builtins: builtin_table(), locals: [], diagnostics: [], function_name: "", return_type: .Unit, declared_effects: [], used_effects: [], loop_depth: 0, uses_window_event: false, prefix: "", imports: [], used_aliases: [] }
+var c = Checker { type_defs: [window_event_type(nowhere), file_error_type(nowhere)], functions: [], builtins: builtin_table(), locals: [], diagnostics: [], function_name: "", return_type: .Unit, declared_effects: [], used_effects: [], loop_depth: 0, uses_window_event: false, prefix: "", imports: [], used_aliases: [] }
 
 // 0. Imports.
 for m in modules {
@@ -918,6 +1051,7 @@ set c = report(c, d)
 
 // 4. main, in the entry module.
 var main_found = false
+var handle_function: Option[ast.Function] = .None
 for m in modules {
 if m.is_entry {
 for item in m.items {
@@ -929,14 +1063,26 @@ if length(f.params) > 0 or f.return_type.name != "Unit" {
 set c = report(c, source.error_help("E0212", f.name_span, "`main` must take no parameters and return `Unit`", "use the `args()` built-in (effect `env`) to read command-line arguments"))
 }
 }
+if f.name == "handle" {
+set handle_function = .Some(f)
+}
 }
 _ => {}
 }
 }
 }
 }
-if not main_found {
-set c = report(c, source.error_help("E0212", nowhere, "the program has no `main` function", "add `fn main() -> Unit uses io { ... }`"))
+var entry = if tests { "tests" } else { "main" }
+if not main_found and not tests {
+match handle_function {
+.Some(f) => {
+set entry = "handle"
+set c = check_handler(c, f)
+}
+.None => {
+set c = report(c, source.error_help("E0212", nowhere, "the program has no `main` function", "add `fn main() -> Unit uses io { ... }`, or `fn handle(request: http.Request) -> http.Response` for a web application"))
+}
+}
 }
 
 // 5. Bodies.
@@ -970,6 +1116,13 @@ set typed = append(typed, .RecordItem(r with { name: m.prefix + r.name }))
 set typed = append(typed, .EnumItem(e with { name: m.prefix + e.name }))
 }
 .ImportItem(_) => {}
+.TestItem(name, span, body) => {
+let result = check_test(c, name, span, body)
+set c = result.checker
+if m.is_entry {
+set typed = append(typed, .TestItem(name, span, result.expr))
+}
+}
 }
 }
 }
@@ -982,7 +1135,7 @@ set c = report(c, source.error_help("E0610", i.span, "module `\(i.path)` is impo
 }
 }
 }
-CheckedProgram { items: typed, type_defs: c.type_defs, diagnostics: c.diagnostics, uses_ui: uses_ui or c.uses_window_event }
+CheckedProgram { items: typed, type_defs: c.type_defs, diagnostics: c.diagnostics, uses_ui: uses_ui or c.uses_window_event, entry: entry }
 }
 
 fn slice_name(canonical: Text, prefix: Text) -> Text {
@@ -1027,6 +1180,39 @@ set c = report(c, d)
 Checked { checker: c, expr: body.expr }
 }
 
+note "A web application's entry: `fn handle(request: http.Request) -> http.Response`, without `io` or `ui` because standard output belongs to the server."
+fn check_handler(start: Checker, f: ast.Function) -> Checker {
+var c = start
+let sig = match find_signature(c, "handle") {
+.Some(found) => found
+.None => return c
+}
+let request_ok = length(sig.params) == 1 and sig.params[0] == ast.Type.Named("std__http__Request")
+if not request_ok or sig.return_type != ast.Type.Named("std__http__Response") {
+set c = report(c, source.error_help("E0213", f.name_span, "`handle` must be `fn handle(request: http.Request) -> http.Response`", "add `import std/http` and use its `Request` and `Response` types"))
+}
+for effect in f.effects {
+if effect.name == "io" or effect.name == "ui" {
+set c = report(c, source.error_help("E0213", effect.span, "a web application's `handle` cannot use `\(effect.name)`", "standard output belongs to the web server; write diagnostics with `log` (effect `log`)"))
+}
+}
+c
+}
+
+note "A test body is checked like a function returning `Unit` that may use every effect except `ui`."
+fn check_test(start: Checker, name: Text, span: source.Span, body: ast.Expr) -> Checked {
+var effects: List[Text] = []
+for e in effect_names() {
+if e != "ui" {
+set effects = append(effects, e)
+}
+}
+let unit_type = ast.TypeExpr { name: "Unit", args: [], span: span }
+let f = ast.Function { notes: [], public: false, name: "test \"\(name)\"", name_span: span, params: [], return_type: unit_type, effects: [], body: body }
+let sig = Signature { name: f.name, params: [], return_type: .Unit, effects: effects, span: span, public: false, prefix: start.prefix }
+check_function(start, f, sig)
+}
+
 // ---------- expressions ----------
 
 fn expect_expr(c: Checker, e: ast.Expr, expected: ast.Type) -> Checked {
@@ -1062,9 +1248,17 @@ match find_local(c, name) {
 .Some(local) => return checked(c, e, local.ty)
 .None => {}
 }
+match find_signature(c, c.prefix + name) {
+.Some(sig) => return checked(c, e with { kind: .FunctionRef(sig.name) }, .Function(sig.params, sig.return_type, sig.effects))
+.None => {}
+}
+match builtin_function_type(c, name, expected) {
+.Some(ty) => return checked(c, e with { kind: .FunctionRef("#" + name) }, ty)
+.None => {}
+}
 var d = source.error("E0202", e.span, "unknown name `\(name)`")
-if find_signature(c, c.prefix + name) != .None or is_builtin_name(c, name) {
-set d = d with { help: "`\(name)` is a function; call it with `\(name)(...)`" }
+if is_builtin_name(c, name) {
+set d = d with { help: "`\(name)` is a function; call it with `\(name)(...)`, or use it as a value where its type is known" }
 }
 checked(report(c, d), e, .Unknown)
 }
@@ -1077,6 +1271,11 @@ let typed = e with { kind: .Index(target_result.expr, index_result.expr) }
 let after = index_result.checker
 match target_result.expr.ty {
 .List(element) => checked(after, typed, element)
+.Bytes => checked(after, typed, .Int)
+.Map(_, _) => {
+let d = source.error_help("E0507", target.span, "a `Map` is not indexed with `[...]`", "use `get(map, key)`, which returns an `Option`")
+checked(report(after, d), typed, .Unknown)
+}
 .Unknown => checked(after, typed, .Unknown)
 .Text => {
 let d = source.error_help("E0507", target.span, "`Text` cannot be indexed", "use `code_points(text)` to get a `List[Int]` of characters")
@@ -1090,8 +1289,9 @@ checked(report(after, d), typed, .Unknown)
 }
 .FieldAccess(target, name, name_span) => check_field(c, e, target, name, name_span)
 .Unary(op, operand) => {
-let want = if op == .Negate { ast.Type.Int } else { ast.Type.Bool }
-let result = check_expr(c, operand, want)
+let probe = if op == .Negate { check_expr(c, operand, .Unknown) } else { check_expr(c, operand, .Bool) }
+let want = if op == .Negate and probe.expr.ty == .Decimal { ast.Type.Decimal } else if op == .Negate { ast.Type.Int } else { ast.Type.Bool }
+let result = probe
 let typed = e with { kind: .Unary(op, result.expr) }
 if fits(result.expr.ty, want) {
 return checked(result.checker, typed, want)
@@ -1139,7 +1339,95 @@ checked(report(c, d), e, .Never)
 }
 .Break => check_jump(c, e, "break")
 .Continue => check_jump(c, e, "continue")
+.DecimalLiteral(_) => checked(c, e, .Decimal)
+.MapLiteral(keys, values) => check_map_literal(c, e, keys, values, expected)
+.FunctionRef(_) => checked(c, e, e.ty)
+.CallValue(_, _) => checked(c, e, e.ty)
+.OrElse(value, otherwise) => check_or_else(c, e, value, otherwise, expected)
 }
+}
+
+note "A built-in used as a value: those with one fixed signature, and `to_text` where the parameter type is known."
+fn builtin_function_type(c: Checker, name: Text, expected: ast.Type) -> Option[ast.Type] {
+if name == "to_text" {
+return match expected {
+.Function(params, _, _) => if length(params) == 1 and (params[0] == .Int or params[0] == .Bool or params[0] == .Decimal or params[0] == .Text) { .Some(.Function(params, .Text, [])) } else { .None }
+_ => .None
+}
+}
+for b in c.builtins {
+if b.name == name and b.return_type != .Never and name != "next_event" {
+let effects: List[Text] = if b.effect == "" { [] } else { [b.effect] }
+return .Some(.Function(b.params, b.return_type, effects))
+}
+}
+.None
+}
+
+fn check_map_literal(start: Checker, e: ast.Expr, keys: List[ast.Expr], values: List[ast.Expr], expected: ast.Type) -> Checked {
+var key_type = ast.Type.Unknown
+var value_type = ast.Type.Unknown
+match expected {
+.Map(k, v) => {
+set key_type = k
+set value_type = v
+}
+_ => {}
+}
+var c = start
+if length(keys) == 0 {
+if key_type == .Unknown {
+let d = source.error_help("E0505", e.span, "the key and value types of this empty map are unknown", "add a type annotation, e.g. `let counts: Map[Text, Int] = [:]`")
+return checked(report(c, d), e, .Map(.Unknown, .Unknown))
+}
+return checked(c, e, .Map(key_type, value_type))
+}
+var typed_keys: List[ast.Expr] = []
+var typed_values: List[ast.Expr] = []
+for index in range(0, length(keys)) {
+let key = expect_expr(c, keys[index], key_type)
+set c = key.checker
+if key_type == .Unknown {
+set key_type = key.expr.ty
+}
+let value = expect_expr(c, values[index], value_type)
+set c = value.checker
+if value_type == .Unknown {
+set value_type = value.expr.ty
+}
+set typed_keys = append(typed_keys, key.expr)
+set typed_values = append(typed_values, value.expr)
+}
+if not (key_type == .Int or key_type == .Text or key_type == .Unknown) {
+set c = report(c, source.error_help("E0501", keys[0].span, "map keys must be `Int` or `Text`, found `\(ast.type_text(key_type))`", "use an `Int` or `Text` key, for example an id or a name"))
+}
+checked(c, e with { kind: .MapLiteral(typed_keys, typed_values) }, .Map(key_type, value_type))
+}
+
+note "`let x = value else stop`: the value inside an `Option` or `Result`; the `else` part must not produce a value."
+fn check_or_else(c: Checker, e: ast.Expr, value: ast.Expr, otherwise: ast.Expr, expected: ast.Type) -> Checked {
+let hint = if expected == .Unknown { ast.Type.Unknown } else { ast.Type.Option(expected) }
+let value_result = check_expr(c, value, hint)
+var after = value_result.checker
+var inner = ast.Type.Unknown
+match value_result.expr.ty {
+.Option(element) => {
+set inner = element
+}
+.Result(ok, _) => {
+set inner = ok
+}
+.Unknown => {}
+_ => {
+set after = report(after, source.error_help("E0501", value.span, "`let ... else` needs an `Option` or a `Result`, found `\(ast.type_text(value_result.expr.ty))`", "`else` gives the alternative when there is no value; use a normal `let` here"))
+}
+}
+let otherwise_result = check_expr(after, otherwise, .Unknown)
+set after = otherwise_result.checker
+if otherwise_result.expr.ty != .Never and otherwise_result.expr.ty != .Unknown {
+set after = report(after, source.error_help("E0501", otherwise.span, "the `else` part of `let ... else` must stop, found `\(ast.type_text(otherwise_result.expr.ty))`", "end it with `return`, `exit_with(...)`, `fail(...)`, `break` or `continue`"))
+}
+checked(after, e with { kind: .OrElse(value_result.expr, otherwise_result.expr) }, inner)
 }
 
 fn check_jump(c: Checker, e: ast.Expr, word: Text) -> Checked {
@@ -1447,6 +1735,12 @@ return checked(after, typed, .Int)
 if left_type == .Text and right_type == .Text {
 return checked(after, typed, .Text)
 }
+if left_type == .Decimal and right_type == .Decimal {
+return checked(after, typed, .Decimal)
+}
+if left_type == .Bytes and right_type == .Bytes {
+return checked(after, typed, .Bytes)
+}
 if is_list_type(left_type) and is_list_type(right_type) {
 match join_types(left_type, right_type) {
 .Some(joined) => return checked(after, typed, joined)
@@ -1492,10 +1786,13 @@ return checked(report(right_result.checker, d), typed, .Bool)
 }
 let is_logic = op == .And or op == .Or
 let is_order = op == .Less or op == .LessEqual or op == .Greater or op == .GreaterEqual
-let operand_type = if is_logic { ast.Type.Bool } else { ast.Type.Int }
-let result_type = if is_logic or is_order { ast.Type.Bool } else { ast.Type.Int }
-let left_result = check_expr(c, left, operand_type)
+let left_result = if is_logic { check_expr(c, left, .Bool) } else { check_expr(c, left, .Unknown) }
+let operand_type = if is_logic { ast.Type.Bool } else if left_result.expr.ty == .Decimal { ast.Type.Decimal } else { ast.Type.Int }
+let result_type = if is_logic or is_order { ast.Type.Bool } else { operand_type }
 var after = left_result.checker
+if operand_type == .Decimal and op == .Remainder {
+set after = report(after, source.error_help("E0503", op_span, "`%` works on `Int` only", "use `to_int` and `decimal` to convert, or `round`"))
+}
 if not fits(left_result.expr.ty, operand_type) {
 set after = report(after, operand_error(op, is_order, left.span, left_result.expr.ty, operand_type))
 }
@@ -2051,6 +2348,40 @@ checked(c, e with { kind: .Call(name, name_span, args) }, ty)
 
 fn check_generic_call(c: Checker, e: ast.Expr, name: Text, name_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
 let span = e.span
+let map_function = name == "get" or name == "put" or name == "remove" or name == "keys" or name == "values"
+if map_function {
+return check_map_call(c, e, name, name_span, args, expected)
+}
+if name == "map" or name == "filter" or name == "sort_by" {
+return check_function_list_call(c, e, name, name_span, args, expected)
+}
+// Overloads on the types added in draft 0.13: Map, Bytes and Decimal.
+if (name == "length" or name == "contains" or name == "to_text" or name == "slice") and length(args) >= 1 {
+let first = check_expr(c, args[0], .Unknown)
+let first_type = first.expr.ty
+let is_map = match first_type {
+.Map(_, _) => true
+_ => false
+}
+if name == "length" and length(args) == 1 and (is_map or first_type == .Bytes) {
+return call_result(first.checker, e, name, name_span, [first.expr], .Int)
+}
+if name == "to_text" and length(args) == 1 and first_type == .Decimal {
+return call_result(first.checker, e, name, name_span, [first.expr], .Text)
+}
+if name == "contains" and length(args) == 2 and is_map {
+let key_type = match first_type {
+.Map(k, _) => k
+_ => ast.Type.Unknown
+}
+let key = expect_expr(first.checker, args[1], key_type)
+return call_result(key.checker, e, name, name_span, [first.expr, key.expr], .Bool)
+}
+if name == "slice" and length(args) == 3 and first_type == .Bytes {
+let rest = expect_args(first.checker, slice(args, 1, 3), [.Int, .Int])
+return call_result(rest.checker, e, name, name_span, concat([first.expr], rest.args), .Bytes)
+}
+}
 if name == "to_text" or name == "length" {
 if length(args) != 1 {
 let all = arity_error(c, name, args, 1, span)
@@ -2148,7 +2479,109 @@ let rest = expect_args(list.checker, slice(args, 1, count), rest_types)
 call_result(rest.checker, e, name, name_span, concat([list.expr], rest.args), .List(element))
 }
 
+fn map_arg(c: Checker, arg: ast.Expr, expected: ast.Type, name: Text) -> Checked {
+let result = check_expr(c, arg, expected)
+match result.expr.ty {
+.Map(_, _) => result
+.Unknown => result
+.Never => result
+_ => checked(report(result.checker, source.error_help("E0501", arg.span, "`\(name)` needs a `Map`, found `\(ast.type_text(result.expr.ty))`", "build a map with `[key: value]` or `[:]`")), result.expr, .Unknown)
+}
+}
+
+note "`get`, `put`, `remove`, `keys` and `values` on `Map[K, V]`."
+fn check_map_call(c: Checker, e: ast.Expr, name: Text, name_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
+let count = if name == "put" { 3 } else if name == "keys" or name == "values" { 1 } else { 2 }
+if length(args) != count {
+let all = arity_error(c, name, args, count, e.span)
+return call_result(all.checker, e, name, name_span, all.args, .Unknown)
+}
+let map_expected = if name == "put" or name == "remove" { expected } else { ast.Type.Unknown }
+let target = map_arg(c, args[0], map_expected, name)
+var key_type = ast.Type.Unknown
+var value_type = ast.Type.Unknown
+match target.expr.ty {
+.Map(k, v) => {
+set key_type = k
+set value_type = v
+}
+_ => {}
+}
+if name == "keys" {
+return call_result(target.checker, e, name, name_span, [target.expr], .List(key_type))
+}
+if name == "values" {
+return call_result(target.checker, e, name, name_span, [target.expr], .List(value_type))
+}
+let key = expect_expr(target.checker, args[1], key_type)
+if name == "get" {
+return call_result(key.checker, e, name, name_span, [target.expr, key.expr], .Option(value_type))
+}
+if name == "remove" {
+return call_result(key.checker, e, name, name_span, [target.expr, key.expr], target.expr.ty)
+}
+let value = expect_expr(key.checker, args[2], value_type)
+let map_type = if target.expr.ty == .Unknown { ast.Type.Map(key.expr.ty, value.expr.ty) } else { target.expr.ty }
+call_result(value.checker, e, name, name_span, [target.expr, key.expr, value.expr], map_type)
+}
+
+note "`map(list, f)`, `filter(list, f)` and `sort_by(list, key)`: `f` is a function value; its effects become effects of the call."
+fn check_function_list_call(c: Checker, e: ast.Expr, name: Text, name_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
+if length(args) != 2 {
+let all = arity_error(c, name, args, 2, e.span)
+return call_result(all.checker, e, name, name_span, all.args, .Unknown)
+}
+let list = list_arg(c, args[0], .Unknown, name)
+let element = list.element
+let result_hint = if name == "filter" { ast.Type.Bool } else { ast.Type.Unknown }
+let function = check_expr(list.checker, args[1], .Function([element], result_hint, effect_names()))
+var after = function.checker
+var result = ast.Type.Unknown
+match function.expr.ty {
+.Function(params, returned, effects) => {
+for effect in effects {
+set after = use_effect(after, effect, name, e.span)
+}
+if length(params) != 1 or not (params[0] == element or element == .Unknown or params[0] == .Unknown) {
+set after = report(after, source.error("E0501", args[1].span, "`\(name)` needs a function that takes one `\(ast.type_text(element))`, found `\(ast.type_text(function.expr.ty))`"))
+}
+set result = returned
+}
+.Unknown => {}
+_ => {
+set after = report(after, source.error_help("E0501", args[1].span, "`\(name)` needs a function, found `\(ast.type_text(function.expr.ty))`", "pass the name of a function, e.g. `\(name)(items, to_text)`"))
+}
+}
+if name == "filter" and not (result == .Bool or result == .Unknown) {
+set after = report(after, source.error("E0501", args[1].span, "`filter` needs a function that returns `Bool`, found one returning `\(ast.type_text(result))`"))
+}
+if name == "sort_by" and not (result == .Int or result == .Text or result == .Decimal or result == .Unknown) {
+set after = report(after, source.error("E0501", args[1].span, "`sort_by` needs a key function that returns `Int`, `Text` or `Decimal`, found `\(ast.type_text(result))`"))
+}
+let list_type = if name == "map" { ast.Type.List(result) } else { ast.Type.List(element) }
+call_result(after, e, name, name_span, [list.expr, function.expr], list_type)
+}
+
 fn check_call(start: Checker, e: ast.Expr, name: Text, name_span: source.Span, args: List[ast.Expr], expected: ast.Type) -> Checked {
+match find_local(start, name) {
+.Some(local) => match local.ty {
+.Function(params, result, effects) => {
+var c = start
+for effect in effects {
+set c = use_effect(c, effect, name, e.span)
+}
+let callee = ast.Expr { kind: .Name(name), span: name_span, ty: local.ty }
+if length(args) != length(params) {
+let all = arity_error(c, name, args, length(params), e.span)
+return checked(all.checker, e with { kind: .CallValue(callee, all.args) }, result)
+}
+let typed = expect_args(c, args, params)
+return checked(typed.checker, e with { kind: .CallValue(callee, typed.args) }, result)
+}
+_ => {}
+}
+.None => {}
+}
 if source.contains_text(generic_builtin_names(), name) {
 return check_generic_call(start, e, name, name_span, args, expected)
 }

@@ -4,6 +4,7 @@ import source uses nothing
 
 pub enum TokenKind {
 Int
+DecimalNumber
 Text
 Ident
 Fn
@@ -144,6 +145,7 @@ _ => "?"
 pub fn describe_token(token: Token) -> Text {
 match token.kind {
 .Int => "number `" + token.text + "`"
+.DecimalNumber => "number `" + token.text + "`"
 .Text => "text literal"
 .Ident => "name `" + token.text + "`"
 .Newline => "end of line"
@@ -284,6 +286,15 @@ set digits = append(digits, codes[index])
 }
 set index = index + 1
 }
+var fraction: List[Int] = []
+let is_decimal = index + 1 < length(codes) and codes[index] == 46 and source.is_digit(codes[index + 1])
+if is_decimal {
+set index = index + 1
+while index < length(codes) and source.is_digit(codes[index]) {
+set fraction = append(fraction, codes[index])
+set index = index + 1
+}
+}
 var bad_suffix = false
 while index < length(codes) and (source.is_alphanumeric(codes[index]) or codes[index] >= 128) {
 set bad_suffix = true
@@ -314,6 +325,12 @@ var text = from_code_points(digits)
 if digits_greater(digits, code_points("9223372036854775808")) {
 set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `\(raw)` does not fit in `Int`", "`Int` is a signed 64-bit integer: -9223372036854775808 to 9223372036854775807"))
 set text = "0"
+}
+if is_decimal {
+if length(fraction) > 9 {
+set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `\(raw)` has more than 9 decimals", "`Decimal` keeps exactly 9 decimal places"))
+}
+return Scan { token: token(.DecimalNumber, "\(text).\(from_code_points(fraction))", span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
 }
 Scan { token: token(.Int, text, span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
 }

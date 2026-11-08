@@ -1,1 +1,1 @@
-pub fn log(message: Text) -> Unit uses io = print("[log] " + message)
+pub fn write_log(message: Text) -> Unit uses io = print("[log] " + message)

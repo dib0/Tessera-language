@@ -1,0 +1,119 @@
+// std/url: percent-encoding and query strings (RFC 3986, application/x-www-form-urlencoded).
+
+note "Characters that never need encoding (RFC 3986 unreserved)."
+fn is_unreserved(code: Int) -> Bool {
+(code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or code == 45 or code == 46 or code == 95 or code == 126
+}
+
+fn hex_value(code: Int) -> Int {
+if code >= 48 and code <= 57 {
+return code - 48
+}
+if code >= 65 and code <= 70 {
+return code - 55
+}
+if code >= 97 and code <= 102 {
+return code - 87
+}
+-1
+}
+
+note "Encodes everything except unreserved characters, so the result is safe in a path segment, a query key or a query value."
+pub fn percent_encode(text: Text) -> Text {
+let digits = split("0123456789ABCDEF", "")
+var out = ""
+for byte in byte_values(to_bytes(text)) {
+if is_unreserved(byte) {
+set out += from_code_point(byte)
+} else {
+set out += "%\(digits[byte / 16])\(digits[byte % 16])"
+}
+}
+out
+}
+
+note "Decodes `%XX` escapes; `.None` for a broken escape or bytes that are not UTF-8. With `plus_is_space`, `+` means a space (form encoding)."
+fn decode(text: Text, plus_is_space: Bool) -> Option[Text] {
+let input = byte_values(to_bytes(text))
+var out: List[Int] = []
+var index = 0
+while index < length(input) {
+let byte = input[index]
+if byte == 37 {
+if index + 2 >= length(input) {
+return .None
+}
+let high = hex_value(input[index + 1])
+let low = hex_value(input[index + 2])
+if high < 0 or low < 0 {
+return .None
+}
+set out += [high * 16 + low]
+set index += 3
+} else {
+set out += [if plus_is_space and byte == 43 { 32 } else { byte }]
+set index += 1
+}
+}
+from_bytes(bytes(out))
+}
+
+pub fn percent_decode(text: Text) -> Option[Text] = decode(text, false)
+
+note "Every value of every key, in order. Broken escapes keep the raw text."
+pub fn parse_query_all(query: Text) -> Map[Text, List[Text]] {
+var result: Map[Text, List[Text]] = [:]
+if query == "" {
+return result
+}
+for pair in split(query, "&") {
+if pair == "" {
+continue
+}
+let position = index_of(pair, "=")
+let raw_key = match position {
+.Some(p) => slice_text(pair, 0, p)
+.None => pair
+}
+let raw_value = match position {
+.Some(p) => slice_text(pair, p + 1, length(pair))
+.None => ""
+}
+let key = value_or(decode(raw_key, true), raw_key)
+let value = value_or(decode(raw_value, true), raw_value)
+set result = put(result, key, value_or(get(result, key), []) + [value])
+}
+result
+}
+
+note "The first value of each key: `a=1&b=2&a=3` gives `a` = `1`, `b` = `2`."
+pub fn parse_query(query: Text) -> Map[Text, Text] {
+var result: Map[Text, Text] = [:]
+let all = parse_query_all(query)
+for key in keys(all) {
+let found = value_or(get(all, key), [])
+if length(found) > 0 {
+set result = put(result, key, found[0])
+}
+}
+result
+}
+
+pub fn encode_query(values: Map[Text, Text]) -> Text {
+var parts: List[Text] = []
+for key in keys(values) {
+set parts += ["\(percent_encode(key))=\(percent_encode(value_or(get(values, key), "")))"]
+}
+join(parts, "&")
+}
+
+note "The decoded segments of a path: `/a/b%20c/` gives `a` and `b c`."
+pub fn path_segments(path: Text) -> List[Text] {
+var out: List[Text] = []
+for part in split(path, "/") {
+if part != "" {
+set out += [value_or(percent_decode(part), part)]
+}
+}
+out
+}

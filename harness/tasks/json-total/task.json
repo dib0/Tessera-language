@@ -1,0 +1,54 @@
+{
+  "kind": "write",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "tests": [
+    {
+      "args": [
+        "[{\"name\": \"pen\", \"price\": 1.25, \"quantity\": 4}, {\"name\": \"cup\", \"price\": 3.5, \"quantity\": 3}]"
+      ],
+      "stdout": "items: 2\ntotal: 15.50\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "[1, 2"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid JSON\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "[]"
+      ],
+      "stdout": "items: 0\ntotal: 0.00\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "[{\"name\": \"pen\", \"price\": 1.25, \"quantity\": 4}, {\"name\": \"cup\", \"price\": \"x\", \"quantity\": 1}]"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid item 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "[{\"name\": \"a\", \"price\": 0.333, \"quantity\": 3}]"
+      ],
+      "stdout": "items: 1\ntotal: 1.00\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "{\"name\": \"a\"}"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid JSON\n",
+      "exit": 1
+    }
+  ]
+}

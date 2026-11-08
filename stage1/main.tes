@@ -16,12 +16,18 @@ join([
 "  tessera1 check <files...> [--json]           Check for errors without generating code",
 "  tessera1 build <files...> -o <output>        Compile to a native executable",
 "        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)",
+"        [--library]                             A web application as a shared library for the",
+"                                                nginx, Apache and IIS modules (see hosts/README.md)",
+"  tessera1 test <files...>                     Run the `test` declarations of the entry module",
+"  tessera1 format <files...> [--check]         Rewrite files in the canonical layout",
 "  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code",
 "  tessera1 notes <files...>                    Export notes as JSON",
 "",
-"The first file is the entry module (with `main`); imported modules are found",
-"relative to its directory. Further files given on the command line are part of",
-"the entry module.",
+"The first file is the entry module (with `main`, or `handle` for a web application);",
+"imported modules are found relative to its directory; `std/...` modules are built in.",
+"A web application built as an executable runs as CGI, `app serve --port N`,",
+"`app fastcgi --port N` or `app request GET /path`.",
+"Further files given on the command line are part of the entry module.",
 "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.",
 "Set TESSERA_RUSTC to choose the rustc binary.",
 ], "\n")
@@ -33,6 +39,8 @@ files: List[Text]
 output: Text
 json: Bool
 opt: Text
+library: Bool
+check: Bool
 }
 
 fn value_after(arguments: List[Text], index: Int) -> Result[Text, Text] {
@@ -47,7 +55,7 @@ fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
 if length(arguments) == 0 {
 return .Error("missing command")
 }
-var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2" }
+var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, check: false }
 if options.command == "help" or options.command == "--help" {
 return .Ok(options)
 }
@@ -66,6 +74,12 @@ set options = options with { opt: level }
 set index = index + 2
 } else if argument == "--json" {
 set options = options with { json: true }
+set index = index + 1
+} else if argument == "--library" {
+set options = options with { library: true }
+set index = index + 1
+} else if argument == "--check" {
+set options = options with { check: true }
 set index = index + 1
 } else if source.starts_with_text(argument, "-") {
 return .Error("unknown option `\(argument)`")
@@ -137,6 +151,23 @@ return false
 true
 }
 
+note "The source of a standard module (embedded in the compiler), or empty text."
+fn standard_module(path: Text) -> Text {
+if path == "std/http" {
+return runtime_text.std_http()
+}
+if path == "std/json" {
+return runtime_text.std_json()
+}
+if path == "std/url" {
+return runtime_text.std_url()
+}
+if path == "std/html" {
+return runtime_text.std_html()
+}
+""
+}
+
 note "Loads the entry files and, following `import`s, every module they need. Module files are found relative to the directory of the first entry file."
 fn load_program(entry_paths: List[Text]) -> Loaded uses fs {
 let root = directory_of(entry_paths[0])
@@ -162,6 +193,19 @@ if source.contains_text(loaded, i.path) or not valid_module_path(i.path) {
 continue
 }
 set loaded = append(loaded, i.path)
+let standard = standard_module(i.path)
+if standard != "" {
+let file = length(files)
+set files = append(files, source.SourceFile { path: "<\(i.path).tes>", text: standard })
+let parsed = parse_source(standard, file)
+set diagnostics = concat(diagnostics, parsed.diagnostics)
+set modules = append(modules, ast.Module { path: i.path, prefix: ast.module_prefix(i.path), items: parsed.items, is_entry: false })
+continue
+}
+if source.starts_with_text(i.path, "std/") {
+set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "there is no standard module `\(i.path)`", "the standard modules are std/http, std/json, std/url and std/html"))
+continue
+}
 let file_path = join_path(root, "\(i.path).tes")
 if source.contains_text(entry_files, file_path) {
 set diagnostics = append(diagnostics, source.error_help("E0603", i.span, "`\(i.path)` is the entry module and cannot be imported", "move the shared code into its own module"))
@@ -239,12 +283,12 @@ set states = append(states, 0)
 visit_module(0, modules, Visit { states: states, diagnostics: [] }, []).diagnostics
 }
 
-fn run_frontend(entry_paths: List[Text]) -> Frontend uses fs {
+fn run_frontend(entry_paths: List[Text], tests: Bool) -> Frontend uses fs {
 let loaded = load_program(entry_paths)
 var diagnostics = loaded.diagnostics
-var program = checker.CheckedProgram { items: [], type_defs: [], diagnostics: [], uses_ui: false }
+var program = checker.CheckedProgram { items: [], type_defs: [], diagnostics: [], uses_ui: false, entry: "" }
 if length(diagnostics) == 0 {
-set program = checker.check_program(loaded.modules)
+set program = checker.check_program(loaded.modules, tests)
 set diagnostics = program.diagnostics
 }
 Frontend { files: loaded.files, program: program, diagnostics: source.dedup_diagnostics(source.sort_diagnostics(diagnostics)) }
@@ -288,6 +332,7 @@ let entry = match item {
 .RecordItem(r) => note_entry("type", ast.display_name(r.name), r.name_span, r.notes, files)
 .EnumItem(e) => note_entry("enum", ast.display_name(e.name), e.name_span, e.notes, files)
 .ImportItem(_) => ""
+.TestItem(_, _, _) => ""
 }
 if entry != "" {
 set entries = append(entries, entry)
@@ -310,8 +355,73 @@ set texts = append(texts, source.json_string(n.text))
 "    {\"file\": \(source.json_string(files[span.file].path)), \"item\": \(source.json_string(name)), \"kind\": \(source.json_string(kind)), \"line\": \(span.line), \"text\": [\(join(texts, ", "))]}"
 }
 
-fn run_rustc(options: Options, rust_path: Text) -> Int uses process, env {
-let arguments = ["--edition", "2021", "-C", "opt-level=\(options.opt)", "--crate-name", "tessera_program", "-o", options.output, rust_path]
+fn without_extension(path: Text) -> Text {
+let codes = code_points(path)
+let count = length(codes)
+if count > 4 and source.ends_with_text(path, ".tes") {
+return from_code_points(slice(codes, 0, count - 4))
+}
+path
+}
+
+note "The canonical layout (spec section 14): no indentation, no trailing spaces, at most one blank line in a row, one final newline. Text literals cannot span lines, so this never changes the meaning of a program."
+fn format_text(text: Text) -> Text {
+var lines: List[Text] = []
+var current: List[Int] = []
+var blank_run = 0
+var started = false
+for code in append(code_points(text), 10) {
+if code != 10 {
+set current = append(current, code)
+continue
+}
+var first = 0
+while first < length(current) and current[first] == 32 {
+set first = first + 1
+}
+var last = length(current)
+while last > first and (current[last - 1] == 32 or current[last - 1] == 13) {
+set last = last - 1
+}
+let line = from_code_points(slice(current, first, last))
+set current = []
+if line == "" {
+set blank_run = blank_run + 1
+} else {
+if blank_run > 0 and started {
+set lines = append(lines, "")
+}
+set blank_run = 0
+set started = true
+set lines = append(lines, line)
+}
+}
+if length(lines) == 0 {
+return ""
+}
+join(lines, "\n") + "\n"
+}
+
+fn format_files(paths: List[Text], check: Bool) -> Int uses io, fs {
+var changed = 0
+for path in paths {
+let text = read_file(path)
+let formatted = format_text(text)
+if formatted != text {
+set changed = changed + 1
+if check {
+print("would reformat \(path)")
+} else {
+write_file(path, formatted)
+print("formatted \(path)")
+}
+}
+}
+if check and changed > 0 { 1 } else { 0 }
+}
+
+fn run_rustc(options: Options, extra: List[Text], output: Text, rust_path: Text) -> Int uses process, env {
+let arguments = concat(concat(["--edition", "2021", "-C", "opt-level=\(options.opt)", "--crate-name", "tessera_program"], extra), ["-o", output, rust_path])
 let configured = environment_variable("TESSERA_RUSTC")
 if configured != "" {
 return run_process(configured, arguments)
@@ -346,11 +456,14 @@ exit(2)
 }
 }
 let command = options.command
-if not source.contains_text(["check", "build", "emit-rust", "notes"], command) {
+if not source.contains_text(["check", "build", "emit-rust", "notes", "test", "format"], command) {
 print_error("error: unknown command `\(command)`")
 exit(2)
 }
-let frontend = run_frontend(options.files)
+if command == "format" {
+exit(format_files(options.files, options.check))
+}
+let frontend = run_frontend(options.files, command == "test")
 let files = frontend.files
 if command == "check" {
 report_diagnostics(frontend.diagnostics, files, options.json, "")
@@ -364,7 +477,26 @@ if command == "notes" {
 print(without_final_newline(notes_json(frontend.program.items, files)))
 exit(0)
 }
-let rust = codegen.generate(frontend.program, paths_of(files), runtime_text.core_runtime(), runtime_text.ui_runtime())
+let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() }
+if command == "test" {
+let base = without_extension(options.files[0])
+let test_binary = if options.output == "" { "\(base).tests" } else { options.output }
+write_file("\(test_binary).rs", codegen.generate(frontend.program, paths_of(files), runtime, "tests"))
+let built = run_rustc(options with { opt: "0" }, [], test_binary, "\(test_binary).rs")
+if built != 0 {
+print_error("error: the test program could not be built (status \(built))")
+exit(3)
+}
+let runnable = if source.contains_text(source.split_on(test_binary, 47), test_binary) { "./\(test_binary)" } else { test_binary }
+let status = run_process(runnable, [])
+exit(if status < 0 or status > 255 { 70 } else { status })
+}
+if options.library and frontend.program.entry != "handle" {
+print_error("error: `--library` needs a web application: an entry file with `fn handle(request: http.Request) -> http.Response`")
+exit(2)
+}
+let mode = if options.library { "library" } else { "program" }
+let rust = codegen.generate(frontend.program, paths_of(files), runtime, mode)
 if command == "emit-rust" {
 if options.output == "" {
 print(without_final_newline(rust))
@@ -377,9 +509,21 @@ if options.output == "" {
 print_error("error: `build` needs `-o <output>`")
 exit(2)
 }
+if options.library {
+let directory = "\(options.output).build"
+let _ = run_process("mkdir", ["-p", directory])
+write_file("\(directory)/app.rs", rust)
+write_file("\(directory)/adapter.rs", runtime_text.adapter_runtime())
+let library_status = run_rustc(options, ["--crate-type", "cdylib", "-C", "panic=unwind"], options.output, "\(directory)/adapter.rs")
+if library_status != 0 {
+print_error("error: internal compiler error: the generated library did not compile (status \(library_status)). This is a bug in the Tessera compiler.")
+exit(3)
+}
+exit(0)
+}
 let rust_path = "\(options.output).rs"
 write_file(rust_path, rust)
-let status = run_rustc(options, rust_path)
+let status = run_rustc(options, [], options.output, rust_path)
 if status == -1 {
 print_error("error: cannot run rustc (install Rust from https://rustup.rs or set TESSERA_RUSTC)")
 exit(3)

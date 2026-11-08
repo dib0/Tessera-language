@@ -1,0 +1,3 @@
+LIBRARY TesseraModule
+EXPORTS
+    RegisterModule

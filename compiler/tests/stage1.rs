@@ -88,7 +88,9 @@ fn emit(compiler: &Path, files: &[PathBuf], out: &Path) -> std::process::Output 
 }
 
 #[test]
-fn stage1_generates_identical_rust_to_stage0() {
+fn stage0_and_stage1_programs_behave_identically() {
+    // Stage 1 inserts stack and time checks (draft 0.13), so its Rust is no longer byte-identical to
+    // that of the frozen stage 0; the programs must still behave the same: output, errors and exit code.
     let dir = work_dir();
     let mut programs: Vec<Vec<PathBuf>> = Vec::new();
     for d in ["tests/run", "tests/runtime_fail", "examples/valid", "examples/runtime"] {
@@ -100,11 +102,15 @@ fn stage1_generates_identical_rust_to_stage0() {
     programs.push(vec![root().join("tests/multi_file/trees.tes"), root().join("tests/multi_file/main.tes")]);
     let stage0_binary = PathBuf::from(env!("CARGO_BIN_EXE_tessera"));
     for files in programs {
-        let a = dir.join("by_stage0.rs");
-        let b = dir.join("by_stage1.rs");
-        check_build(emit(&stage0_binary, &files, &a), "stage 0 emit");
-        check_build(emit(stage1(), &files, &b), "stage 1 emit");
-        assert!(std::fs::read(&a).unwrap() == std::fs::read(&b).unwrap(), "{:?}: stage 0 and stage 1 output differ", files);
+        let mut results = Vec::new();
+        for (name, compiler) in [("stage0", &stage0_binary), ("stage1", stage1())] {
+            let exe = dir.join(format!("parity_{}", name));
+            let build = Command::new(compiler).arg("build").args(&files).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap();
+            check_build(build, &format!("{} build of {:?}", name, files));
+            let run = Command::new(&exe).output().unwrap();
+            results.push((run.status.code(), run.stdout, run.stderr));
+        }
+        assert!(results[0] == results[1], "{:?}: stage 0 and stage 1 programs behave differently", files);
     }
 }
 
@@ -168,9 +174,16 @@ fn embedded_runtime_is_up_to_date() {
         .arg("--opt")
         .arg("0")
         .arg("--")
-        .arg(root().join("runtime/core.rs"))
-        .arg(root().join("runtime/ui.rs"))
         .arg(&generated)
+        .arg(format!("core_runtime={}", root().join("runtime/core.rs").display()))
+        .arg(format!("ui_runtime={}", root().join("runtime/ui.rs").display()))
+        .arg(format!("extra_runtime={}", root().join("runtime/extra.rs").display()))
+        .arg(format!("web_runtime={}", root().join("runtime/web.rs").display()))
+        .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
+        .arg(format!("std_http={}", root().join("std/http.tes").display()))
+        .arg(format!("std_json={}", root().join("std/json.tes").display()))
+        .arg(format!("std_url={}", root().join("std/url.tes").display()))
+        .arg(format!("std_html={}", root().join("std/html.tes").display()))
         .output()
         .unwrap();
     check_build(out, "embedding the runtime");
@@ -211,4 +224,45 @@ fn stage1_only_errors_are_reported() {
         assert_eq!(out.status.code(), Some(1), "{}", path.display());
         assert!(json.contains(&format!("\"code\":\"{}\"", code)), "{}: expected {} in {}", path.display(), code, json);
     }
+}
+
+#[test]
+fn web_application_runs_in_every_host() {
+    let dir = work_dir();
+    let exe = dir.join("web_app");
+    let db = dir.join("web_app.db");
+    let _ = std::fs::remove_file(&db);
+    let app = root().join("tests/web/app.tes");
+    check_build(Command::new(stage1()).arg("build").arg(&app).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building the web application");
+    let run = |args: &[&str]| Command::new(&exe).args(args).env("APP_DB", &db).output().unwrap();
+    let text = |out: &std::process::Output| String::from_utf8_lossy(&out.stdout).to_string();
+
+    let home = run(&["request", "GET", "/?name=<b>"]);
+    assert!(text(&home).starts_with("HTTP/1.1 200") && text(&home).contains("&lt;b&gt;") && text(&home).contains("content-security-policy"), "{}", text(&home));
+    let post = run(&["request", "POST", "/items", "-H", "content-type: application/x-www-form-urlencoded", "--body", "name=Ada"]);
+    assert!(text(&post).starts_with("HTTP/1.1 303"), "{}", text(&post));
+    let list = run(&["request", "GET", "/items"]);
+    assert!(text(&list).contains("[{\"id\":\"1\",\"name\":\"Ada\"}]"), "{}", text(&list));
+    let fail = run(&["request", "GET", "/fail"]);
+    assert!(text(&fail).starts_with("HTTP/1.1 500") && String::from_utf8_lossy(&fail.stderr).contains("runtime error R003"), "{}", text(&fail));
+
+    // CGI: the same executable, started by a web server with the request in the environment.
+    let cgi = Command::new(&exe).env("GATEWAY_INTERFACE", "CGI/1.1").env("REQUEST_METHOD", "GET").env("REQUEST_URI", "/nope").output().unwrap();
+    assert!(text(&cgi).starts_with("Status: 404"), "{}", text(&cgi));
+
+    // `tessera1 test` runs the test declarations and reports failures with exit code 1.
+    let passing = Command::new(stage1()).arg("test").arg(&app).arg("-o").arg(dir.join("web_tests")).output().unwrap();
+    assert_eq!(passing.status.code(), Some(0), "{}", text(&passing));
+    assert!(text(&passing).contains("2 passed, 0 failed"), "{}", text(&passing));
+    let failing = Command::new(stage1()).arg("test").arg(root().join("tests/web/failing_test.tes")).arg("-o").arg(dir.join("failing_tests")).output().unwrap();
+    assert_eq!(failing.status.code(), Some(1), "{}", text(&failing));
+    assert!(text(&failing).contains("1 passed, 1 failed") && text(&failing).contains("R019"), "{}", text(&failing));
+
+    // The shared library for the nginx, Apache and IIS modules.
+    let library = dir.join("libweb_app.so");
+    check_build(Command::new(stage1()).arg("build").arg(&app).arg("--library").arg("-o").arg(&library).arg("--opt").arg("0").output().unwrap(), "building the web application as a library");
+    assert!(library.exists());
+    let adapter = std::fs::read_to_string(dir.join("libweb_app.so.build/adapter.rs")).unwrap();
+    let generated = std::fs::read_to_string(dir.join("libweb_app.so.build/app.rs")).unwrap();
+    assert!(adapter.contains("tessera_handle") && generated.starts_with("// Generated") && generated.contains("#![forbid(unsafe_code)]") && !generated.contains("unsafe {"));
 }

@@ -1,0 +1,78 @@
+{
+  "kind": "web",
+  "effects": [],
+  "tests": [
+    {
+      "args": [
+        "request",
+        "GET",
+        "/hello?name=Ada"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nhello Ada",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/items/x7"
+      ],
+      "stdout": "HTTP/1.1 400 Bad Request\n\nbad id",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nhome",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/hello"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nhello world",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/items/42"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nitem 42",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/nothing/here"
+      ],
+      "stdout": "HTTP/1.1 404 Not Found\n\nnot found",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "POST",
+        "/"
+      ],
+      "stdout": "HTTP/1.1 405 Method Not Allowed\n\nmethod not allowed",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/items/"
+      ],
+      "stdout": "HTTP/1.1 400 Bad Request\n\nbad id",
+      "exit": 0
+    }
+  ]
+}

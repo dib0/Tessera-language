@@ -181,7 +181,7 @@ set index = index - 1
 from_code_points(out)
 }
 
-fn pad_left(text: Text, width: Int, fill: Text) -> Text {
+fn left_padded(text: Text, width: Int, fill: Text) -> Text {
 let missing = width - length(text)
 if missing > 0 { repeat_text(fill, missing) + text } else { text }
 }
@@ -212,7 +212,7 @@ let piece = match code {
 10 => "\\n"
 13 => "\\r"
 9 => "\\t"
-_ => if code < 32 { "\\u\(pad_left(hex_text(code), 4, "0"))" } else { from_code_point(code) }
+_ => if code < 32 { "\\u\(left_padded(hex_text(code), 4, "0"))" } else { from_code_point(code) }
 }
 set out = append(out, piece)
 }

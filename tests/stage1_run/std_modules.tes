@@ -1,0 +1,25 @@
+// std/json, std/url and std/html (draft 0.13, stage 1 only).
+
+import std/json
+import std/url
+import std/html
+
+fn main() -> Unit uses io {
+let doc = json.parse("{\"name\": \"Ada\", \"age\": 36, \"tags\": [\"x\", \"y\\u00e9\"], \"pi\": 3.14159265358979, \"big\": 1.5e3, \"ok\": true, \"none\": null}")
+match doc {
+.Ok(value) => {
+print(json.encode(value))
+print("\(value_or(json.text_field(value, "name"), "?")) \(value_or(json.int_field(value, "age"), 0)) \(length(json.as_list(value_or(json.field(value, "tags"), .Null))))")
+}
+.Error(problem) => print("error: \(problem)")
+}
+match json.parse("[1, 2,]") {
+.Ok(_) => print("unexpected")
+.Error(problem) => print("error: \(problem)")
+}
+print(url.percent_encode("a b&c/é"))
+print(value_or(url.percent_decode("a%20b%26c%2F%C3%A9"), "bad"))
+let q = url.parse_query("name=Ada+L&x=1&x=2&empty")
+print("\(value_or(get(q, "name"), "")) \(value_or(get(q, "x"), "")) [\(value_or(get(q, "empty"), "?"))]")
+print(html.escape("<a href=\"x\">'T&J'</a>"))
+}

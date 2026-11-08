@@ -1,0 +1,17 @@
+// std/html: escaping text for HTML, so user input cannot become markup (cross-site scripting).
+
+note "Escapes `&`, `<`, `>`, `\"` and `'`; safe in element content and in quoted attribute values."
+pub fn escape(text: Text) -> Text {
+var out = ""
+for piece in split(text, "") {
+set out += match piece {
+"&" => "&amp;"
+"<" => "&lt;"
+">" => "&gt;"
+"\"" => "&quot;"
+"'" => "&#39;"
+_ => piece
+}
+}
+out
+}

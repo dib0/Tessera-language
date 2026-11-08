@@ -1,0 +1,16 @@
+import std/http
+
+fn handle(request: http.Request) -> http.Response {
+if request.method != "GET" {
+return http.text(405, "method not allowed")
+}
+if request.path == "/" {
+return http.text(200, "home")
+}
+if request.path == "/hello" {
+return http.text(200, "hello \(value_or(get(request.query, "name"), "world"))")
+}
+let parameters = http.match_path("/items/:id", request.path) else return http.text(404, "not found")
+let id = parse_int(value_or(get(parameters, "id"), "")) else return http.text(400, "bad id")
+http.text(200, "item \(id)")
+}

@@ -1,0 +1,7 @@
+{"age":36,"big":1500,"name":"Ada","none":null,"ok":true,"pi":3.141592654,"tags":["x","yé"]}
+Ada 36 2
+error: unexpected character at position 6
+a%20b%26c%2F%C3%A9
+a b&c/é
+Ada L 1 []
+&lt;a href=&quot;x&quot;&gt;&#39;T&amp;J&#39;&lt;/a&gt;

@@ -1,0 +1,437 @@
+// std/json: JSON values, parsing and encoding (RFC 8259).
+// Numbers are `Decimal` (9 decimal places); more precise numbers are rounded half away from zero.
+
+pub enum Json {
+Null
+Bool(value: Bool)
+Number(value: Decimal)
+String(value: Text)
+Array(items: List[Json])
+Object(fields: Map[Text, Json])
+}
+
+// ---------- reading values ----------
+
+pub fn field(json: Json, name: Text) -> Option[Json] {
+match json {
+.Object(fields) => get(fields, name)
+_ => .None
+}
+}
+
+pub fn as_text(json: Json) -> Option[Text] {
+match json {
+.String(value) => .Some(value)
+_ => .None
+}
+}
+
+pub fn as_bool(json: Json) -> Option[Bool] {
+match json {
+.Bool(value) => .Some(value)
+_ => .None
+}
+}
+
+pub fn as_decimal(json: Json) -> Option[Decimal] {
+match json {
+.Number(value) => .Some(value)
+_ => .None
+}
+}
+
+note "Only whole numbers; `1.5` gives `.None`."
+pub fn as_int(json: Json) -> Option[Int] {
+match json {
+.Number(value) => if decimal(to_int(value)) == value { .Some(to_int(value)) } else { .None }
+_ => .None
+}
+}
+
+note "The items of an array; an empty list for anything else."
+pub fn as_list(json: Json) -> List[Json] {
+match json {
+.Array(items) => items
+_ => []
+}
+}
+
+pub fn text_field(json: Json, name: Text) -> Option[Text] {
+let value = field(json, name) else return .None
+as_text(value)
+}
+
+pub fn int_field(json: Json, name: Text) -> Option[Int] {
+let value = field(json, name) else return .None
+as_int(value)
+}
+
+pub fn from_int(value: Int) -> Json = .Number(decimal(value))
+
+// ---------- encoding ----------
+
+fn hex4(code: Int) -> Text {
+let digits = split("0123456789abcdef", "")
+"\(digits[code / 4096 % 16])\(digits[code / 256 % 16])\(digits[code / 16 % 16])\(digits[code % 16])"
+}
+
+pub fn quote(text: Text) -> Text {
+var out = "\""
+for code in code_points(text) {
+set out += if code == 34 {
+"\\\""
+} else if code == 92 {
+"\\\\"
+} else if code == 10 {
+"\\n"
+} else if code == 13 {
+"\\r"
+} else if code == 9 {
+"\\t"
+} else if code < 32 {
+"\\u\(hex4(code))"
+} else {
+from_code_point(code)
+}
+}
+out + "\""
+}
+
+note "Compact JSON; object keys in sorted order, so the output is deterministic."
+pub fn encode(json: Json) -> Text {
+match json {
+.Null => "null"
+.Bool(value) => if value { "true" } else { "false" }
+.Number(value) => to_text(value)
+.String(value) => quote(value)
+.Array(items) => {
+var parts: List[Text] = []
+for item in items {
+set parts += [encode(item)]
+}
+"[\(join(parts, ","))]"
+}
+.Object(fields) => {
+var parts: List[Text] = []
+for key in keys(fields) {
+let value = get(fields, key) else continue
+set parts += ["\(quote(key)):\(encode(value))"]
+}
+"{\(join(parts, ","))}"
+}
+}
+}
+
+// ---------- parsing ----------
+
+type Parsed {
+value: Json
+next: Int
+}
+
+type Reader {
+codes: List[Int]
+}
+
+fn skip_space(r: Reader, start: Int) -> Int {
+var index = start
+while index < length(r.codes) and (r.codes[index] == 32 or r.codes[index] == 9 or r.codes[index] == 10 or r.codes[index] == 13) {
+set index += 1
+}
+index
+}
+
+fn at(r: Reader, index: Int) -> Int = if index < length(r.codes) { r.codes[index] } else { -1 }
+
+fn expect_word(r: Reader, index: Int, word: Text, value: Json) -> Result[Parsed, Text] {
+let wanted = code_points(word)
+for offset in range(0, length(wanted)) {
+if at(r, index + offset) != wanted[offset] {
+return .Error("invalid value at position \(index)")
+}
+}
+.Ok(Parsed { value: value, next: index + length(wanted) })
+}
+
+fn hex_digit(code: Int) -> Int {
+if code >= 48 and code <= 57 {
+return code - 48
+}
+if code >= 65 and code <= 70 {
+return code - 55
+}
+if code >= 97 and code <= 102 {
+return code - 87
+}
+-1
+}
+
+fn read_hex4(r: Reader, index: Int) -> Int {
+var value = 0
+for offset in range(0, 4) {
+let digit = hex_digit(at(r, index + offset))
+if digit < 0 {
+return -1
+}
+set value = value * 16 + digit
+}
+value
+}
+
+type ParsedText {
+text: Text
+next: Int
+}
+
+fn parse_string(r: Reader, start: Int) -> Result[ParsedText, Text] {
+var index = start + 1
+var out: List[Int] = []
+while true {
+let code = at(r, index)
+if code == -1 {
+return .Error("unterminated string starting at position \(start)")
+}
+if code == 34 {
+return .Ok(ParsedText { text: from_code_points(out), next: index + 1 })
+}
+if code < 32 {
+return .Error("control character in string at position \(index)")
+}
+if code != 92 {
+set out += [code]
+set index += 1
+continue
+}
+let escaped = at(r, index + 1)
+if escaped == 117 {
+var value = read_hex4(r, index + 2)
+if value < 0 {
+return .Error("invalid \\u escape at position \(index)")
+}
+set index += 6
+if value >= 55296 and value <= 56319 {
+let low = if at(r, index) == 92 and at(r, index + 1) == 117 { read_hex4(r, index + 2) } else { -1 }
+if low < 56320 or low > 57343 {
+return .Error("unpaired surrogate at position \(index)")
+}
+set value = 65536 + (value - 55296) * 1024 + (low - 56320)
+set index += 6
+} else if value >= 56320 and value <= 57343 {
+return .Error("unpaired surrogate at position \(index)")
+}
+set out += [value]
+continue
+}
+let replacement = match escaped {
+34 => 34
+92 => 92
+47 => 47
+98 => 8
+102 => 12
+110 => 10
+114 => 13
+116 => 9
+_ => -1
+}
+if replacement < 0 {
+return .Error("invalid escape at position \(index)")
+}
+set out += [replacement]
+set index += 2
+}
+.Error("unreachable")
+}
+
+fn is_digit(code: Int) -> Bool = code >= 48 and code <= 57
+
+note "Builds the `Decimal` from the digits and exponent, rounding beyond 9 decimal places."
+fn number_value(negative: Bool, digits: List[Int], point: Int, exponent: Int) -> Option[Decimal] {
+// `digits` with the decimal point after `point` digits, times 10^exponent.
+let shift = point + exponent
+var whole: List[Int] = []
+var fraction: List[Int] = []
+for index in range(0, length(digits)) {
+if index < shift {
+set whole += [digits[index]]
+} else {
+set fraction += [digits[index]]
+}
+}
+if shift < 0 {
+set fraction = concat(split_zeros(0 - shift), fraction)
+}
+var whole_text = from_code_points(whole)
+if whole_text == "" {
+set whole_text = "0"
+}
+var missing = shift - length(digits)
+while missing > 0 {
+set whole_text += "0"
+set missing -= 1
+}
+let kept = if length(fraction) > 9 { slice(fraction, 0, 9) } else { fraction }
+let text = if length(kept) == 0 { whole_text } else { "\(whole_text).\(from_code_points(kept))" }
+var value = parse_decimal(text) else return .None
+if length(fraction) > 9 and fraction[9] >= 53 {
+let smallest = parse_decimal("0.000000001") else return .None
+set value += smallest
+}
+.Some(if negative { -value } else { value })
+}
+
+fn split_zeros(count: Int) -> List[Int] {
+var out: List[Int] = []
+for _ in range(0, count) {
+set out += [48]
+}
+out
+}
+
+fn parse_number(r: Reader, start: Int) -> Result[Parsed, Text] {
+var index = start
+let negative = at(r, index) == 45
+if negative {
+set index += 1
+}
+var digits: List[Int] = []
+if not is_digit(at(r, index)) {
+return .Error("invalid number at position \(start)")
+}
+if at(r, index) == 48 and is_digit(at(r, index + 1)) {
+return .Error("leading zero in number at position \(start)")
+}
+while is_digit(at(r, index)) {
+set digits += [at(r, index)]
+set index += 1
+}
+let point = length(digits)
+if at(r, index) == 46 {
+set index += 1
+if not is_digit(at(r, index)) {
+return .Error("invalid number at position \(start)")
+}
+while is_digit(at(r, index)) {
+set digits += [at(r, index)]
+set index += 1
+}
+}
+var exponent = 0
+if at(r, index) == 101 or at(r, index) == 69 {
+set index += 1
+var exponent_negative = false
+if at(r, index) == 43 or at(r, index) == 45 {
+set exponent_negative = at(r, index) == 45
+set index += 1
+}
+if not is_digit(at(r, index)) {
+return .Error("invalid exponent at position \(start)")
+}
+while is_digit(at(r, index)) {
+if exponent > 1000 {
+return .Error("number out of range at position \(start)")
+}
+set exponent = exponent * 10 + (at(r, index) - 48)
+set index += 1
+}
+if exponent_negative {
+set exponent = 0 - exponent
+}
+}
+let value = number_value(negative, digits, point, exponent) else return .Error("number out of range at position \(start)")
+.Ok(Parsed { value: .Number(value), next: index })
+}
+
+fn parse_value(r: Reader, start: Int, depth: Int) -> Result[Parsed, Text] {
+if depth > 500 {
+return .Error("nesting too deep at position \(start)")
+}
+let index = skip_space(r, start)
+let code = at(r, index)
+if code == 123 {
+return parse_object(r, index, depth)
+}
+if code == 91 {
+return parse_array(r, index, depth)
+}
+if code == 34 {
+let s = try parse_string(r, index)
+return .Ok(Parsed { value: .String(s.text), next: s.next })
+}
+if code == 116 {
+return expect_word(r, index, "true", .Bool(true))
+}
+if code == 102 {
+return expect_word(r, index, "false", .Bool(false))
+}
+if code == 110 {
+return expect_word(r, index, "null", .Null)
+}
+if code == 45 or is_digit(code) {
+return parse_number(r, index)
+}
+if code == -1 {
+return .Error("unexpected end of input")
+}
+.Error("unexpected character at position \(index)")
+}
+
+fn parse_array(r: Reader, start: Int, depth: Int) -> Result[Parsed, Text] {
+var items: List[Json] = []
+var index = skip_space(r, start + 1)
+if at(r, index) == 93 {
+return .Ok(Parsed { value: .Array(items), next: index + 1 })
+}
+while true {
+let item = try parse_value(r, index, depth + 1)
+set items += [item.value]
+set index = skip_space(r, item.next)
+if at(r, index) == 44 {
+set index += 1
+} else if at(r, index) == 93 {
+return .Ok(Parsed { value: .Array(items), next: index + 1 })
+} else {
+return .Error("expected `,` or `]` at position \(index)")
+}
+}
+.Error("unreachable")
+}
+
+fn parse_object(r: Reader, start: Int, depth: Int) -> Result[Parsed, Text] {
+var fields: Map[Text, Json] = [:]
+var index = skip_space(r, start + 1)
+if at(r, index) == 125 {
+return .Ok(Parsed { value: .Object(fields), next: index + 1 })
+}
+while true {
+if at(r, index) != 34 {
+return .Error("expected a string key at position \(index)")
+}
+let key = try parse_string(r, index)
+set index = skip_space(r, key.next)
+if at(r, index) != 58 {
+return .Error("expected `:` at position \(index)")
+}
+let value = try parse_value(r, index + 1, depth + 1)
+set fields = put(fields, key.text, value.value)
+set index = skip_space(r, value.next)
+if at(r, index) == 44 {
+set index = skip_space(r, index + 1)
+} else if at(r, index) == 125 {
+return .Ok(Parsed { value: .Object(fields), next: index + 1 })
+} else {
+return .Error("expected `,` or `}` at position \(index)")
+}
+}
+.Error("unreachable")
+}
+
+note "Parses one JSON value; positions in error messages count characters from 0."
+pub fn parse(text: Text) -> Result[Json, Text] {
+let r = Reader { codes: code_points(text) }
+let parsed = try parse_value(r, 0, 0)
+let rest = skip_space(r, parsed.next)
+if rest != length(r.codes) {
+return .Error("unexpected text after the value at position \(rest)")
+}
+.Ok(parsed.value)
+}

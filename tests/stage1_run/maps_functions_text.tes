@@ -1,0 +1,60 @@
+// Maps, map literals, functions as values, map/filter/sort_by, let ... else, text and byte functions,
+// FileError and read_line (draft 0.13, stage 1 only).
+
+type Item {
+name: Text
+price: Int
+}
+
+fn price_of(item: Item) -> Int = item.price
+fn is_cheap(item: Item) -> Bool = item.price < 100
+fn double(n: Int) -> Int = n * 2
+fn apply_twice(f: fn(Int) -> Int, n: Int) -> Int = f(f(n))
+
+fn count_words(text: Text) -> Map[Text, Int] {
+var counts: Map[Text, Int] = [:]
+for word in split(text, " ") {
+set counts = put(counts, word, value_or(get(counts, word), 0) + 1)
+}
+counts
+}
+
+fn first_number(texts: List[Text]) -> Option[Int] {
+for t in texts {
+let n = parse_int(t) else continue
+return .Some(n)
+}
+.None
+}
+
+fn main() -> Unit uses io, fs, log, env {
+let counts = count_words("b a b c b a")
+for key in keys(counts) {
+print("\(key)=\(value_or(get(counts, key), 0))")
+}
+let ages = ["ada": 36, "linus": 54]
+print("\(length(ages)) \(contains(ages, "ada")) \(contains(remove(ages, "ada"), "ada")) \(values(ages)[1])")
+let items = [Item { name: "pen", price: 150 }, Item { name: "cup", price: 80 }, Item { name: "ink", price: 20 }]
+print(join(map(sort_by(items, price_of), to_text_name), ","))
+print("\(length(filter(items, is_cheap))) \(apply_twice(double, 5))")
+print(join(map([1, 2, 3], to_text), "+"))
+let f: fn(Int) -> Int = double
+print("\(f(21))")
+print("[\(trim("  hi  "))] \(starts_with("hello", "he")) \(ends_with("hello", "lo")) \(replace("a-b-c", "-", "+"))")
+print("\(slice_text("héllo", 1, 4)) \(repeat("ab", 3)) \(pad_left("7", 3, "0")) \(pad_right("x", 3, ".")) \(length(lines("a\nb\u{D}\nc\n")))")
+let b = to_bytes("hé")
+print("\(length(b)) \(b[1]) \(byte_values(b + bytes([33]))[3]) \(value_or(from_bytes(slice(b, 0, 1)), "?"))")
+let n = first_number(["x", "42", "7"]) else exit_with(1, "no number")
+print("first \(n)")
+match read_text("/nonexistent/file.txt") {
+.Ok(_) => print("unexpected")
+.Error(e) => print(if e == .NotFound { "not found" } else { "other error" })
+}
+match read_line() {
+.Some(line) => print("read [\(line)]")
+.None => print("no input")
+}
+log("info", "done")
+}
+
+fn to_text_name(item: Item) -> Text = item.name

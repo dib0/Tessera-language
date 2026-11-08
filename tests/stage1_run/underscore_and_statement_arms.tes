@@ -19,7 +19,7 @@ Op.Drop => set stack = slice(stack, 0, n - 1)
 stack
 }
 
-fn repeat(text: Text, times: Int) -> Text {
+fn repeat_text(text: Text, times: Int) -> Text {
 var out = ""
 for _ in range(0, times) {
 set out = out + text
@@ -30,7 +30,7 @@ out
 fn main() -> Unit uses io {
 let stack = run([Op.Push(2), Op.Push(3), Op.Add, Op.Push(9), Op.Drop])
 print(to_text(stack[0]))
-print(repeat("ab", 3))
+print(repeat_text("ab", 3))
 var count = 0
 for _ in range(0, 2) {
 for _ in range(0, 3) {
@@ -46,7 +46,7 @@ print("hit")
 Option.None => print("none")
 }
 match count {
-6 => let _ = repeat("x", 1)
+6 => let _ = repeat_text("x", 1)
 _ => print("unexpected")
 }
 }

@@ -116,6 +116,8 @@ set q = advance(q)
 q
 }
 
+fn tokens_at(p: Parser, offset: Int) -> lexer.Token = p.tokens[p.pos + offset]
+
 fn identifier(p: Parser, what: Text) -> NameResult {
 let t = current(p)
 if t.kind == .Ident {
@@ -250,6 +252,17 @@ return parse_record(p, notes, public)
 if kind == .Enum {
 return parse_enum(p, notes, public)
 }
+if kind == .Ident and current(p).text == "test" and peek_at(p, 1) == .Text and not public {
+// `test "name" { ... }`: run by `tessera1 test`, ignored by `build`.
+let name_token = tokens_at(p, 1)
+let body = parse_block(advance(advance(p)))
+if body.parser.failed {
+return dummy_item(body.parser)
+}
+let span = source.span_to(current_span(p), name_token.span)
+let block_expr = ast.Expr { kind: .BlockExpr(body.block), span: body.block.span, ty: .Unknown }
+return ItemResult { parser: end_of_line(body.parser, "a test"), item: .TestItem(name_token.text, span, block_expr) }
+}
 if public {
 let d = source.error_help("E0110", current_span(p), "`pub` must be followed by `fn`, `type` or `enum`", "imports and other items cannot be public")
 return dummy_item(fail_parse(p, d))
@@ -380,9 +393,58 @@ let function = ast.Function { notes: notes, public: public, name: name.name, nam
 ItemResult { parser: body.parser, item: .FunctionItem(function) }
 }
 
+note "`fn(A, B) -> C uses e`: stored as a TypeExpr named `fn` with the parameter types, the result type and a `uses` entry holding the effects."
+fn parse_function_type(start: Parser) -> TypeResult {
+var p = expect(advance(start), .LParen)
+var args: List[ast.TypeExpr] = []
+while not p.failed and not at(p, .RParen) {
+let param = parse_type(p)
+if param.parser.failed {
+return param
+}
+set args = append(args, param.type_expr)
+set p = param.parser
+if at(p, .Comma) {
+set p = advance(p)
+} else if not at(p, .RParen) {
+return TypeResult { parser: unexpected(p, "`,` or `)`"), type_expr: dummy_type(p) }
+}
+}
+let result = parse_type(expect(expect(p, .RParen), .Arrow))
+if result.parser.failed {
+return result
+}
+set p = result.parser
+var effects: List[ast.TypeExpr] = []
+let uses_span = current_span(p)
+if at(p, .Uses) {
+set p = advance(p)
+var more = true
+while more {
+let effect = identifier(p, "an effect name")
+if effect.parser.failed {
+return TypeResult { parser: effect.parser, type_expr: dummy_type(effect.parser) }
+}
+set effects = append(effects, ast.TypeExpr { name: effect.name, args: [], span: effect.span })
+set p = effect.parser
+if at(p, .Comma) and peek_at(p, 1) == .Ident {
+set p = advance(p)
+} else {
+set more = false
+}
+}
+}
+set args = append(args, result.type_expr)
+set args = append(args, ast.TypeExpr { name: "uses", args: effects, span: uses_span })
+TypeResult { parser: p, type_expr: ast.TypeExpr { name: "fn", args: args, span: source.span_to(current_span(start), previous_span(p)) } }
+}
+
 fn parse_type(start: Parser) -> TypeResult {
 if start.failed {
 return TypeResult { parser: start, type_expr: dummy_type(start) }
+}
+if at(start, .Fn) {
+return parse_function_type(start)
 }
 let first = identifier(start, "a type")
 var p = first.parser
@@ -566,6 +628,12 @@ set declared = .Some(annotation.type_expr)
 set q = annotation.parser
 }
 let value = parse_expr(expect(q, .Assign), true)
+if at(value.parser, .Else) and not value.parser.failed {
+// `let n = parse_int(text) else exit_with(1, "...")`: the value of an `Option`/`Result`, or stop.
+let otherwise = parse_expr(advance(value.parser), true)
+let combined = ast.Expr { kind: .OrElse(value.expr, otherwise.expr), span: source.span_to(value.expr.span, otherwise.expr.span), ty: .Unknown }
+return StatementResult { parser: otherwise.parser, statement: .Let(name, name_token.span, declared, combined, mutable) }
+}
 return StatementResult { parser: value.parser, statement: .Let(name, name_token.span, declared, value.expr, mutable) }
 }
 if kind == .Set {
@@ -835,6 +903,67 @@ return result
 result
 }
 
+note "`[a, b]` is a list; `[key: value, ...]` and `[:]` are maps."
+fn parse_bracket_literal(p: Parser, start: source.Span) -> ExprResult {
+let inside = advance(p)
+if at(inside, .Colon) {
+let close_span = current_span(advance(inside))
+let after = expect(advance(inside), .RBracket)
+if after.failed {
+return failed_expr(after)
+}
+return expr_result(after, .MapLiteral([], []), source.span_to(start, close_span))
+}
+if at(inside, .RBracket) {
+return expr_result(advance(inside), .ListLiteral([]), source.span_to(start, current_span(inside)))
+}
+let first = parse_expr(inside, true)
+if first.parser.failed {
+return failed_expr(first.parser)
+}
+if not at(first.parser, .Colon) {
+if at(first.parser, .RBracket) {
+return expr_result(advance(first.parser), .ListLiteral([first.expr]), source.span_to(start, current_span(first.parser)))
+}
+let rest = parse_args(expect(first.parser, .Comma), .RBracket)
+if rest.parser.failed {
+return failed_expr(rest.parser)
+}
+return expr_result(rest.parser, .ListLiteral(concat([first.expr], rest.args)), source.span_to(start, rest.end))
+}
+var keys = [first.expr]
+var values: List[ast.Expr] = []
+var q = advance(first.parser)
+var more = true
+while more {
+let value = parse_expr(q, true)
+if value.parser.failed {
+return failed_expr(value.parser)
+}
+set values = append(values, value.expr)
+set q = value.parser
+if at(q, .Comma) and peek_at(q, 1) != .RBracket {
+let key = parse_expr(advance(q), true)
+if key.parser.failed {
+return failed_expr(key.parser)
+}
+set keys = append(keys, key.expr)
+set q = expect(key.parser, .Colon)
+} else {
+if at(q, .Comma) {
+set q = advance(q)
+}
+set more = false
+}
+}
+let close_span = current_span(q)
+let after = expect(q, .RBracket)
+if after.failed {
+return failed_expr(after)
+}
+expr_result(after, .MapLiteral(keys, values), source.span_to(start, close_span))
+}
+
 fn parse_args(start: Parser, close: lexer.TokenKind) -> ArgsResult {
 var p = start
 var args: List[ast.Expr] = []
@@ -877,6 +1006,7 @@ return failed_expr(fail_parse(p, source.error_help("E0106", start, "number does 
 }
 expr_result(advance(p), .IntLiteral(parse_int_text(t.text)), start)
 }
+.DecimalNumber => expr_result(advance(p), .DecimalLiteral(t.text), start)
 .Text => expr_result(advance(p), .TextLiteral(t.text), start)
 .True => expr_result(advance(p), .BoolLiteral(true), start)
 .False => expr_result(advance(p), .BoolLiteral(false), start)
@@ -896,13 +1026,7 @@ return failed_expr(after)
 }
 ExprResult { parser: after, expr: inner.expr with { span: source.span_to(start, close) } }
 }
-.LBracket => {
-let items = parse_args(advance(p), .RBracket)
-if items.parser.failed {
-return failed_expr(items.parser)
-}
-expr_result(items.parser, .ListLiteral(items.args), source.span_to(start, items.end))
-}
+.LBracket => parse_bracket_literal(p, start)
 .LBrace => {
 if not allow_record {
 return failed_expr(fail_parse(p, source.error_help("E0110", start, "a block cannot start here", "wrap the block in parentheses")))

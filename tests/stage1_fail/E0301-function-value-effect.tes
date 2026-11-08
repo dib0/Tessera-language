@@ -1,0 +1,4 @@
+// A function value with an effect can only be called where that effect is declared.
+fn shout(text: Text) -> Unit uses io = print(text)
+fn run(f: fn(Text) -> Unit uses io) -> Unit = f("hi")
+fn main() -> Unit uses io = run(shout)
