@@ -21,14 +21,16 @@
         "add:apple:1",
         "remove:apple:2"
       ],
-      "stdout": "error: cannot remove 2 apple\n",
+      "stdout": "",
+      "stderr": "error: cannot remove 2 apple\n",
       "exit": 1
     },
     {
       "args": [
         "remove:kiwi:1"
       ],
-      "stdout": "error: cannot remove 1 kiwi\n",
+      "stdout": "",
+      "stderr": "error: cannot remove 1 kiwi\n",
       "exit": 1
     },
     {
@@ -36,7 +38,8 @@
         "add:apple:1",
         "eat:apple"
       ],
-      "stdout": "error: unknown command eat:apple\n",
+      "stdout": "",
+      "stderr": "error: unknown command eat:apple\n",
       "exit": 1
     }
   ]

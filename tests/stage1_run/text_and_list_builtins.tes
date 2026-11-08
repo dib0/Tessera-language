@@ -1,4 +1,5 @@
-// parse_int, split, sort, index_of, contains, and `set x += e` / `set x -= e` (draft 0.10, stage 1 only).
+// parse_int, split, sort, index_of, contains, to_lower, to_upper, exit_with, `+` on lists,
+// `set x += e` / `set x -= e`, and an `if` whose `then` branch takes its type from `else` (drafts 0.10 to 0.12, stage 1 only).
 
 fn show(value: Option[Int]) -> Text {
 match value {
@@ -7,7 +8,7 @@ match value {
 }
 }
 
-fn main() -> Unit uses io {
+fn main() -> Unit uses io, env {
 print(show(parse_int("42")))
 print(show(parse_int("-17")))
 print(show(parse_int("+5")))
@@ -26,7 +27,7 @@ var total = 0
 var parts: List[Text] = []
 for n in numbers {
 set total += n
-set parts = append(parts, "\(n)")
+set parts += ["\(n)"]
 }
 print(join(parts, " "))
 set total -= 1
@@ -39,4 +40,13 @@ print(show(index_of(["x", "y"], "z")))
 print(show(index_of("héllo world", "world")))
 print(show(index_of("abc", "")))
 print("\(contains([1, 2, 3], 2)) \(contains([1, 2, 3], 9)) \(contains("key: value", ": ")) \(contains("abc", "d"))")
+let joined = [1, 2] + [3]
+let empty: List[Int] = []
+print("\(length(joined + empty)) \(length(empty + joined)) \(joined[2])")
+print("\(to_lower("Hello WÖRLD 42")) \(to_upper("straße"))")
+let arg = "+7"
+let parsed = if contains(arg, "+") { .None } else { parse_int(arg) }
+let fallback = if length(arg) > 5 { [] } else { [1, 2] }
+print("\(show(parsed)) \(length(fallback))")
+exit_with(0, "done (on standard error)")
 }

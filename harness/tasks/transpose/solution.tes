@@ -20,8 +20,7 @@ set rows = append(rows, cells(argument))
 let width = length(rows[0])
 for row in rows {
 if length(row) != width {
-print("error: ragged matrix")
-exit(1)
+exit_with(1, "error: ragged matrix")
 }
 }
 for column in range(0, width) {

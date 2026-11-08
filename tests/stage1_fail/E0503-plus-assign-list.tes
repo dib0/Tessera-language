@@ -1,6 +1,0 @@
-// `+=` uses `+`, which does not combine lists; use `append` or `concat`.
-fn main() -> Unit uses io {
-var items = [1]
-set items += [2]
-print("\(length(items))")
-}

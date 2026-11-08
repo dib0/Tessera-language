@@ -19,7 +19,8 @@
         "deposit:10",
         "withdraw:11"
       ],
-      "stdout": "error: insufficient funds at transaction 2\n",
+      "stdout": "",
+      "stderr": "error: insufficient funds at transaction 2\n",
       "exit": 1
     },
     {
@@ -27,14 +28,16 @@
         "deposit:10",
         "steal:5"
       ],
-      "stdout": "error: invalid transaction at 2\n",
+      "stdout": "",
+      "stderr": "error: invalid transaction at 2\n",
       "exit": 1
     },
     {
       "args": [
         "deposit:x"
       ],
-      "stdout": "error: invalid transaction at 1\n",
+      "stdout": "",
+      "stderr": "error: invalid transaction at 1\n",
       "exit": 1
     },
     {

@@ -51,8 +51,7 @@ fn main() -> Unit uses io, env {
 match evaluate(args()) {
 Result.Ok(value) => print(to_text(value))
 Result.Error(message) => {
-print("error: " + message)
-exit(1)
+exit_with(1, "error: " + message)
 }
 }
 }

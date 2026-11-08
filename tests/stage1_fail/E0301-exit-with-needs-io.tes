@@ -1,0 +1,5 @@
+// `exit_with` prints, so it needs `io` as well as `env`.
+fn stop(message: Text) -> Unit uses env {
+exit_with(1, message)
+}
+fn main() -> Unit uses io, env = stop("error")

@@ -1,17 +1,17 @@
 """Part 2: tasks with records, enums, Result, recursion; fix and extend tasks."""
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
-from make_tasks_part1 import task, t  # noqa: E402  (re-running part 1 is harmless)
+from make_tasks_part1 import task, t, e  # noqa: E402  (re-running part 1 is harmless)
 
 task("ledger", "write", """
 Write a program that processes bank transactions given as command-line arguments, in order. The balance starts at 0. Each argument is `deposit:AMOUNT` or `withdraw:AMOUNT`, where AMOUNT is a positive decimal integer.
 - After all transactions, print `balance: B`.
-- If a withdrawal is larger than the current balance, print `error: insufficient funds at transaction N` (N counts from 1) and exit with code 1 immediately.
-- If an argument is malformed (unknown kind, missing or non-numeric amount, amount 0), print `error: invalid transaction at N` and exit with code 1 immediately.
+- If a withdrawal is larger than the current balance, print `error: insufficient funds at transaction N` (N counts from 1) to standard error and exit with code 1 immediately.
+- If an argument is malformed (unknown kind, missing or non-numeric amount, amount 0), print `error: invalid transaction at N` to standard error and exit with code 1 immediately.
 """, [t(["deposit:100", "withdraw:30", "deposit:5"], "balance: 75\n"),
-      t(["deposit:10", "withdraw:11"], "error: insufficient funds at transaction 2\n", 1),
-      t(["deposit:10", "steal:5"], "error: invalid transaction at 2\n", 1),
-      t(["deposit:x"], "error: invalid transaction at 1\n", 1),
+      e(["deposit:10", "withdraw:11"], "error: insufficient funds at transaction 2\n"),
+      e(["deposit:10", "steal:5"], "error: invalid transaction at 2\n"),
+      e(["deposit:x"], "error: invalid transaction at 1\n"),
       t([], "balance: 0\n")], """
 enum Kind {
     Deposit
@@ -68,8 +68,7 @@ fn main() -> Unit uses io, env {
         let number = to_text(index + 1)
         match parse(arguments[index]) {
             Option.None => {
-                print("error: invalid transaction at " + number)
-                exit(1)
+                exit_with(1, "error: invalid transaction at " + number)
             }
             Option.Some(transaction) => match transaction.kind {
                 Kind.Deposit => {
@@ -77,8 +76,7 @@ fn main() -> Unit uses io, env {
                 }
                 Kind.Withdraw => {
                     if transaction.amount > balance {
-                        print("error: insufficient funds at transaction " + number)
-                        exit(1)
+                        exit_with(1, "error: insufficient funds at transaction " + number)
                     }
                     set balance = balance - transaction.amount
                 }
@@ -91,13 +89,13 @@ fn main() -> Unit uses io, env {
 
 task("rpn", "write", """
 Write a calculator for expressions in reverse Polish notation. Each command-line argument is one token: a non-negative decimal integer, or one of the operators `+`, `-`, `*`, `/` (integer division, truncating toward zero). Evaluate the expression and print the single resulting value.
-Errors print one line and exit with code 1:
+Errors print one line to standard error and exit with code 1:
 - `error: stack underflow` when an operator needs more values than available,
 - `error: division by zero`,
 - `error: invalid token TOKEN` for anything else,
 - `error: expected one result` when the expression leaves zero or several values.
-""", [t(["3", "4", "+", "2", "*"], "14\n"), t(["7", "2", "-", "10", "/"], "0\n"), t(["1", "+"], "error: stack underflow\n", 1),
-      t(["4", "0", "/"], "error: division by zero\n", 1), t(["2", "x", "+"], "error: invalid token x\n", 1), t(["1", "2"], "error: expected one result\n", 1)], """
+""", [t(["3", "4", "+", "2", "*"], "14\n"), t(["7", "2", "-", "10", "/"], "0\n"), e(["1", "+"], "error: stack underflow\n"),
+      e(["4", "0", "/"], "error: division by zero\n"), e(["2", "x", "+"], "error: invalid token x\n"), e(["1", "2"], "error: expected one result\n")], """
 fn parse_number(text: Text) -> Option[Int] {
     let codes = code_points(text)
     if length(codes) == 0 {
@@ -151,8 +149,7 @@ fn main() -> Unit uses io, env {
     match evaluate(args()) {
         Result.Ok(value) => print(to_text(value))
         Result.Error(message) => {
-            print("error: " + message)
-            exit(1)
+            exit_with(1, "error: " + message)
         }
     }
 }
@@ -257,8 +254,8 @@ fn main() -> Unit uses io, env {
 """)
 
 task("transpose", "write", """
-Write a program that transposes a matrix. Each command-line argument is one row: cells separated by commas, for example `1,2,3`. Cells are arbitrary text without commas. Print the transposed matrix, one row per line, cells separated by commas. If the rows do not all have the same number of cells, print `error: ragged matrix` and exit with code 1.
-""", [t(["1,2,3", "4,5,6"], "1,4\n2,5\n3,6\n"), t(["a,b", "c"], "error: ragged matrix\n", 1), t(["x"], "x\n")], """
+Write a program that transposes a matrix. Each command-line argument is one row: cells separated by commas, for example `1,2,3`. Cells are arbitrary text without commas. Print the transposed matrix, one row per line, cells separated by commas. If the rows do not all have the same number of cells, print `error: ragged matrix` to standard error and exit with code 1.
+""", [t(["1,2,3", "4,5,6"], "1,4\n2,5\n3,6\n"), e(["a,b", "c"], "error: ragged matrix\n"), t(["x"], "x\n")], """
 fn cells(row: Text) -> List[Text] {
     var out: List[Text] = []
     var current: List[Int] = []
@@ -281,8 +278,7 @@ fn main() -> Unit uses io, env {
     let width = length(rows[0])
     for row in rows {
         if length(row) != width {
-            print("error: ragged matrix")
-            exit(1)
+            exit_with(1, "error: ragged matrix")
         }
     }
     for column in range(0, width) {
@@ -523,13 +519,13 @@ fn main() -> Unit uses io, env {
 
 task("extend-inventory", "extend", """
 The program below keeps an inventory. Each command-line argument is a command: `add:ITEM:QTY` adds QTY units of ITEM (new items are appended), `remove:ITEM:QTY` removes units. At the end it prints every item with a non-zero quantity as `ITEM QTY`, in order of first addition. Extend it:
-1. Make `remove` fail when an item is unknown or has fewer units than requested: print `error: cannot remove QTY ITEM` and exit with code 1. Use a `Result` returned from the function that applies a command.
+1. Make `remove` fail when an item is unknown or has fewer units than requested: print `error: cannot remove QTY ITEM` to standard error and exit with code 1. Use a `Result` returned from the function that applies a command.
 2. Add a command `clear:ITEM` that sets the quantity of a known item to 0 (unknown items are ignored).
-3. Any other command prints `error: unknown command ARG` (with the whole argument) and exits with code 1.
+3. Any other command prints `error: unknown command ARG` (with the whole argument) to standard error and exits with code 1.
 """, [t(["add:apple:5", "add:pear:2", "remove:apple:3", "add:fig:1", "clear:pear"], "apple 2\nfig 1\n"),
-      t(["add:apple:1", "remove:apple:2"], "error: cannot remove 2 apple\n", 1),
-      t(["remove:kiwi:1"], "error: cannot remove 1 kiwi\n", 1),
-      t(["add:apple:1", "eat:apple"], "error: unknown command eat:apple\n", 1)], """
+      e(["add:apple:1", "remove:apple:2"], "error: cannot remove 2 apple\n"),
+      e(["remove:kiwi:1"], "error: cannot remove 1 kiwi\n"),
+      e(["add:apple:1", "eat:apple"], "error: unknown command eat:apple\n")], """
 type Stock {
     items: List[Text]
     quantities: List[Int]
@@ -571,8 +567,7 @@ fn main() -> Unit uses io, env {
         match apply(stock, argument) {
             .Ok(updated) => set stock = updated
             .Error(message) => {
-                print("error: \\(message)")
-                exit(1)
+                exit_with(1, "error: \\(message)")
             }
         }
     }

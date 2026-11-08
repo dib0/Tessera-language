@@ -18,6 +18,10 @@ def task(tid, kind, prompt, tests, solution, starter=None, effects=("io", "env")
 def t(args, stdout, exit=0):
     return {"args": args, "stdout": stdout, "exit": exit}
 
+def e(args, stderr, exit=1):
+    """An error case: nothing on standard output, `stderr` on standard error."""
+    return {"args": args, "stdout": "", "stderr": stderr, "exit": exit}
+
 task("fizzbuzz", "write", """
 Write a program that takes one command-line argument, a positive integer N, and prints the numbers 1 to N, one per line. For multiples of 3 print `Fizz` instead of the number, for multiples of 5 print `Buzz`, and for multiples of both print `FizzBuzz`.
 """, [t(["15"], "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz\n"), t(["3"], "1\n2\nFizz\n")], """
@@ -293,8 +297,8 @@ fn main() -> Unit uses io, env {
 """)
 
 task("sort-numbers", "write", """
-Write a program that sorts integers. Every command-line argument must be an integer, optionally with a leading `-`. Print the numbers in ascending order on one line, separated by single spaces. If an argument is not an integer, print `error: not a number: ARG` (with the argument) and exit with code 1 without printing anything else.
-""", [t(["5", "-3", "10", "0", "-3"], "-3 -3 0 5 10\n"), t(["4", "x1", "2"], "error: not a number: x1\n", 1), t(["7"], "7\n")], """
+Write a program that sorts integers. Every command-line argument must be an integer, optionally with a leading `-`. Print the numbers in ascending order on one line, separated by single spaces. If an argument is not an integer, print `error: not a number: ARG` (with the argument) to standard error and exit with code 1 without printing anything else.
+""", [t(["5", "-3", "10", "0", "-3"], "-3 -3 0 5 10\n"), e(["4", "x1", "2"], "error: not a number: x1\n"), t(["7"], "7\n")], """
 fn parse(text: Text) -> Result[Int, Text] {
     let codes = code_points(text)
     var start = 0
@@ -343,8 +347,7 @@ fn main() -> Unit uses io, env {
             print(join(parts, " "))
         }
         Result.Error(bad) => {
-            print("error: not a number: " + bad)
-            exit(1)
+            exit_with(1, "error: not a number: " + bad)
         }
     }
 }

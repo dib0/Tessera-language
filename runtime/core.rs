@@ -65,7 +65,13 @@ fn t_split(text: &Rc<String>, sep: &Rc<String>) -> Rc<Vec<Rc<String>>> {
     if sep.is_empty() { return Rc::new(text.chars().map(|c| Rc::new(c.to_string())).collect()); }
     Rc::new(text.split(sep.as_str()).map(|p| Rc::new(p.to_string())).collect())
 }
-fn t_parse_int(text: &Rc<String>) -> Option<i64> { text.parse::<i64>().ok() }
+fn t_to_lower(text: &Rc<String>) -> Rc<String> { Rc::new(text.to_lowercase()) }
+fn t_to_upper(text: &Rc<String>) -> Rc<String> { Rc::new(text.to_uppercase()) }
+fn t_parse_int(text: &Rc<String>) -> Option<i64> {
+    // Only a leading `-`, matching what `to_text` produces; Rust's parser would also accept `+`.
+    if text.starts_with('+') { return None; }
+    text.parse::<i64>().ok()
+}
 fn t_text_index_of(text: &Rc<String>, part: &Rc<String>) -> Option<i64> {
     text.find(part.as_str()).map(|byte| text[..byte].chars().count() as i64)
 }
@@ -140,6 +146,12 @@ fn t_args(loc: &str) -> Rc<Vec<Rc<String>>> {
 fn t_exit(code: i64, loc: &str) -> ! {
     if !(0..=255).contains(&code) { t_fail("R009", format!("exit code {} is outside 0..255", code), loc) }
     let _ = std::io::stdout().flush();
+    std::process::exit(code as i32)
+}
+fn t_exit_with(code: i64, message: Rc<String>, loc: &str) -> ! {
+    if !(0..=255).contains(&code) { t_fail("R009", format!("exit code {} is outside 0..255", code), loc) }
+    let _ = std::io::stdout().flush();
+    eprintln!("{}", message);
     std::process::exit(code as i32)
 }
 fn t_user_fail(message: Rc<String>, loc: &str) -> ! { t_fail("R010", message.to_string(), loc) }

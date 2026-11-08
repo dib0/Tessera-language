@@ -22,7 +22,8 @@
         "x1",
         "2"
       ],
-      "stdout": "error: not a number: x1\n",
+      "stdout": "",
+      "stderr": "error: not a number: x1\n",
       "exit": 1
     },
     {

@@ -32,7 +32,8 @@
         "1",
         "+"
       ],
-      "stdout": "error: stack underflow\n",
+      "stdout": "",
+      "stderr": "error: stack underflow\n",
       "exit": 1
     },
     {
@@ -41,7 +42,8 @@
         "0",
         "/"
       ],
-      "stdout": "error: division by zero\n",
+      "stdout": "",
+      "stderr": "error: division by zero\n",
       "exit": 1
     },
     {
@@ -50,7 +52,8 @@
         "x",
         "+"
       ],
-      "stdout": "error: invalid token x\n",
+      "stdout": "",
+      "stderr": "error: invalid token x\n",
       "exit": 1
     },
     {
@@ -58,7 +61,8 @@
         "1",
         "2"
       ],
-      "stdout": "error: expected one result\n",
+      "stdout": "",
+      "stderr": "error: expected one result\n",
       "exit": 1
     }
   ]

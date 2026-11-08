@@ -63,8 +63,8 @@ let squared = square(x)
 
 | Effect | Allows |
 |---|---|
-| `io` | `print`, `print_error` |
-| `env` | `args`, `exit`, `environment_variable` |
+| `io` | `print`, `print_error`, `exit_with` |
+| `env` | `args`, `exit`, `exit_with`, `environment_variable` |
 | `fs` | `read_file`, `write_file`, `file_exists` |
 
 ## Bindings
@@ -79,7 +79,7 @@ let _ = compute()              // discard a value explicitly
 ```
 
 - A `var` that is never `set` is an error. Parameters cannot be changed.
-- `set x += e` works where `x + e` works (`Int`, `Text`), `set x -= e` for `Int`.
+- `set x += e` works where `x + e` works (`Int`, `Text`, lists: `set xs += [item]`), `set x -= e` for `Int`.
 - No shadowing: a name cannot be declared again while it is in scope (including in nested blocks).
 - An expression statement must not produce a value: use it, or `let _ = ...`.
 
@@ -87,7 +87,7 @@ let _ = compute()              // discard a value explicitly
 
 Precedence from high to low: call `f(x)`, index `xs[i]`, field `r.f`, `with`; unary `-x`, `not x`, `try x`; `* / %`; `+ -`; comparisons `== != < <= > >=`; `and`; `or`.
 
-- `+` adds `Int` or concatenates `Text`. `< <= > >=` work on `Int` only. `==` compares any two values of the same type by value.
+- `+` adds `Int`, or joins two `Text` values or two lists of the same type (`[1, 2] + [3]`). `< <= > >=` work on `Int` only. `==` compares any two values of the same type by value.
 - Comparisons do not chain (`a < b < c` is an error). `and` and `or` cannot be mixed without parentheses. `not a == b` is an error: write `not (a == b)`.
 - `/` truncates toward zero; division by zero is a runtime error. Indexing out of bounds is a runtime error.
 
@@ -216,10 +216,8 @@ return .Some(word)
 |---|---|
 | `print`, `print_error` | `(value: Text) -> Unit uses io` (adds a newline) |
 | `to_text` | `(value: Int or Bool) -> Text` |
-| `parse_int` | `(text: Text) -> Option[Int]` (optional `-`/`+`, then digits; anything else, spaces or overflow give `.None`) |
+| `parse_int` | `(text: Text) -> Option[Int]` (optional `-`, then digits; anything else, including `+`, spaces or overflow, gives `.None`) |
 | `length` | `(value: List[T] or Text) -> Int` (Text: number of characters) |
-| `append` | `(list: List[T], item: T) -> List[T]` |
-| `concat` | `(first: List[T], second: List[T]) -> List[T]` |
 | `slice` | `(list: List[T], start: Int, end: Int) -> List[T]` (end exclusive) |
 | `replace_at` | `(list: List[T], index: Int, item: T) -> List[T]` |
 | `sort` | `(list: List[Int] or List[Text]) -> same type` (ascending; Text by code points, so `"Z"` before `"a"`) |
@@ -228,17 +226,21 @@ return .Some(word)
 | `range` | `(start: Int, end: Int) -> List[Int]` (end exclusive) |
 | `split` | `(text: Text, separator: Text) -> List[Text]` (keeps empty parts: `split("a,,b", ",")` is `["a", "", "b"]`; separator `""` gives the characters) |
 | `join` | `(parts: List[Text], separator: Text) -> Text` |
+| `to_lower`, `to_upper` | `(text: Text) -> Text` (Unicode rules) |
 | `code_points` | `(text: Text) -> List[Int]` (Unicode code points) |
 | `from_code_point` | `(code: Int) -> Text` |
 | `from_code_points` | `(codes: List[Int]) -> Text` |
 | `value_or` | `(option: Option[T], default: T) -> T` |
 | `args` | `() -> List[Text] uses env` (command-line arguments, without the program name) |
 | `exit` | `(code: Int) -> Never uses env` (exit code 0 to 255) |
+| `exit_with` | `(code: Int, message: Text) -> Never uses io, env` (prints `message` and a newline to standard error, then exits) |
 | `fail` | `(message: Text) -> Never` (stops with a runtime error; for impossible states) |
 
 There is no string indexing and no map type. Characters are handled through `split(text, "")` or `code_points` (`"a"` is 97, `"0"` is 48, space is 32, newline is 10) and rebuilt with `join` or `from_code_point(s)`.
 
-Building a list or text in a loop with `set xs = append(xs, item)` or `set text += piece` is efficient.
+Building a list or text in a loop with `set xs += [item]` or `set text += piece` is efficient.
+
+Error messages belong on standard error: `exit_with(1, "error: \(reason)")` reports and stops in one call, and its type `Never` fits anywhere, for example as a `match` arm that has no value to produce.
 
 ## Diagnostics
 

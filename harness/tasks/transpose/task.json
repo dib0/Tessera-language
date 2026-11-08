@@ -18,7 +18,8 @@
         "a,b",
         "c"
       ],
-      "stdout": "error: ragged matrix\n",
+      "stdout": "",
+      "stderr": "error: ragged matrix\n",
       "exit": 1
     },
     {

@@ -1,0 +1,5 @@
+// The `then` branch takes its type from `else`, so `.None` next to an `Int` has no `Option` type.
+fn main() -> Unit uses io {
+let x = if true { .None } else { 5 }
+print("\(x)")
+}

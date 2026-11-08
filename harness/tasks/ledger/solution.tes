@@ -53,8 +53,7 @@ for index in range(0, length(arguments)) {
 let number = to_text(index + 1)
 match parse(arguments[index]) {
 Option.None => {
-print("error: invalid transaction at " + number)
-exit(1)
+exit_with(1, "error: invalid transaction at " + number)
 }
 Option.Some(transaction) => match transaction.kind {
 Kind.Deposit => {
@@ -62,8 +61,7 @@ set balance = balance + transaction.amount
 }
 Kind.Withdraw => {
 if transaction.amount > balance {
-print("error: insufficient funds at transaction " + number)
-exit(1)
+exit_with(1, "error: insufficient funds at transaction " + number)
 }
 set balance = balance - transaction.amount
 }

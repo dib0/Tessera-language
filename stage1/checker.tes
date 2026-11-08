@@ -122,10 +122,13 @@ builtin("from_code_points", [list_of(.Int)], .Text, ""),
 builtin("join", [list_of(.Text), .Text], .Text, ""),
 builtin("split", [.Text, .Text], list_of(.Text), ""),
 builtin("parse_int", [.Text], .Option(.Int), ""),
+builtin("to_lower", [.Text], .Text, ""),
+builtin("to_upper", [.Text], .Text, ""),
 builtin("read_file", [.Text], .Text, "fs"),
 builtin("write_file", [.Text, .Text], .Unit, "fs"),
 builtin("args", [], list_of(.Text), "env"),
 builtin("exit", [.Int], .Never, "env"),
+builtin("exit_with", [.Int, .Text], .Never, "env"),
 builtin("fail", [.Text], .Never, ""),
 builtin("file_exists", [.Text], .Bool, "fs"),
 builtin("environment_variable", [.Text], .Text, "env"),
@@ -1246,6 +1249,20 @@ let d = source.error_help("E0506", tail_or_block_span(then_block), "this `if` ha
 checked(report(then_result.checker, d), typed, .Unit)
 }
 .Some(else_expr) => {
+if expected == .Unknown and block_needs_context(then_block) {
+// `if bad { .None } else { parse_int(text) }`: the `else` branch gives the `then` branch its type.
+let first = check_expr(cond.checker, else_expr, .Unknown)
+let then_hint = if first.expr.ty == .Never { ast.Type.Unknown } else { first.expr.ty }
+let second = check_block(first.checker, then_block, then_hint)
+let swapped = e with { kind: .If(cond.expr, second.block, .Some(first.expr)) }
+match join_types(second.ty, first.expr.ty) {
+.Some(joined) => return checked(second.checker, swapped, joined)
+.None => {}
+}
+let then_text = ast.type_text(second.ty)
+let d = source.error("E0506", tail_or_block_span(then_block), "`if` and `else` have different types: `\(then_text)` and `\(ast.type_text(first.expr.ty))`")
+return checked(report(second.checker, d with { label: "this is `\(then_text)`" }), swapped, .Unknown)
+}
 let then_result = check_block(cond.checker, then_block, expected)
 let hint = if expected != .Unknown { expected } else if then_result.ty != .Never { then_result.ty } else { .Unknown }
 let else_result = check_expr(then_result.checker, else_expr, hint)
@@ -1258,6 +1275,18 @@ let else_text = ast.type_text(else_result.expr.ty)
 let d = source.error("E0506", else_expr.span, "`if` and `else` have different types: `\(ast.type_text(then_result.ty))` and `\(else_text)`")
 checked(report(else_result.checker, d with { label: "this is `\(else_text)`" }), typed, .Unknown)
 }
+}
+}
+
+note "True when the block's value gets its type only from the context: `.Variant`, `Option.None`, `Result.Ok(x)` or `[]`."
+fn block_needs_context(block: ast.Block) -> Bool {
+match block.tail {
+.Some(tail) => match tail.kind {
+.VariantLiteral(type_name, _, _, _) => type_name == "" or type_name == "Option" or type_name == "Result"
+.ListLiteral(items) => length(items) == 0
+_ => false
+}
+.None => false
 }
 }
 
@@ -1396,6 +1425,13 @@ let d = source.error_help("E0508", tail_or_block_span(body), "the body of `\(wha
 CheckedBlock { checker: report(result.checker, d), block: result.block, ty: result.ty }
 }
 
+fn is_list_type(t: ast.Type) -> Bool {
+match t {
+.List(_) => true
+_ => false
+}
+}
+
 fn check_binary(c: Checker, e: ast.Expr, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> Checked {
 let symbol = ast.binary_symbol(op)
 if op == .Add {
@@ -1410,6 +1446,18 @@ return checked(after, typed, .Int)
 }
 if left_type == .Text and right_type == .Text {
 return checked(after, typed, .Text)
+}
+if is_list_type(left_type) and is_list_type(right_type) {
+match join_types(left_type, right_type) {
+.Some(joined) => return checked(after, typed, joined)
+.None => {}
+}
+}
+if left_type == .Unknown and is_list_type(right_type) {
+return checked(after, typed, right_type)
+}
+if right_type == .Unknown and is_list_type(left_type) {
+return checked(after, typed, left_type)
 }
 let simple_left = left_type == .Int or left_type == .Text or left_type == .Unknown
 let simple_right = right_type == .Int or right_type == .Text or right_type == .Unknown
@@ -1428,7 +1476,7 @@ _ => false
 if mixed {
 set d = d with { help: "convert the number with `to_text(...)`; Tessera has no implicit conversions" }
 } else if left_is_list {
-set d = d with { help: "use `concat(a, b)` to join lists or `append(list, item)` to add one item" }
+set d = d with { help: "`+` joins two lists of the same type; to add one item write `list + [item]`" }
 }
 return checked(report(after, d), typed, .Unknown)
 }
@@ -1675,7 +1723,7 @@ checked(after, e with { kind: .RecordUpdate(target_result.expr, typed) }, if val
 
 fn shorthand_error(variant: Text, span: source.Span, expected: ast.Type) -> source.Diagnostic {
 let context = if expected == .Unknown { "no type is expected here" } else { "a `\(ast.type_text(expected))` is expected here" }
-source.error_help("E0518", span, "cannot tell which type `.\(variant)` belongs to: \(context)", "write the type in front, e.g. `MyEnum.\(variant)`, or use `.\(variant)` where an enum, `Option` or `Result` is expected")
+source.error_help("E0518", span, "cannot tell which type `.\(variant)` belongs to: \(context)", if variant == "None" or variant == "Some" or variant == "Ok" or variant == "Error" { "give the binding a type, e.g. `let value: Option[Int] = ...`, or return the value from a function whose return type says it" } else { "write the enum in front, e.g. `Color.\(variant)`, or give the binding a type" })
 }
 
 note "`.Variant` takes its type from the context: the expected enum, `Option` or `Result`."
@@ -2112,6 +2160,9 @@ set c = use_effect(c, b.effect, name, e.span)
 }
 if name == "next_event" {
 set c = mark_window_event(c, "WindowEvent")
+}
+if name == "exit_with" {
+set c = use_effect(c, "io", name, e.span)
 }
 if length(args) != length(b.params) {
 let all = arity_error(c, name, args, length(b.params), e.span)

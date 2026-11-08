@@ -395,7 +395,11 @@ let loc = location(g, op_span)
 let a = l.text
 let b = r.text
 let text = match op {
-.Add => if e.ty == .Text { "t_concat(\(a), \(b))" } else { "t_add(\(a), \(b), \(loc))" }
+.Add => match e.ty {
+.Text => "t_concat(\(a), \(b))"
+.List(_) => "t_concat_lists(\(a), \(b))"
+_ => "t_add(\(a), \(b), \(loc))"
+}
 .Subtract => "t_sub(" + a + ", " + b + ", " + loc + ")"
 .Multiply => "t_mul(" + a + ", " + b + ", " + loc + ")"
 .Divide => "t_div(" + a + ", " + b + ", " + loc + ")"
@@ -607,6 +611,9 @@ _ => call_plain("t_int_to_text", a)
 "write_file" => call_with_location("t_write_file", a, loc)
 "args" => call_with_location("t_args", a, loc)
 "exit" => call_with_location("t_exit", a, loc)
+"exit_with" => call_with_location("t_exit_with", a, loc)
+"to_lower" => "t_to_lower(&" + a[0] + ")"
+"to_upper" => "t_to_upper(&" + a[0] + ")"
 "fail" => call_with_location("t_user_fail", a, loc)
 "file_exists" => call_plain("t_file_exists", a)
 "environment_variable" => call_plain("t_environment_variable", a)

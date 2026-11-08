@@ -39,8 +39,7 @@ for argument in args() {
 match apply(stock, argument) {
 .Ok(updated) => set stock = updated
 .Error(message) => {
-print("error: \(message)")
-exit(1)
+exit_with(1, "error: \(message)")
 }
 }
 }

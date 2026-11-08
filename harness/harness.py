@@ -194,6 +194,8 @@ def task_message(task: Task, variant: Variant) -> str:
     text += "\nExamples (arguments, expected output, expected exit code):\n"
     for test in examples:
         text += f"\n- arguments: {json.dumps(test['args'])}\n  exit code: {test['exit']}\n  output:\n```\n{test['stdout']}```\n"
+        if "stderr" in test:
+            text += f"  standard error:\n```\n{test['stderr']}```\n"
     return text
 
 
@@ -246,13 +248,17 @@ def check_answer(code: str | None, task: Task, workdir: str) -> Check:
             stderr = run.stderr
         except subprocess.TimeoutExpired:
             stdout, exit_code, stderr = "", None, f"(no result: the program ran longer than {RUN_TIMEOUT} seconds)"
-        if stdout != test["stdout"] or exit_code != test["exit"]:
+        # Standard error is only compared for tests that specify it (error cases).
+        stderr_wrong = "stderr" in test and stderr != test["stderr"]
+        if stdout != test["stdout"] or exit_code != test["exit"] or stderr_wrong:
             message = (f"The program compiled, but test {number} of {len(task.tests)} failed.\n\n"
                        f"Arguments: {json.dumps(test['args'])}\n\nExpected output:\n```\n{test['stdout']}```\n"
                        f"Actual output:\n```\n{stdout}```\nExpected exit code {test['exit']}, got {exit_code}.")
-            if stderr.strip():
+            if "stderr" in test:
+                message += f"\n\nExpected standard error:\n```\n{test['stderr']}```\nActual standard error:\n```\n{stderr[:2000]}```"
+            elif stderr.strip():
                 message += "\n\nStandard error:\n```\n" + stderr.strip()[:2000] + "\n```"
-            return Check("test", message, {"test": number, "stdout": stdout, "exit": exit_code})
+            return Check("test", message, {"test": number, "stdout": stdout, "stderr": stderr, "exit": exit_code})
     return Check("pass")
 
 

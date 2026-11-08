@@ -1,0 +1,5 @@
+// `+` joins two lists of the same type only.
+fn main() -> Unit uses io {
+let mixed = [1, 2] + ["three"]
+print("\(length(mixed))")
+}

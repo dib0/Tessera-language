@@ -46,8 +46,7 @@ set parts = append(parts, to_text(value))
 print(join(parts, " "))
 }
 Result.Error(bad) => {
-print("error: not a number: " + bad)
-exit(1)
+exit_with(1, "error: not a number: " + bad)
 }
 }
 }
