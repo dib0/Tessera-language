@@ -1,0 +1,3 @@
+// `parse_int` is built in and cannot be defined again.
+fn parse_int(text: Text) -> Int = length(text)
+fn main() -> Unit uses io = print("\(parse_int("12"))")

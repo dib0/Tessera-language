@@ -573,11 +573,20 @@ let name = identifier(advance(p), "the name of a `var`")
 if name.parser.failed {
 return dummy_statement(name.parser)
 }
-if not at(name.parser, .Assign) {
-return dummy_statement(unexpected(name.parser, "`=`"))
+let op = peek(name.parser)
+if op != .Assign and op != .PlusAssign and op != .MinusAssign {
+return dummy_statement(unexpected(name.parser, "`=`, `+=` or `-=`"))
 }
+let op_span = current_span(name.parser)
 let value = parse_expr(advance(name.parser), true)
+if op == .Assign or value.parser.failed {
 return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, value.expr) }
+}
+// `set x += e` means `set x = x + e`; the checker and code generator only see the long form.
+let binary_op = if op == .PlusAssign { ast.BinaryOp.Add } else { ast.BinaryOp.Subtract }
+let target = ast.Expr { kind: .Name(name.name), span: name.span, ty: .Unknown }
+let combined = ast.Expr { kind: .Binary(binary_op, op_span, target, value.expr), span: source.span_to(name.span, value.expr.span), ty: .Unknown }
+return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, combined) }
 }
 if kind == .For {
 let variable = loop_variable(advance(p))
@@ -596,7 +605,7 @@ return dummy_statement(condition.parser)
 let body = parse_block(condition.parser)
 return StatementResult { parser: body.parser, statement: .While(condition.expr, body.block) }
 }
-if kind == .Ident and peek_at(p, 1) == .Assign {
+if kind == .Ident and (peek_at(p, 1) == .Assign or peek_at(p, 1) == .PlusAssign or peek_at(p, 1) == .MinusAssign) {
 let d = source.error_help("E0110", current_span(p), "assignment needs `set`", "declare the variable with `var` and change it with `set name = value`")
 return dummy_statement(fail_parse(p, d))
 }

@@ -1,0 +1,6 @@
+// `+=` changes a `var`, so it needs `set`.
+fn main() -> Unit uses io {
+var count = 0
+count += 1
+print("\(count)")
+}

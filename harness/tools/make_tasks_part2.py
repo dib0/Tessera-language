@@ -460,41 +460,25 @@ enum Shape {
     Rect(width: Int, height: Int)
 }
 
-fn parse_int(text: Text) -> Int {
-    var value = 0
-    for code in code_points(text) {
-        set value = value * 10 + (code - 48)
-    }
-    value
-}
-
-fn after(text: Text, separator: Int) -> List[Text] {
-    let codes = code_points(text)
-    for index in range(0, length(codes)) {
-        if codes[index] == separator {
-            return [from_code_points(slice(codes, 0, index)), from_code_points(slice(codes, index + 1, length(codes)))]
-        }
-    }
-    [text, ""]
-}
+fn number(text: Text) -> Int = value_or(parse_int(text), 0)
 
 fn parse(text: Text) -> Shape {
-    let parts = after(text, 58)
+    let parts = split(text, ":")
     match parts[0] {
-        "circle" => Shape.Circle(parse_int(parts[1]))
-        "square" => Shape.Square(parse_int(parts[1]))
+        "circle" => .Circle(number(parts[1]))
+        "square" => .Square(number(parts[1]))
         _ => {
-            let size = after(parts[1], 120)
-            Shape.Rect(parse_int(size[0]), parse_int(size[1]))
+            let size = split(parts[1], "x")
+            .Rect(number(size[0]), number(size[1]))
         }
     }
 }
 
 fn area(shape: Shape) -> Int {
     match shape {
-        Shape.Circle(radius) => 3 * radius * radius
-        Shape.Square(side) => side * side
-        Shape.Rect(width, height) => width * height
+        .Circle(radius) => 3 * radius * radius
+        .Square(side) => side * side
+        .Rect(width, height) => width * height
     }
 }
 
@@ -502,10 +486,10 @@ fn main() -> Unit uses io, env {
     var total = 0
     for argument in args() {
         let value = area(parse(argument))
-        set total = total + value
-        print(to_text(value))
+        set total += value
+        print("\\(value)")
     }
-    print("total: " + to_text(total))
+    print("total: \\(total)")
 }
 """, starter="""
 enum Shape {
@@ -513,42 +497,26 @@ enum Shape {
     Square(side: Int)
 }
 
-fn parse_int(text: Text) -> Int {
-    var value = 0
-    for code in code_points(text) {
-        set value = value * 10 + (code - 48)
-    }
-    value
-}
-
-fn after(text: Text, separator: Int) -> List[Text] {
-    let codes = code_points(text)
-    for index in range(0, length(codes)) {
-        if codes[index] == separator {
-            return [from_code_points(slice(codes, 0, index)), from_code_points(slice(codes, index + 1, length(codes)))]
-        }
-    }
-    [text, ""]
-}
+fn number(text: Text) -> Int = value_or(parse_int(text), 0)
 
 fn parse(text: Text) -> Shape {
-    let parts = after(text, 58)
+    let parts = split(text, ":")
     match parts[0] {
-        "circle" => Shape.Circle(parse_int(parts[1]))
-        _ => Shape.Square(parse_int(parts[1]))
+        "circle" => .Circle(number(parts[1]))
+        _ => .Square(number(parts[1]))
     }
 }
 
 fn area(shape: Shape) -> Int {
     match shape {
-        Shape.Circle(radius) => 3 * radius * radius
-        Shape.Square(side) => side * side
+        .Circle(radius) => 3 * radius * radius
+        .Square(side) => side * side
     }
 }
 
 fn main() -> Unit uses io, env {
     for argument in args() {
-        print(to_text(area(parse(argument))))
+        print("\\(area(parse(argument)))")
     }
 }
 """)
@@ -567,81 +535,50 @@ type Stock {
     quantities: List[Int]
 }
 
-fn parts_of(text: Text) -> List[Text] {
-    var out: List[Text] = []
-    var current: List[Int] = []
-    for code in code_points(text) {
-        if code == 58 {
-            set out = append(out, from_code_points(current))
-            set current = []
-        } else {
-            set current = append(current, code)
-        }
-    }
-    append(out, from_code_points(current))
-}
+fn number(text: Text) -> Int = value_or(parse_int(text), 0)
 
-fn parse_int(text: Text) -> Int {
-    var value = 0
-    for code in code_points(text) {
-        set value = value * 10 + (code - 48)
-    }
-    value
-}
-
-fn index_of(stock: Stock, item: Text) -> Int {
-    for index in range(0, length(stock.items)) {
-        if stock.items[index] == item {
-            return index
-        }
-    }
-    -1
-}
+fn change(stock: Stock, index: Int, quantity: Int) -> Stock = stock with { quantities: replace_at(stock.quantities, index, quantity) }
 
 fn apply(stock: Stock, command: Text) -> Result[Stock, Text] {
-    let parts = parts_of(command)
+    let parts = split(command, ":")
+    let found = if length(parts) >= 2 { index_of(stock.items, parts[1]) } else { .None }
     if length(parts) == 3 and parts[0] == "add" {
-        let quantity = parse_int(parts[2])
-        let index = index_of(stock, parts[1])
-        if index < 0 {
-            return Result.Ok(Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) })
+        let quantity = number(parts[2])
+        return match found {
+            .Some(index) => .Ok(change(stock, index, stock.quantities[index] + quantity))
+            .None => .Ok(Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) })
         }
-        return Result.Ok(stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] + quantity) })
     }
     if length(parts) == 3 and parts[0] == "remove" {
-        let quantity = parse_int(parts[2])
-        let index = index_of(stock, parts[1])
-        if index < 0 or stock.quantities[index] < quantity {
-            return Result.Error("cannot remove " + parts[2] + " " + parts[1])
+        let quantity = number(parts[2])
+        return match found {
+            .Some(index) => if stock.quantities[index] < quantity { .Error("cannot remove \\(parts[2]) \\(parts[1])") } else { .Ok(change(stock, index, stock.quantities[index] - quantity)) }
+            .None => .Error("cannot remove \\(parts[2]) \\(parts[1])")
         }
-        return Result.Ok(stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] - quantity) })
     }
     if length(parts) == 2 and parts[0] == "clear" {
-        let index = index_of(stock, parts[1])
-        if index < 0 {
-            return Result.Ok(stock)
+        return match found {
+            .Some(index) => .Ok(change(stock, index, 0))
+            .None => .Ok(stock)
         }
-        return Result.Ok(stock with { quantities: replace_at(stock.quantities, index, 0) })
     }
-    Result.Error("unknown command " + command)
+    .Error("unknown command \\(command)")
 }
 
 fn main() -> Unit uses io, env {
     var stock = Stock { items: [], quantities: [] }
     for argument in args() {
         match apply(stock, argument) {
-            Result.Ok(updated) => {
-                set stock = updated
-            }
-            Result.Error(message) => {
-                print("error: " + message)
+            .Ok(updated) => set stock = updated
+            .Error(message) => {
+                print("error: \\(message)")
                 exit(1)
             }
         }
     }
     for index in range(0, length(stock.items)) {
         if stock.quantities[index] != 0 {
-            print(stock.items[index] + " " + to_text(stock.quantities[index]))
+            print("\\(stock.items[index]) \\(stock.quantities[index])")
         }
     }
 }
@@ -651,48 +588,17 @@ type Stock {
     quantities: List[Int]
 }
 
-fn parts_of(text: Text) -> List[Text] {
-    var out: List[Text] = []
-    var current: List[Int] = []
-    for code in code_points(text) {
-        if code == 58 {
-            set out = append(out, from_code_points(current))
-            set current = []
-        } else {
-            set current = append(current, code)
-        }
-    }
-    append(out, from_code_points(current))
-}
+fn number(text: Text) -> Int = value_or(parse_int(text), 0)
 
-fn parse_int(text: Text) -> Int {
-    var value = 0
-    for code in code_points(text) {
-        set value = value * 10 + (code - 48)
-    }
-    value
-}
-
-fn index_of(stock: Stock, item: Text) -> Int {
-    for index in range(0, length(stock.items)) {
-        if stock.items[index] == item {
-            return index
-        }
-    }
-    -1
-}
+fn change(stock: Stock, index: Int, quantity: Int) -> Stock = stock with { quantities: replace_at(stock.quantities, index, quantity) }
 
 fn apply(stock: Stock, command: Text) -> Stock {
-    let parts = parts_of(command)
-    let quantity = parse_int(parts[2])
-    let index = index_of(stock, parts[1])
-    if parts[0] == "add" {
-        if index < 0 {
-            return Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) }
-        }
-        return stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] + quantity) }
+    let parts = split(command, ":")
+    let quantity = number(parts[2])
+    match index_of(stock.items, parts[1]) {
+        .Some(index) => if parts[0] == "add" { change(stock, index, stock.quantities[index] + quantity) } else { change(stock, index, stock.quantities[index] - quantity) }
+        .None => Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) }
     }
-    stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] - quantity) }
 }
 
 fn main() -> Unit uses io, env {
@@ -702,7 +608,7 @@ fn main() -> Unit uses io, env {
     }
     for index in range(0, length(stock.items)) {
         if stock.quantities[index] != 0 {
-            print(stock.items[index] + " " + to_text(stock.quantities[index]))
+            print("\\(stock.items[index]) \\(stock.quantities[index])")
         }
     }
 }

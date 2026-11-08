@@ -56,6 +56,8 @@ Minus
 Star
 Slash
 Percent
+PlusAssign
+MinusAssign
 Newline
 Eof
 }
@@ -133,6 +135,8 @@ match kind {
 .Star => "*"
 .Slash => "/"
 .Percent => "%"
+.PlusAssign => "+="
+.MinusAssign => "-="
 _ => "?"
 }
 }
@@ -166,6 +170,8 @@ match kind {
 .Star => true
 .Slash => true
 .Percent => true
+.PlusAssign => true
+.MinusAssign => true
 .And => true
 .Or => true
 .Not => true
@@ -502,6 +508,10 @@ if first == 45 and second == 62 {
 .LtEq
 } else if first == 62 and second == 61 {
 .GtEq
+} else if first == 43 and second == 61 {
+.PlusAssign
+} else if first == 45 and second == 61 {
+.MinusAssign
 } else {
 .Eof
 }

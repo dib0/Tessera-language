@@ -1,0 +1,8 @@
+// `sort` only sorts lists of `Int` or `Text`.
+type Point {
+x: Int
+}
+fn main() -> Unit uses io {
+let points = sort([Point { x: 2 }, Point { x: 1 }])
+print("\(length(points))")
+}

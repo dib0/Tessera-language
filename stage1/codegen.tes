@@ -598,6 +598,11 @@ _ => call_plain("t_int_to_text", a)
 "from_code_point" => call_with_location("t_from_code_point", a, loc)
 "from_code_points" => "t_from_code_points(&" + a[0] + ", " + loc + ")"
 "join" => "t_join(&" + a[0] + ", &" + a[1] + ")"
+"split" => "t_split(&" + a[0] + ", &" + a[1] + ")"
+"parse_int" => "t_parse_int(&" + a[0] + ")"
+"sort" => call_plain("t_sort", a)
+"index_of" => if args[0].ty == .Text { "t_text_index_of(&\(a[0]), &\(a[1]))" } else { "t_index_of(&\(a[0]), &\(a[1]))" }
+"contains" => if args[0].ty == .Text { "t_text_contains(&\(a[0]), &\(a[1]))" } else { "t_contains(&\(a[0]), &\(a[1]))" }
 "read_file" => call_with_location("t_read_file", a, loc)
 "write_file" => call_with_location("t_write_file", a, loc)
 "args" => call_with_location("t_args", a, loc)

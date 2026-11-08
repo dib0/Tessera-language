@@ -3,48 +3,17 @@ items: List[Text]
 quantities: List[Int]
 }
 
-fn parts_of(text: Text) -> List[Text] {
-var out: List[Text] = []
-var current: List[Int] = []
-for code in code_points(text) {
-if code == 58 {
-set out = append(out, from_code_points(current))
-set current = []
-} else {
-set current = append(current, code)
-}
-}
-append(out, from_code_points(current))
-}
+fn number(text: Text) -> Int = value_or(parse_int(text), 0)
 
-fn parse_int(text: Text) -> Int {
-var value = 0
-for code in code_points(text) {
-set value = value * 10 + (code - 48)
-}
-value
-}
-
-fn index_of(stock: Stock, item: Text) -> Int {
-for index in range(0, length(stock.items)) {
-if stock.items[index] == item {
-return index
-}
-}
--1
-}
+fn change(stock: Stock, index: Int, quantity: Int) -> Stock = stock with { quantities: replace_at(stock.quantities, index, quantity) }
 
 fn apply(stock: Stock, command: Text) -> Stock {
-let parts = parts_of(command)
-let quantity = parse_int(parts[2])
-let index = index_of(stock, parts[1])
-if parts[0] == "add" {
-if index < 0 {
-return Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) }
+let parts = split(command, ":")
+let quantity = number(parts[2])
+match index_of(stock.items, parts[1]) {
+.Some(index) => if parts[0] == "add" { change(stock, index, stock.quantities[index] + quantity) } else { change(stock, index, stock.quantities[index] - quantity) }
+.None => Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) }
 }
-return stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] + quantity) }
-}
-stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] - quantity) }
 }
 
 fn main() -> Unit uses io, env {
@@ -54,7 +23,7 @@ set stock = apply(stock, argument)
 }
 for index in range(0, length(stock.items)) {
 if stock.quantities[index] != 0 {
-print(stock.items[index] + " " + to_text(stock.quantities[index]))
+print("\(stock.items[index]) \(stock.quantities[index])")
 }
 }
 }

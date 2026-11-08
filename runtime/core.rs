@@ -61,6 +61,15 @@ fn t_join(parts: &Rc<Vec<Rc<String>>>, sep: &Rc<String>) -> Rc<String> {
     }
     Rc::new(s)
 }
+fn t_split(text: &Rc<String>, sep: &Rc<String>) -> Rc<Vec<Rc<String>>> {
+    if sep.is_empty() { return Rc::new(text.chars().map(|c| Rc::new(c.to_string())).collect()); }
+    Rc::new(text.split(sep.as_str()).map(|p| Rc::new(p.to_string())).collect())
+}
+fn t_parse_int(text: &Rc<String>) -> Option<i64> { text.parse::<i64>().ok() }
+fn t_text_index_of(text: &Rc<String>, part: &Rc<String>) -> Option<i64> {
+    text.find(part.as_str()).map(|byte| text[..byte].chars().count() as i64)
+}
+fn t_text_contains(text: &Rc<String>, part: &Rc<String>) -> bool { text.contains(part.as_str()) }
 
 fn t_list_length<T>(l: &Rc<Vec<T>>) -> i64 { l.len() as i64 }
 fn t_index<T: Clone>(l: &Rc<Vec<T>>, i: i64, loc: &str) -> T {
@@ -88,6 +97,9 @@ fn t_range(start: i64, end: i64, loc: &str) -> Rc<Vec<i64>> {
     if start > end { t_fail("R004", format!("invalid range({}, {}): start is greater than end", start, end), loc) }
     Rc::new((start..end).collect())
 }
+fn t_sort<T: Ord + Clone>(mut l: Rc<Vec<T>>) -> Rc<Vec<T>> { Rc::make_mut(&mut l).sort(); l }
+fn t_index_of<T: PartialEq>(l: &Rc<Vec<T>>, x: &T) -> Option<i64> { l.iter().position(|y| y == x).map(|i| i as i64) }
+fn t_contains<T: PartialEq>(l: &Rc<Vec<T>>, x: &T) -> bool { l.iter().any(|y| y == x) }
 fn t_value_or<T>(option: Option<T>, default: T) -> T { match option { Some(v) => v, None => default } }
 fn t_iter<T: Clone>(l: Rc<Vec<T>>) -> impl Iterator<Item = T> { (0..l.len()).map(move |i| l[i].clone()) }
 

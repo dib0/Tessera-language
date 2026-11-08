@@ -3,81 +3,50 @@ items: List[Text]
 quantities: List[Int]
 }
 
-fn parts_of(text: Text) -> List[Text] {
-var out: List[Text] = []
-var current: List[Int] = []
-for code in code_points(text) {
-if code == 58 {
-set out = append(out, from_code_points(current))
-set current = []
-} else {
-set current = append(current, code)
-}
-}
-append(out, from_code_points(current))
-}
+fn number(text: Text) -> Int = value_or(parse_int(text), 0)
 
-fn parse_int(text: Text) -> Int {
-var value = 0
-for code in code_points(text) {
-set value = value * 10 + (code - 48)
-}
-value
-}
-
-fn index_of(stock: Stock, item: Text) -> Int {
-for index in range(0, length(stock.items)) {
-if stock.items[index] == item {
-return index
-}
-}
--1
-}
+fn change(stock: Stock, index: Int, quantity: Int) -> Stock = stock with { quantities: replace_at(stock.quantities, index, quantity) }
 
 fn apply(stock: Stock, command: Text) -> Result[Stock, Text] {
-let parts = parts_of(command)
+let parts = split(command, ":")
+let found = if length(parts) >= 2 { index_of(stock.items, parts[1]) } else { .None }
 if length(parts) == 3 and parts[0] == "add" {
-let quantity = parse_int(parts[2])
-let index = index_of(stock, parts[1])
-if index < 0 {
-return Result.Ok(Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) })
+let quantity = number(parts[2])
+return match found {
+.Some(index) => .Ok(change(stock, index, stock.quantities[index] + quantity))
+.None => .Ok(Stock { items: append(stock.items, parts[1]), quantities: append(stock.quantities, quantity) })
 }
-return Result.Ok(stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] + quantity) })
 }
 if length(parts) == 3 and parts[0] == "remove" {
-let quantity = parse_int(parts[2])
-let index = index_of(stock, parts[1])
-if index < 0 or stock.quantities[index] < quantity {
-return Result.Error("cannot remove " + parts[2] + " " + parts[1])
+let quantity = number(parts[2])
+return match found {
+.Some(index) => if stock.quantities[index] < quantity { .Error("cannot remove \(parts[2]) \(parts[1])") } else { .Ok(change(stock, index, stock.quantities[index] - quantity)) }
+.None => .Error("cannot remove \(parts[2]) \(parts[1])")
 }
-return Result.Ok(stock with { quantities: replace_at(stock.quantities, index, stock.quantities[index] - quantity) })
 }
 if length(parts) == 2 and parts[0] == "clear" {
-let index = index_of(stock, parts[1])
-if index < 0 {
-return Result.Ok(stock)
+return match found {
+.Some(index) => .Ok(change(stock, index, 0))
+.None => .Ok(stock)
 }
-return Result.Ok(stock with { quantities: replace_at(stock.quantities, index, 0) })
 }
-Result.Error("unknown command " + command)
+.Error("unknown command \(command)")
 }
 
 fn main() -> Unit uses io, env {
 var stock = Stock { items: [], quantities: [] }
 for argument in args() {
 match apply(stock, argument) {
-Result.Ok(updated) => {
-set stock = updated
-}
-Result.Error(message) => {
-print("error: " + message)
+.Ok(updated) => set stock = updated
+.Error(message) => {
+print("error: \(message)")
 exit(1)
 }
 }
 }
 for index in range(0, length(stock.items)) {
 if stock.quantities[index] != 0 {
-print(stock.items[index] + " " + to_text(stock.quantities[index]))
+print("\(stock.items[index]) \(stock.quantities[index])")
 }
 }
 }

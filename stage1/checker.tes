@@ -103,7 +103,7 @@ uses_ui: Bool
 
 fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui"]
 
-fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or"]
+fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or", "sort", "index_of", "contains"]
 
 fn list_of(element: ast.Type) -> ast.Type = .List(element)
 
@@ -120,6 +120,8 @@ builtin("code_points", [.Text], list_of(.Int), ""),
 builtin("from_code_point", [.Int], .Text, ""),
 builtin("from_code_points", [list_of(.Int)], .Text, ""),
 builtin("join", [list_of(.Text), .Text], .Text, ""),
+builtin("split", [.Text, .Text], list_of(.Text), ""),
+builtin("parse_int", [.Text], .Option(.Int), ""),
 builtin("read_file", [.Text], .Text, "fs"),
 builtin("write_file", [.Text, .Text], .Unit, "fs"),
 builtin("args", [], list_of(.Text), "env"),
@@ -2046,6 +2048,40 @@ set after = report(after, source.error("E0501", args[0].span, "`value_or` needs 
 let fallback = expect_expr(after, args[1], element)
 let result_type = if element == ast.Type.Unknown { fallback.expr.ty } else { element }
 return call_result(fallback.checker, e, name, name_span, [option.expr, fallback.expr], result_type)
+}
+if name == "sort" {
+if length(args) != 1 {
+let all = arity_error(c, name, args, 1, span)
+return call_result(all.checker, e, name, name_span, all.args, .Unknown)
+}
+let list = list_arg(c, args[0], expected, name)
+var after = list.checker
+let element = list.element
+if not (element == .Unknown or element == .Int or element == .Text) {
+set after = report(after, source.error_help("E0501", args[0].span, "`sort` needs a list of `Int` or `Text`, found `\(ast.type_text(list.expr.ty))`", "sort other values by building a list of keys, or write a small sort function"))
+}
+return call_result(after, e, name, name_span, [list.expr], .List(element))
+}
+if name == "index_of" or name == "contains" {
+let result_type = if name == "contains" { ast.Type.Bool } else { ast.Type.Option(.Int) }
+if length(args) != 2 {
+let all = arity_error(c, name, args, 2, span)
+return call_result(all.checker, e, name, name_span, all.args, result_type)
+}
+let target = check_expr(c, args[0], .Unknown)
+var after = target.checker
+let item_type = match target.expr.ty {
+.Text => ast.Type.Text
+.List(element) => element
+.Unknown => ast.Type.Unknown
+.Never => ast.Type.Unknown
+_ => {
+set after = report(after, source.error("E0501", args[0].span, "`\(name)` needs a list or `Text`, found `\(ast.type_text(target.expr.ty))`"))
+ast.Type.Unknown
+}
+}
+let item = expect_expr(after, args[1], item_type)
+return call_result(item.checker, e, name, name_span, [target.expr, item.expr], result_type)
 }
 let count = if name == "append" or name == "concat" { 2 } else { 3 }
 if length(args) != count {
