@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000" role="img" aria-labelledby="title desc">
-  <title id="title">Tessera</title>
-  <desc id="desc">A colorful tessellated T symbol above the Tessera wordmark. The background is transparent.</desc>
+  <title id="title">Tessera Language</title>
+  <desc id="desc">A colorful tessellated T symbol above the Tessera Language wordmark. The background is transparent.</desc>
   <defs>
     <linearGradient id="lapis" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#4C7DFF"/><stop offset="1" stop-color="#1745B8"/></linearGradient>
     <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#50E5D0"/><stop offset="1" stop-color="#008C91"/></linearGradient>
@@ -33,4 +33,5 @@
   </g>
   <path d="M462 680H538" stroke="#D99A45" stroke-width="4" stroke-linecap="round"/>
   <text x="500" y="804" text-anchor="middle" fill="#087F8C" font-family="Montserrat, 'Avenir Next', Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="13">TESSERA</text>
+  <text x="500" y="868" text-anchor="middle" fill="#D99A45" font-family="Montserrat, 'Avenir Next', Arial, sans-serif" font-size="38" font-weight="600" letter-spacing="16">LANGUAGE</text>
 </svg>
