@@ -1,0 +1,8 @@
+enum Shape {
+Circle(radius: Int)
+}
+fn main() -> Unit uses io {
+var s = Shape.Circle(1)
+set s.radius = 2
+print("done")
+}

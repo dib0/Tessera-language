@@ -214,6 +214,23 @@ fn stage1_only_programs_run_with_expected_output() {
 }
 
 #[test]
+fn stage1_only_runtime_errors_stop_the_program_predictably() {
+    let files = tes_files("tests/stage1_runtime_fail");
+    assert!(files.len() >= 5);
+    for path in files {
+        let code = path.file_name().unwrap().to_string_lossy().split('-').next().unwrap().to_string();
+        let exe = work_dir().join(format!("runtime_fail_{}", path.file_stem().unwrap().to_string_lossy()));
+        check_build(Command::new(stage1()).arg("build").arg(&path).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building a stage 1 runtime-error program");
+        let out = Command::new(&exe).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(70), "{}: expected exit code 70\n{}", path.display(), stderr);
+        assert!(stderr.contains(&format!("runtime error {}", code)), "{}: expected {} in:\n{}", path.display(), code, stderr);
+        assert!(stderr.contains(" in function `"), "{}: missing location in:\n{}", path.display(), stderr);
+        assert!(out.stdout.is_empty(), "{}: printed after the error", path.display());
+    }
+}
+
+#[test]
 fn stage1_only_errors_are_reported() {
     let files = tes_files("tests/stage1_fail");
     assert!(files.len() >= 10);

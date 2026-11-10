@@ -1,0 +1,11 @@
+fn first_negative(values: List[Int]) -> Int {
+for value in values {
+if value < 0 {
+return "negative"
+}
+}
+0
+}
+fn main() -> Unit uses io {
+print(to_text(first_negative([1, -2])))
+}

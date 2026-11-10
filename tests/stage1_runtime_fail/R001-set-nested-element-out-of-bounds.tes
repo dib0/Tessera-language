@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+var grid = repeat([repeat([0], 3)], 2)
+set grid[2][0] = 1
+print("not reached")
+}

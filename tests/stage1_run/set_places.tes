@@ -1,0 +1,108 @@
+// `set` on fields and elements of a `var` (draft 0.14, spec 6.2).
+
+type Point {
+x: Int
+y: Int
+}
+
+type Thing {
+kind: Text
+position: Point
+flags: List[Int]
+}
+
+type World {
+things: List[Thing]
+tic: Int
+}
+
+fn thing(kind: Text, x: Int, y: Int) -> Thing = Thing { kind: kind, position: Point { x: x, y: y }, flags: [0, 0] }
+
+fn show(p: Point) -> Text = "(\(p.x), \(p.y))"
+
+fn next_index(counter: Int) -> Int uses io {
+print("index \(counter)")
+counter
+}
+
+fn next_value(value: Int) -> Int uses io {
+print("value \(value)")
+value
+}
+
+fn main() -> Unit uses io {
+// Record fields, nested records, `+=` and `-=` on a place.
+var p = Point { x: 1, y: 2 }
+set p.x = 10
+set p.y += 5
+set p.y -= 1
+print(show(p))
+
+var t = thing("imp", 3, 4)
+set t.position.x = 7
+set t.flags[1] = 9
+set t.kind = t.kind + "!"
+print("\(t.kind) \(show(t.position)) \(t.flags[0]) \(t.flags[1])")
+
+// Lists of records inside a record.
+var world = World { things: [thing("a", 0, 0), thing("b", 1, 1)], tic: 0 }
+set world.things[1].position.y = 42
+set world.things[0].flags[0] += 3
+set world.tic += 1
+print("\(show(world.things[1].position)) \(world.things[0].flags[0]) \(world.tic)")
+
+// Value semantics: copies made earlier keep their value.
+var a = [1, 2, 3]
+let b = a
+set a[0] = 9
+print("a \(a[0]) \(a[1]) \(a[2]), b \(b[0]) \(b[1]) \(b[2])")
+let saved = world
+set world.things[0].kind = "changed"
+print("\(world.things[0].kind) \(saved.things[0].kind)")
+
+// Nested lists.
+var grid = repeat([repeat([0], 3)], 2)
+set grid[1][2] = 5
+print("\(grid[0][2]) \(grid[1][2]) \(length(grid)) \(length(grid[0]))")
+
+// Bytes.
+var data = bytes([1, 2, 3])
+set data[0] = 255
+set data[2] += 10
+print("\(data[0]) \(data[1]) \(data[2])")
+
+// Evaluation order: indexes left to right, then the value.
+var cells = repeat([repeat([0], 4)], 4)
+set cells[next_index(1)][next_index(2)] = next_value(7)
+print("cell \(cells[1][2])")
+
+// The index may read the variable itself.
+var xs = [2, 0, 0]
+set xs[xs[0]] = 8
+print("xs \(xs[0]) \(xs[1]) \(xs[2])")
+
+// A 320x200 frame buffer: fill, then read back.
+let width = 320
+let height = 200
+var frame = repeat([0], width * height)
+for y in range(0, height) {
+for x in range(0, width) {
+set frame[y * width + x] = (x + y * 3) % 256
+}
+}
+var checksum = 0
+var mismatches = 0
+for y in range(0, height) {
+for x in range(0, width) {
+let pixel = frame[y * width + x]
+if pixel != (x + y * 3) % 256 {
+set mismatches += 1
+}
+set checksum = (checksum * 31 + pixel) % 1000000007
+}
+}
+print("frame \(length(frame)) mismatches \(mismatches) checksum \(checksum)")
+
+// `repeat` on lists.
+print("repeat \(length(repeat([1, 2], 3))) \(length(repeat([7], 0))) \(join(repeat(["ab"], 2), "-"))")
+}

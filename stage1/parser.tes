@@ -641,20 +641,28 @@ let name = identifier(advance(p), "the name of a `var`")
 if name.parser.failed {
 return dummy_statement(name.parser)
 }
-let op = peek(name.parser)
+let place = parse_place(name)
+if place.parser.failed {
+return dummy_statement(place.parser)
+}
+let is_place = place.expr.kind != ast.ExprKind.Name(name.name)
+let op = peek(place.parser)
 if op != .Assign and op != .PlusAssign and op != .MinusAssign {
-return dummy_statement(unexpected(name.parser, "`=`, `+=` or `-=`"))
+let wanted = if is_place { "`=`, `+=` or `-=`" } else { "`=`, `+=`, `-=`, `.field` or `[index]`" }
+return dummy_statement(unexpected(place.parser, wanted))
 }
-let op_span = current_span(name.parser)
-let value = parse_expr(advance(name.parser), true)
-if op == .Assign or value.parser.failed {
-return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, value.expr) }
-}
+let op_span = current_span(place.parser)
+let value = parse_expr(advance(place.parser), true)
+var final_value = value.expr
+if op != .Assign and not value.parser.failed {
 // `set x += e` means `set x = x + e`; the checker and code generator only see the long form.
 let binary_op = if op == .PlusAssign { ast.BinaryOp.Add } else { ast.BinaryOp.Subtract }
-let target = ast.Expr { kind: .Name(name.name), span: name.span, ty: .Unknown }
-let combined = ast.Expr { kind: .Binary(binary_op, op_span, target, value.expr), span: source.span_to(name.span, value.expr.span), ty: .Unknown }
-return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, combined) }
+set final_value = ast.Expr { kind: .Binary(binary_op, op_span, place.expr, value.expr), span: source.span_to(name.span, value.expr.span), ty: .Unknown }
+}
+if is_place {
+return StatementResult { parser: value.parser, statement: .SetPlace(place.expr, final_value) }
+}
+return StatementResult { parser: value.parser, statement: .Set(name.name, name.span, final_value) }
 }
 if kind == .For {
 let variable = loop_variable(advance(p))
@@ -859,6 +867,35 @@ if primary.parser.failed {
 return primary
 }
 parse_postfix(primary)
+}
+
+note "The target of `set`: a name followed by `.field` and `[index]` steps (section 6.2)."
+fn parse_place(name: NameResult) -> ExprResult {
+var result = expr_result(name.parser, .Name(name.name), name.span)
+while true {
+let p = result.parser
+if at(p, .LBracket) {
+let index = parse_expr(advance(p), true)
+if index.parser.failed {
+return index
+}
+let close = current_span(index.parser)
+let after = expect(index.parser, .RBracket)
+if after.failed {
+return failed_expr(after)
+}
+set result = expr_result(after, .Index(result.expr, index.expr), source.span_to(result.expr.span, close))
+} else if at(p, .Dot) {
+let field = identifier(advance(p), "a field name")
+if field.parser.failed {
+return failed_expr(field.parser)
+}
+set result = expr_result(field.parser, .FieldAccess(result.expr, field.name, field.span), source.span_to(result.expr.span, field.span))
+} else {
+return result
+}
+}
+result
 }
 
 fn parse_postfix(start: ExprResult) -> ExprResult {

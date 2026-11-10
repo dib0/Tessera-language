@@ -49,6 +49,7 @@ ty: ast.Type
 mutable: Bool
 was_set: Bool
 span: source.Span
+kind: Text
 }
 
 type Checker {
@@ -131,6 +132,11 @@ builtin("ends_with", [.Text, .Text], .Bool, ""),
 builtin("replace", [.Text, .Text, .Text], .Text, ""),
 builtin("slice_text", [.Text, .Int, .Int], .Text, ""),
 builtin("repeat", [.Text, .Int], .Text, ""),
+builtin("bit_and", [.Int, .Int], .Int, ""),
+builtin("bit_or", [.Int, .Int], .Int, ""),
+builtin("bit_xor", [.Int, .Int], .Int, ""),
+builtin("shift_left", [.Int, .Int], .Int, ""),
+builtin("shift_right", [.Int, .Int], .Int, ""),
 builtin("pad_left", [.Text, .Int, .Text], .Text, ""),
 builtin("pad_right", [.Text, .Int, .Text], .Text, ""),
 builtin("lines", [.Text], list_of(.Text), ""),
@@ -491,7 +497,7 @@ return report(c, source.error_help("E0204", span, "`\(name)` is the name of an i
 }
 match find_local(c, name) {
 .Some(existing) => report(c, source.error_help("E0204", span, "`\(name)` is already defined on line \(existing.span.line)", "Tessera does not allow shadowing; choose a different name"))
-.None => c with { locals: append(c.locals, Local { name: name, ty: ty, mutable: mutable, was_set: false, span: span }) }
+.None => c with { locals: append(c.locals, Local { name: name, ty: ty, mutable: mutable, was_set: false, span: span, kind: what }) }
 }
 }
 
@@ -1508,6 +1514,15 @@ checked(report(after, d), typed, .Unknown)
 }
 }
 
+note "The `Name` a place starts with; the parser only builds places from names, fields and indexes."
+fn place_root(target: ast.Expr) -> ast.Expr {
+match target.kind {
+.FieldAccess(inner, _, _) => place_root(inner)
+.Index(inner, _) => place_root(inner)
+_ => target
+}
+}
+
 fn check_condition(c: Checker, condition: ast.Expr, what: Text) -> Checked {
 let result = check_expr(c, condition, .Bool)
 if fits(result.expr.ty, .Bool) {
@@ -1655,6 +1670,28 @@ set after = mark_set(after, name)
 }
 let result = expect_expr(after, value, target.ty)
 CheckedStatement { checker: result.checker, statement: .Set(name, name_span, result.expr) }
+}
+.SetPlace(target, value) => {
+let root = place_root(target)
+var after = c
+match root.kind {
+.Name(name) => match find_local(c, name) {
+.Some(local) => {
+if not local.mutable {
+let help = if local.kind == "variable" { "declare it with `var` instead of `let` (line \(local.span.line))" } else { "`\(name)` is a \(local.kind); copy it with `var changed = \(name)` and change the copy" }
+set after = report(after, source.error_help("E0205", root.span, "`\(name)` cannot be changed, also not in part", help))
+} else {
+set after = mark_set(after, name)
+}
+}
+.None => {}
+}
+_ => {}
+}
+// A place is typed like the expression it reads as; that already rejects every step that cannot be written (E0209, E0507, E0512).
+let place = check_expr(after, target, .Unknown)
+let result = expect_expr(place.checker, value, place.expr.ty)
+CheckedStatement { checker: result.checker, statement: .SetPlace(place.expr, result.expr) }
 }
 .For(variable, variable_span, iterable, body) => {
 let iterable_result = check_expr(c, iterable, .Unknown)
@@ -2584,6 +2621,21 @@ _ => {}
 }
 if source.contains_text(generic_builtin_names(), name) {
 return check_generic_call(start, e, name, name_span, args, expected)
+}
+if name == "repeat" and length(args) == 2 {
+// `repeat(list, count)` (draft 0.14); the `Text` form is checked from the table below.
+let list_expected = match expected {
+.List(_) => expected
+_ => ast.Type.Unknown
+}
+let first = check_expr(start, args[0], list_expected)
+match first.expr.ty {
+.List(_) => {
+let count = expect_expr(first.checker, args[1], .Int)
+return call_result(count.checker, e, name, name_span, [first.expr, count.expr], first.expr.ty)
+}
+_ => {}
+}
 }
 for b in start.builtins {
 if b.name == name {

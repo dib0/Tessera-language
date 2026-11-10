@@ -100,10 +100,11 @@ tail: Option[Expr]
 span: source.Span
 }
 
-note "A `Let` named `_` discards its value."
+note "A `Let` named `_` discards its value. `SetPlace` changes part of a `var`: its target is a `Name` followed by `FieldAccess` and `Index` steps."
 pub enum Statement {
 Let(name: Text, name_span: source.Span, declared: Option[TypeExpr], value: Expr, mutable: Bool)
 Set(name: Text, name_span: source.Span, value: Expr)
+SetPlace(target: Expr, value: Expr)
 For(variable: Text, variable_span: source.Span, iterable: Expr, body: Block)
 While(condition: Expr, body: Block)
 ExprStatement(expr: Expr)

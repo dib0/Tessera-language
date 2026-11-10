@@ -1,0 +1,8 @@
+type Point {
+x: Int
+y: Int
+}
+fn main() -> Unit uses io {
+let p = Point { x: 1, y: 2, z: 3 }
+print(to_text(p.x))
+}

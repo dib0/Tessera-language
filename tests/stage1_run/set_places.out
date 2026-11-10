@@ -1,0 +1,14 @@
+(10, 6)
+imp! (7, 4) 0 9
+(1, 42) 3 1
+a 9 2 3, b 1 2 3
+changed a
+0 5 2 3
+255 2 13
+index 1
+index 2
+value 7
+cell 7
+xs 2 0 8
+frame 64000 mismatches 0 checksum 296996249
+repeat 6 0 ab-ab

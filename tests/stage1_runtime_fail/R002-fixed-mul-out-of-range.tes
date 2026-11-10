@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+let a = shift_left(1, 32)
+let b = shift_left(1, 31)
+print(to_text(shift_right(a * b, 16)))
+}

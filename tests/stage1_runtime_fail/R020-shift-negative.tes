@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+let amount = -1
+print(to_text(shift_right(8, amount)))
+}

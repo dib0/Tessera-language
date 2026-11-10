@@ -1,0 +1,5 @@
+fn save(name: Text) -> Result[Unit, Text] = if name == "" { .Error("empty name") } else { .Ok(()) }
+fn main() -> Unit uses io {
+save("ada")
+print("saved")
+}

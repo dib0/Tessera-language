@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+var name = "ada"
+set name[0] = "A"
+print(name)
+}

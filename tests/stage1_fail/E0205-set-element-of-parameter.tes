@@ -1,0 +1,7 @@
+fn clear(xs: List[Int]) -> List[Int] {
+set xs[0] = 0
+xs
+}
+fn main() -> Unit uses io {
+print(to_text(clear([1, 2])[0]))
+}

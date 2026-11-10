@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+var ages = ["ada": 36]
+set ages["ada"] = 37
+print(to_text(length(ages)))
+}

@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+var frame = repeat([0], 320 * 200)
+set frame[320 * 200] = 1
+print("not reached")
+}

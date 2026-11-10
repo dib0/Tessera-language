@@ -343,6 +343,7 @@ let prepared = if movable and usage.count == 1 and not usage.has_jump_or_loop { 
 let v = gen_expr(prepared, value, indent)
 code(v.gen with { take_var: "" }, "v_\(name) = \(v.text);")
 }
+.SetPlace(target, value) => gen_set_place(g, target, value, indent)
 .For(variable, _, iterable, body) => {
 let it = gen_expr(g, iterable, indent)
 let b = gen_block(it.gen, body, indent)
@@ -359,6 +360,60 @@ let e = gen_expr(g, expr, indent)
 code(e.gen, "\(e.text);")
 }
 }
+}
+
+// ---------- setting a place (spec 6.2) ----------
+
+fn place_root_name(target: ast.Expr) -> Text {
+match target.kind {
+.Name(name) => name
+.FieldAccess(inner, _, _) => place_root_name(inner)
+.Index(inner, _) => place_root_name(inner)
+_ => ""
+}
+}
+
+note "The index expressions of a place, outermost (leftmost) first."
+fn place_indexes(target: ast.Expr) -> List[ast.Expr] {
+match target.kind {
+.FieldAccess(inner, _, _) => place_indexes(inner)
+.Index(inner, index) => place_indexes(inner) + [index]
+_ => []
+}
+}
+
+note "A Rust expression of type `&mut T` for the place; index `n` (from the left) is in `t_place<n>`. Records and lists are copied on write by `Rc::make_mut` when shared."
+fn place_reference(g: Gen, target: ast.Expr) -> Text {
+match target.kind {
+.Name(name) => "&mut v_\(name)"
+.FieldAccess(inner, field, _) => "&mut Rc::make_mut(\(place_reference(g, inner))).f_\(field)"
+.Index(inner, _) => "t_slot(\(place_reference(g, inner)), t_place\(length(place_indexes(inner))), \(location(g, target.span)))"
+_ => fail("internal compiler error: invalid place reached code generation")
+}
+}
+
+note "`set place = value`: indexes left to right, then the value, then the checked write."
+fn gen_set_place(g: Gen, target: ast.Expr, value: ast.Expr, indent: Int) -> Code {
+var current = g
+var out = "{ "
+var number = 0
+for index in place_indexes(target) {
+let i = gen_expr(current, index, indent)
+set current = i.gen
+set out = "\(out)let t_place\(number): i64 = \(i.text); "
+set number += 1
+}
+let v = gen_expr(current, value, indent)
+set out = "\(out)let t_value = \(v.text); "
+match target.kind {
+.Index(inner, _) => {
+if inner.ty == .Bytes {
+return code(v.gen, "\(out)t_set_byte(\(place_reference(g, inner)), t_place\(number - 1), t_value, \(location(g, target.span))); }")
+}
+}
+_ => {}
+}
+code(v.gen, "\(out)*\(place_reference(g, target)) = t_value; }")
 }
 
 // ---------- move analysis ----------
@@ -387,6 +442,11 @@ let part = match statement {
 .Set(target, _, value) => {
 let inner = scan_expr(value, name)
 if target == name { inner with { count: inner.count + 2 } } else { inner }
+}
+.SetPlace(target, value) => {
+// Like `Set`: a changed variable is never moved out of (count + 2).
+let inner = add_usage(scan_expr(target, name), scan_expr(value, name))
+if place_root_name(target) == name { inner with { count: inner.count + 2 } } else { inner }
 }
 .ExprStatement(expr) => scan_expr(expr, name)
 .For(_, _, iterable, body) => with_jump(add_usage(scan_expr(iterable, name), scan_block(body, name)))
@@ -853,7 +913,15 @@ _ => "t_contains(&\(a[0]), &\(a[1]))"
 "ends_with" => call_ref("t_ends_with", a)
 "replace" => call_ref("t_replace", a)
 "slice_text" => call_with_location("t_slice_text", a, loc)
-"repeat" => call_with_location("t_repeat", a, loc)
+"repeat" => match args[0].ty {
+.List(_) => call_with_location("t_repeat_list", a, loc)
+_ => call_with_location("t_repeat", a, loc)
+}
+"bit_and" => "(\(a[0]) & \(a[1]))"
+"bit_or" => "(\(a[0]) | \(a[1]))"
+"bit_xor" => "(\(a[0]) ^ \(a[1]))"
+"shift_left" => call_with_location("t_shift_left", a, loc)
+"shift_right" => call_with_location("t_shift_right", a, loc)
 "pad_left" => call_with_location("t_pad_left", a, loc)
 "pad_right" => call_with_location("t_pad_right", a, loc)
 "lines" => call_ref("t_lines", a)

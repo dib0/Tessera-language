@@ -1,0 +1,132 @@
+// The language core of DOOM roadmap Phase 1 (draft 0.14): early exit, nested records,
+// enums with match, Result propagation, bit operations and 16.16 fixed point.
+
+type Vertex {
+x: Int
+y: Int
+}
+
+type Line {
+start: Vertex
+end: Vertex
+}
+
+enum Mobj {
+Player(health: Int)
+Imp(health: Int, awake: Bool)
+Barrel
+}
+
+fn describe(m: Mobj) -> Text {
+match m {
+.Player(health) => "player \(health)"
+.Imp(health, awake) => "imp \(health) \(awake)"
+.Barrel => "barrel"
+}
+}
+
+// Early return from inside nested loops.
+fn find_pair(values: List[Int], target: Int) -> Text {
+for i in range(0, length(values)) {
+for j in range(i + 1, length(values)) {
+if values[i] + values[j] == target {
+return "\(i)+\(j)"
+}
+}
+}
+"none"
+}
+
+// `break` leaves only the innermost loop.
+fn inner_breaks() -> Text {
+var out = ""
+for i in range(0, 3) {
+for j in range(0, 10) {
+if j > i {
+break
+}
+set out = out + "\(i)\(j) "
+}
+}
+out
+}
+
+// `continue` in `while`.
+fn odd_sum(limit: Int) -> Int {
+var n = 0
+var total = 0
+while n < limit {
+set n += 1
+if n % 2 == 0 {
+continue
+}
+set total += n
+}
+total
+}
+
+fn parse_coordinate(text: Text) -> Result[Int, Text] {
+match parse_int(text) {
+.Some(value) => if value < -32768 or value > 32767 { .Error("out of range: \(text)") } else { .Ok(value) }
+.None => .Error("not a number: \(text)")
+}
+}
+
+// `try` passes the first failure up.
+fn parse_vertex(x: Text, y: Text) -> Result[Vertex, Text] {
+let px = try parse_coordinate(x)
+let py = try parse_coordinate(y)
+.Ok(Vertex { x: px, y: py })
+}
+
+fn show_vertex(r: Result[Vertex, Text]) -> Text {
+match r {
+.Ok(v) => "(\(v.x), \(v.y))"
+.Error(message) => "error: \(message)"
+}
+}
+
+fn fixed_mul(a: Int, b: Int) -> Int = shift_right(a * b, 16)
+
+fn fixed_div(a: Int, b: Int) -> Int = shift_left(a, 16) / b
+
+fn main() -> Unit uses io {
+print(find_pair([3, 9, 4, 7], 11))
+print(find_pair([1, 2], 10))
+print(inner_breaks())
+print(to_text(odd_sum(10)))
+
+let line = Line { start: Vertex { x: 0, y: 0 }, end: Vertex { x: 64, y: -128 } }
+print("line to \(line.end.x),\(line.end.y)")
+for m in [Mobj.Player(100), .Imp(60, false), .Barrel] {
+print(describe(m))
+}
+
+print(show_vertex(parse_vertex("12", "-34")))
+print(show_vertex(parse_vertex("12", "x")))
+print(show_vertex(parse_vertex("40000", "x")))
+
+// Bit operations with known results.
+print("and \(bit_and(12, 10)) or \(bit_or(12, 10)) xor \(bit_xor(12, 10))")
+print("mask \(bit_and(-1, 255)) neg \(bit_and(-2, 15)) not \(bit_xor(5, -1))")
+print("left \(shift_left(1, 16)) \(shift_left(-3, 4)) \(shift_left(-1, 63)) \(shift_left(5, 0))")
+print("right \(shift_right(65536, 16)) \(shift_right(-1, 1)) \(shift_right(-5, 1)) \(shift_right(-65536, 63)) \(shift_right(7, 0))")
+let le = bytes([52, 18, 255, 255])
+let raw = bit_or(le[2], shift_left(le[3], 8))
+// Sign extension is arithmetic: `shift_left` never drops bits, so `shift_left(raw, 48)` would be R002.
+let signed = if bit_and(raw, 32768) != 0 { raw - 65536 } else { raw }
+print("u16 \(bit_or(le[0], shift_left(le[1], 8))) i16 \(signed)")
+
+// 16.16 fixed point at the boundaries of the 32-bit range (spec 7.6).
+let fracunit = 65536
+let min32 = -2147483648
+let max32 = 2147483647
+print("1.5 * 2.25 = \(fixed_mul(98304, 147456))")
+print("min * min = \(min32 * min32) -> \(fixed_mul(min32, min32))")
+print("min * max = \(fixed_mul(min32, max32))")
+print("max * max = \(fixed_mul(max32, max32))")
+print("-1.5 * 0.5 = \(fixed_mul(-98304, 32768))")
+print("min / 1 = \(fixed_div(min32, fracunit)) max / -1 = \(fixed_div(max32, -fracunit))")
+print("7 / 2 = \(fixed_div(7 * fracunit, 2 * fracunit))")
+print("shifted min \(shift_left(min32, 16)) max \(shift_left(max32, 16))")
+}

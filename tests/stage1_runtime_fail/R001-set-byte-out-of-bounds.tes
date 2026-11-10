@@ -1,0 +1,5 @@
+fn main() -> Unit uses io {
+var data = bytes([1, 2])
+set data[-1] = 1
+print("not reached")
+}
