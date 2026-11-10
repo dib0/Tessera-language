@@ -1,0 +1,19 @@
+// S2.4: frame pacing at 35 frames per second (one DOOM tic is 1000 / 35 ms).
+fn main() -> Unit uses io, time {
+let frames = 35
+let start = monotonic()
+for frame in range(1, frames + 1) {
+// The target time of each frame is computed from the start, so sleeping never accumulates drift.
+let due = start + frame * 1000 / 35
+let wait = due - monotonic()
+if wait > 0 {
+sleep(wait)
+}
+}
+print("paced \(monotonic() - start)")
+let naive_start = monotonic()
+for _ in range(0, 10) {
+sleep(35)
+}
+print("naive \(monotonic() - naive_start)")
+}

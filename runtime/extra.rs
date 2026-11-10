@@ -96,6 +96,15 @@ fn t_read_text(path: Rc<String>, loc: &str) -> Result<Rc<String>, Rc<T_FileError
 fn t_write_text(path: Rc<String>, content: Rc<String>, loc: &str) -> Result<(), Rc<T_FileError>> {
     std::fs::write(t_check_path(&path, loc), content.as_bytes()).map_err(t_file_error)
 }
+fn t_read_bytes(path: Rc<String>, loc: &str) -> Result<Rc<Vec<u8>>, Rc<T_FileError>> {
+    match std::fs::read(t_check_path(&path, loc)) {
+        Ok(bytes) => { t_charge(bytes.len()); Ok(Rc::new(bytes)) }
+        Err(e) => Err(t_file_error(e)),
+    }
+}
+fn t_write_bytes(path: Rc<String>, data: Rc<Vec<u8>>, loc: &str) -> Result<(), Rc<T_FileError>> {
+    std::fs::write(t_check_path(&path, loc), data.as_slice()).map_err(t_file_error)
+}
 fn t_list_directory(path: Rc<String>, loc: &str) -> Result<Rc<Vec<Rc<String>>>, Rc<T_FileError>> {
     let entries = std::fs::read_dir(t_check_path(&path, loc)).map_err(t_file_error)?;
     let mut names = Vec::new();

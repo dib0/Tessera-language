@@ -1,0 +1,10 @@
+// S2.5: echo standard input line by line until it ends.
+fn main() -> Unit uses io {
+var count = 0
+while true {
+let line = read_line() else break
+set count += 1
+print("\(count): \(line)")
+}
+print("end after \(count) lines")
+}

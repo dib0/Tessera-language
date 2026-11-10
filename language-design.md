@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.14. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 and 0.14: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, and the bit operations (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
+**Status:** Draft 0.15. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.15: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations and binary files (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -168,6 +168,14 @@ Decided against, with the reasons:
 
 - **A separate `Array[T]` type.** Lists are already values backed by one contiguous buffer, and `set xs[i] = v` changes one element in place when nothing else holds the list (section 6.2). A second sequence type would give two ways to write the same program (principle 3) and conversions between them, without making anything faster.
 - **`byte_at` and `bytes_length`.** `Bytes` already has `b[i]` and `length(b)`.
+
+From draft 0.14 to 0.15, host access for a DOOM port (Phase 2 of the DOOM roadmap):
+
+| Added | Why |
+|---|---|
+| `read_bytes(path)`, `write_bytes(path, data)` (section 10) | WAD files, images and saved games are binary; `read_text` refuses data that is not UTF-8. Both return failures as values (`FileError`), like `read_text` and `write_text`. |
+
+The rest of that phase already existed and is now covered by tests: command-line arguments (`args()`) and exit codes (`exit`, `exit_with`), a monotonic clock and `sleep` for frame pacing, and `read_line` for console input. `main` keeps taking no parameters: arguments come from `args()`, so the `env` effect stays visible in the signature (section 9.3).
 
 ## 4. Source files and lexical structure
 
@@ -899,6 +907,13 @@ Added in draft 0.14:
 | `repeat` | `(list: List[T], count: Int) -> List[T]` | The items of `list`, `count` times: `repeat([0], 3)` is `[0, 0, 0]`. R004 if `count` is negative. The `Text` form above is unchanged. |
 | `bit_and`, `bit_or`, `bit_xor` | `(a: Int, b: Int) -> Int` | Section 7.6. |
 | `shift_left`, `shift_right` | `(value: Int, amount: Int) -> Int` | Section 7.6. `amount` 0 to 63, else R020; `shift_left` R002 on overflow. |
+
+Added in draft 0.15:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `read_bytes` | `(path: Text) -> Result[Bytes, FileError] uses fs` | The whole file. A missing file is `.Error(.NotFound)`, not a runtime error. |
+| `write_bytes` | `(path: Text, data: Bytes) -> Result[Unit, FileError] uses fs` | Creates or replaces the file. |
 
 The runtime has no external dependencies, so SQLite is reached through the `sqlite3` program (a persistent child process per database) and the HTTP client has no TLS. Both are interim choices of draft 0.13; see the roadmap.
 

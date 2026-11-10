@@ -1,0 +1,6 @@
+fn main() -> Unit uses io {
+match read_bytes("doom1.wad") {
+.Ok(data) => print("\(length(data))")
+.Error(_) => print("missing")
+}
+}

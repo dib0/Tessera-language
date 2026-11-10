@@ -1,0 +1,41 @@
+// S2.1 and S2.2: binary files as values. Usage: files <fixture> <output path>
+fn read_i32_le(b: Bytes, at: Int) -> Int {
+let raw = bit_or(bit_or(b[at], shift_left(b[at + 1], 8)), bit_or(shift_left(b[at + 2], 16), shift_left(b[at + 3], 24)))
+if raw >= 2147483648 { raw - 4294967296 } else { raw }
+}
+
+fn describe(e: FileError) -> Text {
+match e {
+.NotFound => "not found"
+.PermissionDenied => "permission denied"
+.Other(message) => "other: \(message)"
+}
+}
+
+fn main() -> Unit uses io, fs, env {
+let arguments = args()
+let data = read_bytes(arguments[0]) else exit_with(2, "cannot read the fixture")
+var sum = 0
+for value in byte_values(data) {
+set sum += value
+}
+let kind = from_bytes(slice(data, 0, 4)) else exit_with(2, "bad magic")
+print("length \(length(data)) kind \(kind) a \(read_i32_le(data, 4)) b \(read_i32_le(data, 8)) sum \(sum) last \(data[length(data) - 1])")
+match read_bytes(arguments[0] + ".missing") {
+.Ok(_) => print("missing file was read")
+.Error(e) => print("missing: \(describe(e))")
+}
+var copy = data
+set copy[0] = 0
+set copy[length(copy) - 1] = 128
+match write_bytes(arguments[1], copy) {
+.Ok(_) => {}
+.Error(e) => exit_with(2, "write failed: \(describe(e))")
+}
+let back = read_bytes(arguments[1]) else exit_with(2, "cannot read back")
+print("round trip \(if back == copy { "identical" } else { "different" }), original \(if back == data { "same" } else { "unchanged" })")
+match write_bytes(arguments[1] + ".missing-directory/file", data) {
+.Ok(_) => print("wrote into a missing directory")
+.Error(e) => print("write error: \(describe(e))")
+}
+}

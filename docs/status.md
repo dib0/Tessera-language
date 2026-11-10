@@ -74,3 +74,17 @@ The roadmap's "Starting point" was written from draft 0.2. The repository is at 
 | S1.10 Overflow review | **Documented** in spec section 7.6 | `doom_core.tes` (products and quotients at ±2^31), `R002-fixed-mul-out-of-range` |
 
 Performance: writing all 64,000 elements of a frame buffer 100 times takes about 11 ms (`--opt 3`).
+
+## After Phase 2 (draft 0.15)
+
+`cargo test --release`: **23 passed, 0 failed**. Programs and fixture in `tests/stage1_host/`.
+
+| Roadmap step | State | Test |
+|---|---|---|
+| S2.1 `fs` read | **Added** `read_bytes(path) -> Result[Bytes, FileError]` (`read_file` already existed for text and stops with R006; `FileError` instead of `Text` matches `read_text`) | `binary_files_are_read_and_written_as_values`: a 268-byte fixture (`PWAD`, two little-endian `i32`, bytes 0 to 255) decodes to the values written by Python; a missing file gives `.Error(.NotFound)` |
+| S2.2 `fs` write | **Added** `write_bytes(path, data) -> Result[Unit, FileError]` | same test: the written file is byte-identical to the changed buffer; writing into a missing directory gives an error value. `E0301-read-bytes-needs-fs`, `E0501-write-bytes-text`, `E0508-write-bytes-result-ignored` |
+| S2.3 `env` | Existed (`args()`, `exit`, `exit_with`); `main` keeps no parameters (spec 9.3) | `arguments_come_in_and_exit_codes_go_out`: exit codes 3, 64 and 0 reach the shell |
+| S2.4 `time` | Existed (`monotonic`, `sleep`, milliseconds) | `frame_pacing_keeps_35_frames_per_second`: 35 frames paced from the start time take 995 to 1,100 ms (measured: 1,001); 10 naive `sleep(35)` take 350 to 500 ms |
+| S2.5 Console input | Existed (`read_line() -> Option[Text] uses io`) | `console_input_is_echoed_until_the_end`: empty lines, `\r\n`, a last line without a line break, and empty input |
+
+The pacing test measures wall-clock time, so a heavily loaded machine could push it over its upper bounds.

@@ -1,0 +1,4 @@
+fn main() -> Unit uses io, fs {
+write_bytes("out.bin", bytes([1, 2]))
+print("written")
+}

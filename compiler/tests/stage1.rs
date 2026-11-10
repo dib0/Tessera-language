@@ -230,6 +230,73 @@ fn stage1_only_runtime_errors_stop_the_program_predictably() {
     }
 }
 
+fn build_host_program(name: &str) -> PathBuf {
+    let exe = work_dir().join(format!("host_{}", name));
+    let source = root().join(format!("tests/stage1_host/{}.tes", name));
+    check_build(Command::new(stage1()).arg("build").arg(&source).arg("-o").arg(&exe).arg("--opt").arg("1").output().unwrap(), "building a host access program");
+    exe
+}
+
+#[test]
+fn binary_files_are_read_and_written_as_values() {
+    let exe = build_host_program("files");
+    let output_path = work_dir().join("host_files_output.bin");
+    let _ = std::fs::remove_file(&output_path);
+    let out = Command::new(&exe).arg(root().join("tests/stage1_host/fixture.bin")).arg(&output_path).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    // Expected values computed independently from the fixture: b"PWAD", i32 3, i32 -2, bytes 0..=255.
+    assert_eq!(String::from_utf8_lossy(&out.stdout), concat!(
+        "length 268 kind PWAD a 3 b -2 sum 33962 last 255\n",
+        "missing: not found\n",
+        "round trip identical, original unchanged\n",
+        "write error: not found\n"));
+    let mut expected = std::fs::read(root().join("tests/stage1_host/fixture.bin")).unwrap();
+    expected[0] = 0;
+    *expected.last_mut().unwrap() = 128;
+    assert_eq!(std::fs::read(&output_path).unwrap(), expected);
+}
+
+#[test]
+fn arguments_come_in_and_exit_codes_go_out() {
+    let exe = build_host_program("exit_code");
+    let out = Command::new(&exe).args(["3", "doom", "e1m1"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2 words: doom|e1m1\n");
+    let usage = Command::new(&exe).output().unwrap();
+    assert_eq!(usage.status.code(), Some(64));
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("usage:"));
+    assert_eq!(Command::new(&exe).arg("0").output().unwrap().status.code(), Some(0));
+}
+
+#[test]
+fn frame_pacing_keeps_35_frames_per_second() {
+    let exe = build_host_program("pacing");
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let value = |label: &str| -> i64 {
+        text.lines().find_map(|l| l.strip_prefix(label)).unwrap_or_else(|| panic!("no `{}` in {}", label, text)).trim().parse().unwrap()
+    };
+    // 35 paced frames take one second; 10 naive sleeps of 35 ms take at least 350 ms.
+    let paced = value("paced");
+    let naive = value("naive");
+    assert!((995..=1100).contains(&paced), "35 paced frames took {} ms", paced);
+    assert!((350..=500).contains(&naive), "10 sleeps of 35 ms took {} ms", naive);
+}
+
+#[test]
+fn console_input_is_echoed_until_the_end() {
+    use std::io::Write;
+    let exe = build_host_program("echo");
+    let mut child = Command::new(&exe).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"first\n\nthird with spaces\r\nlast").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1: first\n2: \n3: third with spaces\n4: last\nend after 4 lines\n");
+    let empty = Command::new(&exe).stdin(std::process::Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&empty.stdout), "end after 0 lines\n");
+}
+
 #[test]
 fn stage1_only_errors_are_reported() {
     let files = tes_files("tests/stage1_fail");

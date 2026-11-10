@@ -274,6 +274,8 @@ return .Some(word)
 | `decimal`, `to_int`, `round`, `parse_decimal` | `Int -> Decimal`; `Decimal -> Int` (toward zero); `(Decimal, places: Int) -> Decimal`; `Text -> Option[Decimal]` |
 | `read_line`, `read_input` | `() -> Option[Text] uses io` (`.None` at end of input); `() -> Text uses io` (all of standard input) |
 | `read_text` | `(path: Text) -> Result[Text, FileError] uses fs` (`FileError` is `.NotFound`, `.PermissionDenied` or `.Other(message)`) |
+| `read_bytes`, `write_bytes` | `(path: Text) -> Result[Bytes, FileError] uses fs`; `(path: Text, data: Bytes) -> Result[Unit, FileError] uses fs` (binary files) |
+| `monotonic`, `sleep` | `() -> Int uses time` (milliseconds, for measuring); `(ms: Int) -> Unit uses time` |
 | `code_points` | `(text: Text) -> List[Int]` (Unicode code points) |
 | `from_code_point` | `(code: Int) -> Text` |
 | `from_code_points` | `(codes: List[Int]) -> Text` |

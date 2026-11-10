@@ -1,0 +1,10 @@
+// S2.3: arguments in, exit code out. Usage: exit_code <code> <words...>
+fn main() -> Unit uses io, env {
+let arguments = args()
+if length(arguments) == 0 {
+exit_with(64, "usage: exit_code <code> <words...>")
+}
+let code = parse_int(arguments[0]) else exit_with(64, "not a number: \(arguments[0])")
+print("\(length(arguments) - 1) words: \(join(slice(arguments, 1, length(arguments)), "|"))")
+exit(code)
+}

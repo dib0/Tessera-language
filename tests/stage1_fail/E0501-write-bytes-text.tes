@@ -1,0 +1,6 @@
+fn main() -> Unit uses io, fs {
+match write_bytes("out.bin", "text") {
+.Ok(_) => print("written")
+.Error(_) => print("failed")
+}
+}
