@@ -1,0 +1,3 @@
+fn main() -> Unit uses io {
+print("\(pow(-8e0, 0.5))")
+}

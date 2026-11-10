@@ -1,0 +1,4 @@
+fn sqrt(x: Int) -> Int = x
+fn main() -> Unit uses io {
+print("\(sqrt(4))")
+}

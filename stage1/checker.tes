@@ -158,6 +158,19 @@ builtin("decimal", [.Int], .Decimal, ""),
 builtin("parse_decimal", [.Text], .Option(.Decimal), ""),
 builtin("round", [.Decimal, .Int], .Decimal, ""),
 builtin("to_int", [.Decimal], .Int, ""),
+builtin("float", [.Int], .Float, ""),
+builtin("floor", [.Float], .Float, ""),
+builtin("ceil", [.Float], .Float, ""),
+builtin("sqrt", [.Float], .Float, ""),
+builtin("exp", [.Float], .Float, ""),
+builtin("ln", [.Float], .Float, ""),
+builtin("sin", [.Float], .Float, ""),
+builtin("cos", [.Float], .Float, ""),
+builtin("tan", [.Float], .Float, ""),
+builtin("atan2", [.Float, .Float], .Float, ""),
+builtin("pow", [.Float, .Float], .Float, ""),
+builtin("pi", [], .Float, ""),
+builtin("parse_float", [.Text], .Option(.Float), ""),
 builtin("now", [], .Int, "time"),
 builtin("monotonic", [], .Int, "time"),
 builtin("sleep", [.Int], .Unit, "time"),
@@ -527,7 +540,7 @@ c
 
 // ---------- declarations ----------
 
-fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Result", "Never", "WindowEvent", "Map", "Bytes", "Decimal", "Database", "FileError"]
+fn builtin_type_names() -> List[Text] = ["Int", "Bool", "Text", "Unit", "List", "Option", "Result", "Never", "WindowEvent", "Map", "Bytes", "Decimal", "Float", "Database", "FileError"]
 
 fn resolve(start: Checker, te: ast.TypeExpr) -> ResolvedType {
 let name = te.name
@@ -596,6 +609,8 @@ set ty = ast.Type.Unit
 set ty = ast.Type.Bytes
 } else if name == "Decimal" {
 set ty = ast.Type.Decimal
+} else if name == "Float" {
+set ty = ast.Type.Float
 } else if name == "Database" {
 set ty = ast.Type.Database
 } else {
@@ -1297,8 +1312,10 @@ checked(report(after, d), typed, .Unknown)
 }
 .FieldAccess(target, name, name_span) => check_field(c, e, target, name, name_span)
 .Unary(op, operand) => {
-let probe = if op == .Negate { check_expr(c, operand, .Unknown) } else { check_expr(c, operand, .Bool) }
-let want = if op == .Negate and probe.expr.ty == .Decimal { ast.Type.Decimal } else if op == .Negate { ast.Type.Int } else { ast.Type.Bool }
+let numeric_expected = if expected == .Float or expected == .Decimal { expected } else { ast.Type.Unknown }
+let probe = if op == .Negate { check_expr(c, operand, numeric_expected) } else { check_expr(c, operand, .Bool) }
+let negated = probe.expr.ty
+let want = if op == .Negate and (negated == .Decimal or negated == .Float) { negated } else if op == .Negate { ast.Type.Int } else { ast.Type.Bool }
 let result = probe
 let typed = e with { kind: .Unary(op, result.expr) }
 if fits(result.expr.ty, want) {
@@ -1308,7 +1325,7 @@ let symbol = if op == .Negate { "-" } else { "not" }
 let d = source.error("E0503", operand.span, "`\(symbol)` needs `\(ast.type_text(want))`, found `\(ast.type_text(result.expr.ty))`")
 checked(report(result.checker, d), typed, want)
 }
-.Binary(op, op_span, left, right) => check_binary(c, e, op, op_span, left, right)
+.Binary(op, op_span, left, right) => check_binary(c, e, op, op_span, left, right, expected)
 .If(condition, then_block, else_branch) => check_if(c, e, condition, then_block, else_branch, expected)
 .BlockExpr(block) => {
 let result = check_block(c, block, expected)
@@ -1347,7 +1364,7 @@ checked(report(c, d), e, .Never)
 }
 .Break => check_jump(c, e, "break")
 .Continue => check_jump(c, e, "continue")
-.DecimalLiteral(_) => checked(c, e, .Decimal)
+.DecimalLiteral(digits) => check_number_literal(c, e, digits, expected)
 .MapLiteral(keys, values) => check_map_literal(c, e, keys, values, expected)
 .FunctionRef(_) => checked(c, e, e.ty)
 .CallValue(_, _) => checked(c, e, e.ty)
@@ -1359,7 +1376,7 @@ note "A built-in used as a value: those with one fixed signature, and `to_text` 
 fn builtin_function_type(c: Checker, name: Text, expected: ast.Type) -> Option[ast.Type] {
 if name == "to_text" {
 return match expected {
-.Function(params, _, _) => if length(params) == 1 and (params[0] == .Int or params[0] == .Bool or params[0] == .Decimal or params[0] == .Text) { .Some(.Function(params, .Text, [])) } else { .None }
+.Function(params, _, _) => if length(params) == 1 and (params[0] == .Int or params[0] == .Bool or params[0] == .Decimal or params[0] == .Float or params[0] == .Text) { .Some(.Function(params, .Text, [])) } else { .None }
 _ => .None
 }
 }
@@ -1448,7 +1465,7 @@ checked(c, e, .Never)
 fn check_list(start: Checker, e: ast.Expr, items: List[ast.Expr], expected: ast.Type) -> Checked {
 let element_expected: Option[ast.Type] = match expected {
 .List(element) => .Some(element)
-_ => .None
+_ => if list_of_floats(start, items) { .Some(.Float) } else { .None }
 }
 if length(items) == 0 {
 return match element_expected {
@@ -1759,10 +1776,107 @@ _ => false
 }
 }
 
-fn check_binary(c: Checker, e: ast.Expr, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> Checked {
+note "The type a number literal on the left of a binary operator takes from the right operand: `0.5 * speed` is a `Float` multiplication. Only literals are affected, so other expressions are checked once."
+fn literal_context(c: Checker, left: ast.Expr, right: ast.Expr) -> ast.Type {
+if not is_number_literal(left) {
+return .Unknown
+}
+// The probe's diagnostics are dropped; the right operand is checked again afterwards.
+let probe = check_expr(c, right, .Unknown)
+if probe.expr.ty == .Float { .Float } else { .Unknown }
+}
+
+note "Whether a list literal without a known type mixes number literals with a `Float`: `[3.5, x]` with `x: Float` is a `List[Float]`. Only lists with a number literal are probed."
+fn list_of_floats(c: Checker, items: List[ast.Expr]) -> Bool {
+var has_literal = false
+for item in items {
+if is_number_literal(item) {
+set has_literal = true
+}
+}
+if not has_literal {
+return false
+}
+for item in items {
+if check_expr(c, item, .Unknown).expr.ty == .Float {
+return true
+}
+}
+false
+}
+
+fn is_number_literal(e: ast.Expr) -> Bool {
+match e.kind {
+.DecimalLiteral(_) => true
+.Unary(op, operand) => op == .Negate and is_number_literal(operand)
+_ => false
+}
+}
+
+note "A number with a point is a `Float` where one is expected, else a `Decimal`; one with an exponent is always a `Float` (section 4.5)."
+fn check_number_literal(c: Checker, e: ast.Expr, digits: Text, expected: ast.Type) -> Checked {
+let codes = code_points(digits)
+let has_exponent = contains(codes, 101)
+if has_exponent or expected == .Float {
+if float_literal_too_large(codes) {
+return checked(report(c, source.error_help("E0106", e.span, "number `\(digits)` is too large for `Float`", "a `Float` must be below 10^308")), e, .Float)
+}
+return checked(c, e, .Float)
+}
+let point = index_of(codes, 46)
+let decimals = match point {
+.Some(at) => length(codes) - at - 1
+.None => 0
+}
+if decimals > 9 {
+return checked(report(c, source.error_help("E0106", e.span, "number `\(digits)` has more than 9 decimals", "`Decimal` keeps exactly 9 decimal places; for a `Float`, give the type, e.g. `let x: Float = \(digits)`")), e, .Decimal)
+}
+checked(c, e, .Decimal)
+}
+
+note "Whether the literal is 10^308 or more: its decimal exponent is the written exponent plus the position of the first non-zero digit."
+fn float_literal_too_large(codes: List[Int]) -> Bool {
+var mantissa: List[Int] = []
+var integer_digits = 0
+var seen_point = false
+var exponent_text: List[Int] = []
+var in_exponent = false
+for code in codes {
+if in_exponent {
+set exponent_text += [code]
+} else if code == 101 {
+set in_exponent = true
+} else if code == 46 {
+set seen_point = true
+} else {
+set mantissa += [code]
+if not seen_point {
+set integer_digits = integer_digits + 1
+}
+}
+}
+var first = -1
+for position in range(0, length(mantissa)) {
+if first < 0 and mantissa[position] != 48 {
+set first = position
+}
+}
+if first < 0 {
+return false
+}
+let written = if length(exponent_text) == 0 { .Some(0) } else if exponent_text[0] == 43 { parse_int(from_code_points(slice(exponent_text, 1, length(exponent_text)))) } else { parse_int(from_code_points(exponent_text)) }
+match written {
+.Some(value) => value > 400 or value + integer_digits - 1 - first >= 308
+.None => length(exponent_text) > 0 and exponent_text[0] != 45
+}
+}
+
+fn check_binary(c: Checker, e: ast.Expr, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr, expected: ast.Type) -> Checked {
 let symbol = ast.binary_symbol(op)
+// Arithmetic where a `Float` is expected makes a literal on the left a `Float` too: `let x: Float = 0.5 * 3.0`.
+let arithmetic_float = expected == .Float and (op == .Add or op == .Subtract or op == .Multiply or op == .Divide)
 if op == .Add {
-let left_result = check_expr(c, left, .Unknown)
+let left_result = check_expr(c, left, if arithmetic_float { ast.Type.Float } else { literal_context(c, left, right) })
 let left_type = left_result.expr.ty
 let right_result = check_expr(left_result.checker, right, left_type)
 let right_type = right_result.expr.ty
@@ -1776,6 +1890,9 @@ return checked(after, typed, .Text)
 }
 if left_type == .Decimal and right_type == .Decimal {
 return checked(after, typed, .Decimal)
+}
+if left_type == .Float and right_type == .Float {
+return checked(after, typed, .Float)
 }
 if left_type == .Bytes and right_type == .Bytes {
 return checked(after, typed, .Bytes)
@@ -1808,13 +1925,15 @@ _ => false
 }
 if mixed {
 set d = d with { help: "convert the number with `to_text(...)`; Tessera has no implicit conversions" }
+} else if decimal_and_float(left_type, right_type) {
+set d = d with { help: float_hint() }
 } else if left_is_list {
 set d = d with { help: "`+` joins two lists of the same type; to add one item write `list + [item]`" }
 }
 return checked(report(after, d), typed, .Unknown)
 }
 if op == .Equal or op == .NotEqual {
-let left_result = check_expr(c, left, .Unknown)
+let left_result = check_expr(c, left, if arithmetic_float { ast.Type.Float } else { literal_context(c, left, right) })
 let right_result = check_expr(left_result.checker, right, left_result.expr.ty)
 let typed = e with { kind: .Binary(op, op_span, left_result.expr, right_result.expr) }
 if join_types(left_result.expr.ty, right_result.expr.ty) != .None {
@@ -1825,12 +1944,16 @@ return checked(report(right_result.checker, d), typed, .Bool)
 }
 let is_logic = op == .And or op == .Or
 let is_order = op == .Less or op == .LessEqual or op == .Greater or op == .GreaterEqual
-let left_result = if is_logic { check_expr(c, left, .Bool) } else { check_expr(c, left, .Unknown) }
-let operand_type = if is_logic { ast.Type.Bool } else if left_result.expr.ty == .Decimal { ast.Type.Decimal } else { ast.Type.Int }
+let left_result = if is_logic { check_expr(c, left, .Bool) } else { check_expr(c, left, if arithmetic_float { ast.Type.Float } else { literal_context(c, left, right) }) }
+let left_type = left_result.expr.ty
+let operand_type = if is_logic { ast.Type.Bool } else if left_type == .Decimal or left_type == .Float { left_type } else { ast.Type.Int }
 let result_type = if is_logic or is_order { ast.Type.Bool } else { operand_type }
 var after = left_result.checker
 if operand_type == .Decimal and op == .Remainder {
 set after = report(after, source.error_help("E0503", op_span, "`%` works on `Int` only", "use `to_int` and `decimal` to convert, or `round`"))
+}
+if operand_type == .Float and op == .Remainder {
+set after = report(after, source.error_help("E0503", op_span, "`%` works on `Int` only", "for a `Float`, use `x - floor(x / y) * y`"))
 }
 if not fits(left_result.expr.ty, operand_type) {
 set after = report(after, operand_error(op, is_order, left.span, left_result.expr.ty, operand_type))
@@ -1843,8 +1966,15 @@ set after = report(after, operand_error(op, is_order, right.span, right_result.e
 checked(after, e with { kind: .Binary(op, op_span, left_result.expr, right_result.expr) }, result_type)
 }
 
+fn decimal_and_float(a: ast.Type, b: ast.Type) -> Bool = (a == .Decimal and b == .Float) or (a == .Float and b == .Decimal)
+
+fn float_hint() -> Text = "a number like `0.0` is a `Decimal` unless a `Float` is expected there; give the type, e.g. `var total: Float = 0.0`, or use `float(n)` for an `Int`"
+
 fn operand_error(op: ast.BinaryOp, is_order: Bool, span: source.Span, found: ast.Type, wanted: ast.Type) -> source.Diagnostic {
 let symbol = ast.binary_symbol(op)
+if decimal_and_float(found, wanted) {
+return source.error_help("E0503", span, "`\(symbol)` needs `\(ast.type_text(wanted))`, found `\(ast.type_text(found))`", float_hint())
+}
 if is_order {
 return source.error("E0514", span, "`\(symbol)` compares numbers only, found `\(ast.type_text(found))`")
 }
@@ -2405,7 +2535,7 @@ _ => false
 if name == "length" and length(args) == 1 and (is_map or first_type == .Bytes) {
 return call_result(first.checker, e, name, name_span, [first.expr], .Int)
 }
-if name == "to_text" and length(args) == 1 and first_type == .Decimal {
+if name == "to_text" and length(args) == 1 and (first_type == .Decimal or first_type == .Float) {
 return call_result(first.checker, e, name, name_span, [first.expr], .Text)
 }
 if name == "contains" and length(args) == 2 and is_map {
@@ -2432,7 +2562,7 @@ var after = result.checker
 let base_ok = t == .Unknown or t == .Never
 if name == "to_text" {
 if not (base_ok or t == .Int or t == .Bool or t == .Text) {
-set after = report(after, source.error_help("E0501", args[0].span, "`to_text` (also used by `\\(...)` in text) accepts `Int`, `Bool` or `Text`, found `\(ast.type_text(t))`", "convert the value to `Text` first"))
+set after = report(after, source.error_help("E0501", args[0].span, "`to_text` (also used by `\\(...)` in text) accepts `Int`, `Bool`, `Text`, `Decimal` or `Float`, found `\(ast.type_text(t))`", "convert the value to `Text` first"))
 }
 return call_result(after, e, name, name_span, [result.expr], .Text)
 }
@@ -2475,8 +2605,8 @@ return call_result(all.checker, e, name, name_span, all.args, .Unknown)
 let list = list_arg(c, args[0], expected, name)
 var after = list.checker
 let element = list.element
-if not (element == .Unknown or element == .Int or element == .Text) {
-set after = report(after, source.error_help("E0501", args[0].span, "`sort` needs a list of `Int` or `Text`, found `\(ast.type_text(list.expr.ty))`", "sort other values by building a list of keys, or write a small sort function"))
+if not (element == .Unknown or element == .Int or element == .Text or element == .Float) {
+set after = report(after, source.error_help("E0501", args[0].span, "`sort` needs a list of `Int`, `Text` or `Float`, found `\(ast.type_text(list.expr.ty))`", "sort other values by building a list of keys, or write a small sort function"))
 }
 return call_result(after, e, name, name_span, [list.expr], .List(element))
 }
@@ -2594,8 +2724,8 @@ set after = report(after, source.error_help("E0501", args[1].span, "`\(name)` ne
 if name == "filter" and not (result == .Bool or result == .Unknown) {
 set after = report(after, source.error("E0501", args[1].span, "`filter` needs a function that returns `Bool`, found one returning `\(ast.type_text(result))`"))
 }
-if name == "sort_by" and not (result == .Int or result == .Text or result == .Decimal or result == .Unknown) {
-set after = report(after, source.error("E0501", args[1].span, "`sort_by` needs a key function that returns `Int`, `Text` or `Decimal`, found `\(ast.type_text(result))`"))
+if name == "sort_by" and not (result == .Int or result == .Text or result == .Decimal or result == .Float or result == .Unknown) {
+set after = report(after, source.error("E0501", args[1].span, "`sort_by` needs a key function that returns `Int`, `Text`, `Decimal` or `Float`, found `\(ast.type_text(result))`"))
 }
 let list_type = if name == "map" { ast.Type.List(result) } else { ast.Type.List(element) }
 call_result(after, e, name, name_span, [list.expr, function.expr], list_type)
@@ -2623,6 +2753,17 @@ _ => {}
 }
 if source.contains_text(generic_builtin_names(), name) {
 return check_generic_call(start, e, name, name_span, args, expected)
+}
+if (name == "to_int" and length(args) == 1) or (name == "round" and length(args) == 2) {
+// The `Float` forms of `to_int` and `round` (draft 0.17); the `Decimal` forms are checked from the table below.
+let first = check_expr(start, args[0], .Unknown)
+if first.expr.ty == .Float {
+if name == "to_int" {
+return call_result(first.checker, e, name, name_span, [first.expr], .Int)
+}
+let places = expect_expr(first.checker, args[1], .Int)
+return call_result(places.checker, e, name, name_span, [first.expr, places.expr], .Float)
+}
 }
 if name == "repeat" and length(args) == 2 {
 // `repeat(list, count)` (draft 0.14); the `Text` form is checked from the table below.

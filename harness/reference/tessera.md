@@ -43,10 +43,13 @@ print("Hello, \(name)")
 | `Result[T, E]` | `.Ok(value)` or `.Error(error)` |
 | `Map[K, V]` | Immutable map sorted by key (`K` is `Int` or `Text`), literal `["a": 1, "b": 2]`; `[:]` is empty and needs a known type |
 | `Decimal` | Exact number with 9 decimal places, literal `19.99`; overflow is a runtime error |
+| `Float` | 64-bit floating point, always finite (overflow, division by zero and `sqrt(-1.0)` are runtime errors); literal `0.5` where a `Float` is expected, or with an exponent: `1e-9` |
 | `Bytes` | Bytes 0 to 255, from `to_bytes(text)` or `bytes([1, 2])`; `b[i]` is an `Int`, `length(b)` |
 | `fn(A, B) -> C` | A function value, e.g. `fn(Int) -> Text`; with effects `fn(Text) -> Unit uses io` |
 
-There are no implicit conversions, and conditions must be `Bool`. `Decimal` and `Int` do not mix: `price * decimal(quantity)`.
+There are no implicit conversions, and conditions must be `Bool`. `Decimal`, `Float` and `Int` do not mix: `price * decimal(quantity)`, `speed * float(count)`, `to_int(x)`.
+
+A number like `0.5` is a `Float` where a `Float` is expected (annotation, parameter, field, return value, the other side of an operator with a `Float`, a list with a `Float`) and a `Decimal` everywhere else. So `var total = 0.0` is a `Decimal`: write `var total: Float = 0.0`. Use `Decimal` for money, `Float` for measurements and geometry.
 
 Inside a text literal, `\(expression)` inserts the value of an `Int`, `Bool` or `Text` expression: `"found \(count) items in \(name)"`. The expression may contain calls and text literals: `"\(join(parts, ", "))"`. Braces `{}` in text have no special meaning. Prefer interpolation over `+` with `to_text`.
 
@@ -271,7 +274,10 @@ return .Some(word)
 | `lines` | `(text: Text) -> List[Text]` |
 | `map`, `filter`, `sort_by` | `(list: List[T], f: fn(T) -> U) -> List[U]`; `f: fn(T) -> Bool`; key `fn(T) -> Int/Text/Decimal` (stable) |
 | `get`, `put`, `remove`, `keys`, `values` | maps, see above |
-| `decimal`, `to_int`, `round`, `parse_decimal` | `Int -> Decimal`; `Decimal -> Int` (toward zero); `(Decimal, places: Int) -> Decimal`; `Text -> Option[Decimal]` |
+| `float`, `floor`, `ceil`, `sqrt`, `exp`, `ln`, `sin`, `cos`, `tan`, `pi()` | `Int -> Float`; the rest `Float -> Float` (`floor`/`ceil` stay `Float`; `to_int` truncates) |
+| `atan2`, `pow` | `(y: Float, x: Float) -> Float`; `(base: Float, exponent: Float) -> Float` |
+| `parse_float` | `(text: Text) -> Option[Float]` |
+| `decimal`, `to_int`, `round`, `parse_decimal` | `Int -> Decimal`; `Decimal -> Int` (toward zero; also `Float -> Int`); `(Decimal, places: Int) -> Decimal` (also for `Float`); `Text -> Option[Decimal]` |
 | `read_line`, `read_input` | `() -> Option[Text] uses io` (`.None` at end of input); `() -> Text uses io` (all of standard input) |
 | `read_text` | `(path: Text) -> Result[Text, FileError] uses fs` (`FileError` is `.NotFound`, `.PermissionDenied` or `.Other(message)`) |
 | `read_bytes`, `write_bytes` | `(path: Text) -> Result[Bytes, FileError] uses fs`; `(path: Text, data: Bytes) -> Result[Unit, FileError] uses fs` (binary files) |

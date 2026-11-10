@@ -50,6 +50,7 @@ match ty {
 .Map(key, value) => "Rc<std::collections::BTreeMap<" + rust_type(key) + ", " + rust_type(value) + ">>"
 .Bytes => "Rc<Vec<u8>>"
 .Decimal => "TDecimal"
+.Float => "f64"
 .Database => "TDatabase"
 .Function(params, result, _) => {
 var names: List[Text] = []
@@ -92,6 +93,7 @@ match te.name {
 "Map" => if length(te.args) > 1 { .Map(resolve_simple(te.args[0], defs), resolve_simple(te.args[1], defs)) } else { .Map(.Unknown, .Unknown) }
 "Bytes" => .Bytes
 "Decimal" => .Decimal
+"Float" => .Float
 "Database" => .Database
 "fn" => function_type_simple(te, defs)
 _ => if find_type_def(defs, te.name) != .None { .Named(te.name) } else { .Unknown }
@@ -579,7 +581,7 @@ code(t.gen, "(\(t.text)).f_\(name).clone()")
 .Unary(op, operand) => {
 let o = gen_expr(g, operand, indent)
 match op {
-.Negate => code(o.gen, if e.ty == .Decimal { "tw_dec_neg(\(o.text), \(location(g, e.span)))" } else { "t_neg(\(o.text), \(location(g, e.span)))" })
+.Negate => code(o.gen, if e.ty == .Decimal { "tw_dec_neg(\(o.text), \(location(g, e.span)))" } else if e.ty == .Float { "(-\(o.text))" } else { "t_neg(\(o.text), \(location(g, e.span)))" })
 .Not => code(o.gen, "(!\(o.text))")
 }
 }
@@ -595,11 +597,12 @@ let text = match op {
 .List(_) => "t_concat_lists(\(a), \(b))"
 .Bytes => "t_concat_lists(\(a), \(b))"
 .Decimal => "tw_dec_add(\(a), \(b), \(loc))"
+.Float => "t_float_add(\(a), \(b), \(loc))"
 _ => "t_add(\(a), \(b), \(loc))"
 }
-.Subtract => if e.ty == .Decimal { "tw_dec_sub(\(a), \(b), \(loc))" } else { "t_sub(" + a + ", " + b + ", " + loc + ")" }
-.Multiply => if e.ty == .Decimal { "tw_dec_mul(\(a), \(b), \(loc))" } else { "t_mul(" + a + ", " + b + ", " + loc + ")" }
-.Divide => if e.ty == .Decimal { "tw_dec_div(\(a), \(b), \(loc))" } else { "t_div(" + a + ", " + b + ", " + loc + ")" }
+.Subtract => if e.ty == .Decimal { "tw_dec_sub(\(a), \(b), \(loc))" } else if e.ty == .Float { "t_float_sub(\(a), \(b), \(loc))" } else { "t_sub(" + a + ", " + b + ", " + loc + ")" }
+.Multiply => if e.ty == .Decimal { "tw_dec_mul(\(a), \(b), \(loc))" } else if e.ty == .Float { "t_float_mul(\(a), \(b), \(loc))" } else { "t_mul(" + a + ", " + b + ", " + loc + ")" }
+.Divide => if e.ty == .Decimal { "tw_dec_div(\(a), \(b), \(loc))" } else if e.ty == .Float { "t_float_div(\(a), \(b), \(loc))" } else { "t_div(" + a + ", " + b + ", " + loc + ")" }
 .Remainder => "t_rem(" + a + ", " + b + ", " + loc + ")"
 .Equal => "(" + a + " == " + b + ")"
 .NotEqual => "(" + a + " != " + b + ")"
@@ -676,7 +679,7 @@ code(result.gen, "return \(result.text)")
 }
 .Break => code(g, "break")
 .Continue => code(g, "continue")
-.DecimalLiteral(digits) => code(g, decimal_literal(digits))
+.DecimalLiteral(digits) => code(g, if e.ty == .Float { "\(digits)f64" } else { decimal_literal(digits) })
 .MapLiteral(keys, values) => {
 let k = gen_list(g, keys, indent)
 let v = gen_list(k.gen, values, indent)
@@ -874,6 +877,7 @@ let text = match name {
 .Bool => call_plain("t_bool_to_text", a)
 .Text => "(" + a[0] + ")"
 .Decimal => call_plain("tw_dec_to_text", a)
+.Float => call_plain("t_float_to_text", a)
 _ => call_plain("t_int_to_text", a)
 }
 "length" => match args[0].ty {
@@ -893,7 +897,7 @@ _ => "t_list_length(&\(a[0]))"
 "join" => "t_join(&" + a[0] + ", &" + a[1] + ")"
 "split" => "t_split(&" + a[0] + ", &" + a[1] + ")"
 "parse_int" => "t_parse_int(&" + a[0] + ")"
-"sort" => call_plain("t_sort", a)
+"sort" => if args[0].ty == .List(.Float) { call_plain("t_sort_floats", a) } else { call_plain("t_sort", a) }
 "index_of" => if args[0].ty == .Text { "t_text_index_of(&\(a[0]), &\(a[1]))" } else { "t_index_of(&\(a[0]), &\(a[1]))" }
 "contains" => match args[0].ty {
 .Text => "t_text_contains(&\(a[0]), &\(a[1]))"
@@ -907,7 +911,10 @@ _ => "t_contains(&\(a[0]), &\(a[1]))"
 "values" => "t_map_values(&\(a[0]))"
 "map" => call_plain("t_map_list", a)
 "filter" => call_plain("t_filter", a)
-"sort_by" => call_plain("t_sort_by", a)
+"sort_by" => match args[1].ty {
+.Function(_, key, _) => if key == .Float { call_plain("t_sort_by_float", a) } else { call_plain("t_sort_by", a) }
+_ => call_plain("t_sort_by", a)
+}
 "trim" => call_ref("t_trim", a)
 "starts_with" => call_ref("t_starts_with", a)
 "ends_with" => call_ref("t_ends_with", a)
@@ -941,8 +948,21 @@ _ => call_with_location("t_repeat", a, loc)
 "byte_values" => call_ref("t_byte_values", a)
 "decimal" => call_plain("tw_dec_from_int", a)
 "parse_decimal" => call_plain("tw_dec_parse", a)
-"round" => call_with_location("tw_dec_round", a, loc)
-"to_int" => call_with_location("tw_dec_to_int", a, loc)
+"round" => if args[0].ty == .Float { call_with_location("t_float_round", a, loc) } else { call_with_location("tw_dec_round", a, loc) }
+"to_int" => if args[0].ty == .Float { call_with_location("t_float_to_int", a, loc) } else { call_with_location("tw_dec_to_int", a, loc) }
+"float" => "(\(a[0]) as f64)"
+"floor" => "(\(a[0])).floor()"
+"ceil" => "(\(a[0])).ceil()"
+"sqrt" => call_with_location("t_float_sqrt", a, loc)
+"exp" => call_with_location("t_float_exp", a, loc)
+"ln" => call_with_location("t_float_ln", a, loc)
+"sin" => "(\(a[0])).sin()"
+"cos" => "(\(a[0])).cos()"
+"tan" => call_with_location("t_float_tan", a, loc)
+"atan2" => "(\(a[0])).atan2(\(a[1]))"
+"pow" => call_with_location("t_float_pow", a, loc)
+"pi" => "std::f64::consts::PI"
+"parse_float" => "t_parse_float(&\(a[0]))"
 "now" => call_plain("tw_now_ms", a)
 "monotonic" => call_plain("tw_monotonic_ms", a)
 "sleep" => call_with_location("tw_sleep_ms", a, loc)

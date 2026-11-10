@@ -1,0 +1,6 @@
+type Float {
+value: Int
+}
+fn main() -> Unit uses io {
+print("x")
+}

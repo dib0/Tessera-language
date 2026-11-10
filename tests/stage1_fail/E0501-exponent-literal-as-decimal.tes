@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+let price: Decimal = 1e3
+print("\(price)")
+}

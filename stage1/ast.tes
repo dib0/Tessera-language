@@ -17,6 +17,7 @@ Named(name: Text)
 Map(key: Type, value: Type)
 Bytes
 Decimal
+Float
 Database
 Function(params: List[Type], result: Type, effects: List[Text])
 }
@@ -238,6 +239,7 @@ match ty {
 .Map(key, value) => "Map[" + type_text(key) + ", " + type_text(value) + "]"
 .Bytes => "Bytes"
 .Decimal => "Decimal"
+.Float => "Float"
 .Database => "Database"
 .Function(params, result, effects) => {
 var names: List[Text] = []

@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+let x: Float = 7.5
+print("\(x + 1)")
+}

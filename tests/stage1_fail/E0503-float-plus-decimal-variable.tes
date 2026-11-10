@@ -1,0 +1,10 @@
+fn mean(values: List[Float]) -> Float {
+var total = 0.0
+for v in values {
+set total += v
+}
+total / float(length(values))
+}
+fn main() -> Unit uses io {
+print("\(mean([1.0e0]))")
+}

@@ -1,0 +1,3 @@
+fn main() -> Unit uses io {
+print("\(sqrt(-1e0))")
+}

@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+let m: Map[Float, Text] = [:]
+print("\(length(m))")
+}

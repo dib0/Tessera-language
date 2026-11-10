@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.16. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.16: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files and the standard modules added in draft 0.16 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
+**Status:** Draft 0.17. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.17: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16 and `Float` (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -189,6 +189,19 @@ From draft 0.15 to 0.16, general-purpose standard modules (Phase 3 of the DOOM r
 
 No `std/text` module: `pad_left`, `pad_right`, `split` and `parse_int` are already built-in functions (section 10). `parse_int` keeps returning `Option[Int]`; a `Result` would only repeat the input in its error.
 
+From draft 0.16 to 0.17:
+
+| Added | Why |
+|---|---|
+| `Float`, a 64-bit IEEE 754 number that is always finite (sections 4.5, 5.1, 10) | Geometry, physics, statistics and scientific code need fast approximate numbers; `Decimal` is exact but slow and limited to 9 decimals. |
+| A number like `0.5` is a `Float` where one is expected, a `Decimal` elsewhere; exponents always mean `Float` | Programs written before draft 0.17 keep their meaning, and models can write `x * 0.5` naturally. |
+| Infinity and NaN are runtime errors (R002, R003, R021) | As for `Int` overflow: a bad value stops the program where it appears instead of spreading silently. It also keeps `==` and sorting well defined. |
+| `float`, `floor`, `ceil`, `sqrt`, `sin`, `cos`, `tan`, `atan2`, `exp`, `ln`, `pow`, `pi`, `parse_float`; `to_int`, `round`, `to_text`, `sort`, `sort_by` accept `Float` | The usual floating-point library. |
+
+Decided against: a 32-bit float type (one floating-point type is enough, principle 3), `%` on `Float`, and keeping infinities and NaN (they make `==` non-reflexive and silently poison results).
+
+Whether the DOOM port uses `Float` or 16.16 fixed point is still decision D2 of the DOOM roadmap. `+ - * / sqrt` are reproducible everywhere, but `sin`, `cos` and the other library functions can differ in the last bit between platforms, which demo playback (milestone M9) cannot tolerate unless angles come from tables.
+
 ## 4. Source files and lexical structure
 
 ### 4.1 Files
@@ -243,6 +256,7 @@ Reserved for future use (E0108 when used as a name): `module`, `unsafe`, `loop`,
 | List | `[1, 2, 3]`, `[]` | Elements must share one type. An empty list needs a known type from context (section 5.3). |
 | Map | `["ada": 36, "linus": 54]`, `[:]` | Keys `Int` or `Text`, values of one type. A key given twice keeps the last value. An empty map needs a known type (E0505). |
 | Decimal | `19.99`, `0.5` | Digits, a point and 1 to 9 digits (E0106 otherwise). Negative values use unary `-`. |
+| Float | `0.5` where a `Float` is expected, `6.02e23`, `1e-9`, `2.5E+3` | A number with a point is a `Float` when the context expects one (section 5.1), with any number of decimals; a number with an exponent is always a `Float`. Its magnitude must be below 10^308 (E0106). |
 
 Negative numbers are the unary `-` applied to a literal. `-9223372036854775808` is accepted so the full `Int` range is expressible.
 
@@ -277,11 +291,22 @@ shipping          // OK
 | `Option[T]` | Either a value of type `T` or no value (section 5.5). |
 | `Result[T, E]` | Either a value of type `T` or an error of type `E` (section 5.6). |
 | `Map[K, V]` | Immutable map from `Int` or `Text` keys (E0208 otherwise) to values, ordered by key, so iteration and output are deterministic. |
+| `Float` | IEEE 754 64-bit floating-point number, always finite: an operation whose result would be infinite or not a number stops with a runtime error instead (R002, R003, R021), so `==` and `<` behave as for other numbers. See below. |
 | `Decimal` | Exact fixed-point number with 9 decimal places, range about ±1.7 × 10^29. `+ - * /` and comparisons; multiplication and division round the last place half away from zero; overflow is R002 and division by zero R003. Never mixed with `Int` (`decimal(n)`, `to_int(d)`). |
 | `Bytes` | Sequence of bytes 0 to 255: `length`, indexing (an `Int`), `slice`, `+`, `==`, and `set b[i] = v` on a `var` (R018 outside 0 to 255). |
 | `fn(A, B) -> C uses e` | A function value (section 9.6). |
 | `FileError` | Built-in enum `NotFound`, `PermissionDenied`, `Other(message: Text)`, the error of the file functions that return a `Result`. |
 | `Database` | An open SQLite database (effect `db`, section 10). |
+
+**`Float` and `Decimal`.** Both are written with a decimal point. A literal such as `0.5` is a `Float` where a `Float` is expected: an annotation (`let x: Float = 0.5`), a parameter, a field, a return value, the other operand of an arithmetic operator or comparison with a `Float` (`speed * 0.5`, `0.5 * speed`, `x < 1.0`), or an element of a list literal that also holds a `Float` (`[0.5, 1e3]`). Everywhere else it is a `Decimal`, as before draft 0.17: `var total = 0.0` is a `Decimal`, so write `var total: Float = 0.0` (the E0503 message says so). A literal with an exponent (`1e-9`) is always a `Float`, so `let epsilon = 1e-9` needs no annotation. Use `Decimal` for amounts that must be exact (money, JSON numbers); use `Float` for measurements, geometry and science. The two never mix, and neither mixes with `Int`: convert with `float(n)` and `to_int(x)`.
+
+`Float` rules:
+
+- `+`, `-`, `*`, `/`, unary `-` and the comparisons work as in IEEE 754 (results rounded to the nearest representable number). `%` is not defined (E0503).
+- A result too large to represent is R002 (overflow); division by zero is R003; an operation with no real result, such as `sqrt(-1.0)` or `ln(0.0)`, is R021. Infinity and NaN therefore never appear in a program, `==` is reflexive, and `sort` is well defined.
+- `-0.0` equals `0.0`; `to_text` shows it as `-0.0`.
+- `+ - * / sqrt` give the same result on every platform. `sin`, `cos`, `tan`, `atan2`, `exp`, `ln` and `pow` come from the platform's math library and can differ in the last bit between platforms. Programs that must compute identically everywhere (game demos, simulations replayed elsewhere) use `Int` or 16.16 fixed point (`std/fixed`).
+- `Float` cannot be a `Map` key (E0208).
 
 Internally there is also a `Never` type for expressions that do not produce a value (`return`, `break`, `continue`, `fail(...)`, `exit(...)`). It cannot be written in source but fits wherever any type is expected, so `if bad { fail("...") } else { 42 }` is an `Int`.
 
@@ -522,9 +547,9 @@ From highest to lowest precedence:
 | Precedence | Operators | Operand types | Result |
 |---|---|---|---|
 | 1 | `f(x)`, `xs[i]`, `record.field` | call, index, field | |
-| 2 | `-x`, `not x`, `try x` | `Int`, `Bool`, `Result`/`Option` (section 5.6) | same, or the unwrapped value |
-| 3 | `*`, `/`, `%` | `Int` | `Int` |
-| 4 | `+`, `-` | `Int`; `+` also on `Text` and on two lists of the same type | same |
+| 2 | `-x`, `not x`, `try x` | `Int`, `Decimal`, `Float`, `Bool`, `Result`/`Option` (section 5.6) | same, or the unwrapped value |
+| 3 | `*`, `/`, `%` | `Int`; `*` and `/` also on `Decimal` and `Float` | same |
+| 4 | `+`, `-` | `Int`, `Decimal`, `Float`; `+` also on `Text` and on two lists of the same type | same |
 | 5 | `==`, `!=`, `<`, `<=`, `>`, `>=` | see below | `Bool` |
 | 6 | `and` | `Bool` | `Bool` |
 | 7 | `or` | `Bool` | `Bool` |
@@ -533,7 +558,7 @@ From highest to lowest precedence:
 - `and` and `or` short-circuit. Mixing them without parentheses is error E0105: write `(a and b) or c`.
 - `not a == b` is error E0105: write `not (a == b)` or `(not a) == b`.
 - `==` and `!=` work on any two values of the same type, comparing by value (lists element by element, records field by field).
-- `<`, `<=`, `>`, `>=` work on `Int` only (E0514).
+- `<`, `<=`, `>`, `>=` work on `Int`, `Decimal` and `Float` (E0514 otherwise).
 - Integer `/` truncates toward zero; `%` has the sign of the left operand. Division or remainder by zero is runtime error R003.
 - Overflow of `+`, `-`, `*`, `/`, `%` and unary `-` is runtime error R002.
 - `+` on lists gives a new list with the items of both: `[1, 2] + [3]` is `[1, 2, 3]`. The element types must match (E0503).
@@ -927,6 +952,23 @@ Added in draft 0.15:
 | `read_bytes` | `(path: Text) -> Result[Bytes, FileError] uses fs` | The whole file. A missing file is `.Error(.NotFound)`, not a runtime error. |
 | `write_bytes` | `(path: Text, data: Bytes) -> Result[Unit, FileError] uses fs` | Creates or replaces the file. |
 
+Added in draft 0.17 (`Float`, section 5.1):
+
+| Function | Signature | Notes |
+|---|---|---|
+| `float` | `(value: Int) -> Float` | Exact up to ±2^53, otherwise the nearest `Float`. |
+| `to_int` | `(value: Float) -> Int` | Toward zero. R002 outside the `Int` range. (The `Decimal` form is unchanged.) |
+| `floor`, `ceil` | `(value: Float) -> Float` | Round down or up to a whole number; combine with `to_int` for an `Int`. |
+| `round` | `(value: Float, places: Int) -> Float` | To `places` decimals (0 to 15, else R004), half away from zero, as for `Decimal`; the result is the nearest `Float` to that decimal. |
+| `sqrt`, `exp`, `ln` | `(value: Float) -> Float` | R021 for a negative `sqrt` or a non-positive `ln`; R002 when `exp` overflows. |
+| `sin`, `cos`, `tan` | `(radians: Float) -> Float` | |
+| `atan2` | `(y: Float, x: Float) -> Float` | The angle of the point `(x, y)`, from -π to π. |
+| `pow` | `(base: Float, exponent: Float) -> Float` | R021 when there is no real result (`pow(-8.0, 0.5)`), R002 on overflow. |
+| `pi` | `() -> Float` | π. |
+| `parse_float` | `(text: Text) -> Option[Float]` | An optional `-`, digits, optionally `.` and digits, optionally `e` or `E`, a sign and digits: what `to_text` produces and what literals look like. `"inf"`, `"nan"`, `"+1"`, `".5"` and out-of-range values give `.None`. |
+
+`to_text`, interpolation, `sort` and `sort_by` keys also accept `Float`. `to_text` gives the shortest text that reads back as the same number, always with a `.` or an exponent: `1.0`, `0.1`, `-2.5`, `1e21`, `1e-7`.
+
 The runtime has no external dependencies, so SQLite is reached through the `sqlite3` program (a persistent child process per database) and the HTTP client has no TLS. Both are interim choices of draft 0.13; see the roadmap.
 
 ### 10.1 Standard modules
@@ -1007,7 +1049,7 @@ Some errors can only be detected while running. A program cannot catch them; the
 | Code | Situation |
 |---|---|
 | R001 | List or `Bytes` index out of bounds (indexing, `set xs[i] = v`, `replace_at`) |
-| R002 | Integer overflow |
+| R002 | Overflow: `Int` out of range, or a `Float` result too large to represent |
 | R003 | Division or remainder by zero |
 | R004 | Invalid `range` or `slice` bounds |
 | R005 | Invalid Unicode code point |
@@ -1026,6 +1068,7 @@ Some errors can only be detected while running. A program cannot catch them; the
 | R018 | Byte value outside 0 to 255 |
 | R019 | `assert` failed |
 | R020 | Shift amount outside 0 to 63 (`shift_left`, `shift_right`) |
+| R021 | `Float` operation without a real result (`sqrt` of a negative number, `ln` of zero, ...) |
 
 When a runtime error occurs:
 

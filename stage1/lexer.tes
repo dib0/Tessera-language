@@ -295,6 +295,24 @@ set fraction = append(fraction, codes[index])
 set index = index + 1
 }
 }
+// An exponent (`1e-9`, `2.5E+3`) makes the number a `Float` literal (draft 0.17).
+var exponent: List[Int] = []
+if index < length(codes) and (codes[index] == 101 or codes[index] == 69) {
+var after = index + 1
+var sign: List[Int] = []
+if after < length(codes) and (codes[after] == 43 or codes[after] == 45) {
+set sign = [codes[after]]
+set after = after + 1
+}
+if after < length(codes) and source.is_digit(codes[after]) {
+set exponent = [101] + sign
+set index = after
+while index < length(codes) and source.is_digit(codes[index]) {
+set exponent += [codes[index]]
+set index = index + 1
+}
+}
+}
 var bad_suffix = false
 while index < length(codes) and (source.is_alphanumeric(codes[index]) or codes[index] >= 128) {
 set bad_suffix = true
@@ -326,11 +344,10 @@ if digits_greater(digits, code_points("9223372036854775808")) {
 set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `\(raw)` does not fit in `Int`", "`Int` is a signed 64-bit integer: -9223372036854775808 to 9223372036854775807"))
 set text = "0"
 }
-if is_decimal {
-if length(fraction) > 9 {
-set diagnostics = append(diagnostics, source.error_help("E0106", span, "number `\(raw)` has more than 9 decimals", "`Decimal` keeps exactly 9 decimal places"))
-}
-return Scan { token: token(.DecimalNumber, "\(text).\(from_code_points(fraction))", span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
+if is_decimal or length(exponent) > 0 {
+// The checker decides between `Decimal` and `Float` and checks the number of decimals or the range.
+let point = if is_decimal { ".\(from_code_points(fraction))" } else { "" }
+return Scan { token: token(.DecimalNumber, "\(text)\(point)\(from_code_points(exponent))", span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
 }
 Scan { token: token(.Int, text, span), end: index, diagnostics: diagnostics, emit: true, expansion: [] }
 }

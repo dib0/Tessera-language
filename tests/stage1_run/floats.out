@@ -1,0 +1,28 @@
+0.5 19.99 1e-9 6.02214076e23 3.14159265358979
+decimal true 20, float false 0.30000000000000004
+x 1.75 -1.75 0.4375 3.5 true true true
+fly 2.4e-5
+ball 35.15625
+car 463704.0
+mean 2.3333333333333335 hypot 5.0
+float 7.0 -9007199254740992.0
+to_int 2 -2 -3 3
+round 2.35 -3.0 1234.6 0.1 2.67 0.13 100.0
+sqrt 1.4142135623730951 exp 2.718281828459045 ln 2.302585092994046 pow 1.4142135623730951 -8.0
+trig 1.0 1.0 3.141592653589793 0.0
+text 1.0 100.0 1e21 1e-7 -0.0 123456.789 0.30000000000000004
+parse "1.5" 1.5
+parse "-0.25" -0.25
+parse "2e3" 2000.0
+parse "1E-2" 0.01
+parse "7" 7.0
+parse "" none
+parse "+1" none
+parse ".5" none
+parse "1." none
+parse "inf" none
+parse "nan" none
+parse "1e999" none
+parse "1.5x" none
+sort -1.0 0.0 2.25 3.5
+equal true true true

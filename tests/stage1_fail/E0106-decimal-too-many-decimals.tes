@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+let x = 3.14159265358979
+print("\(x)")
+}

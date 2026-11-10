@@ -1,0 +1,3 @@
+fn main() -> Unit uses io {
+print("\(round(1e0, 16))")
+}

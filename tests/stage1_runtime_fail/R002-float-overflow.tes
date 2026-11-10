@@ -1,0 +1,4 @@
+fn main() -> Unit uses io {
+let big: Float = 1e300
+print("\(big * 1e10)")
+}

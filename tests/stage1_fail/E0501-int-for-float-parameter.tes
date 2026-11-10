@@ -1,0 +1,4 @@
+fn half(x: Float) -> Float = x / 2.0
+fn main() -> Unit uses io {
+print("\(half(3))")
+}
