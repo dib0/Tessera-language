@@ -3,6 +3,11 @@
 A DOOM-style engine written in Tessera, following the DOOM roadmap (milestones M1 to M9). It is the
 largest example program in this repository and the test bed for the language features it needs.
 
+[![Tesseradoom playing Freedoom's E1M1](../../resources/tesseradoom-preview.gif)](../../resources/tesseradoom.webm)
+
+*Freedoom's E1M1 in Tesseradoom; click for the full recording
+([`resources/tesseradoom.webm`](../../resources/tesseradoom.webm), 1:41).*
+
 ## Game data: not included
 
 No WAD file is part of this repository, and none may be committed (decision D5). Put one in the
