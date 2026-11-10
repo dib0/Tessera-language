@@ -47,6 +47,18 @@ The original compact sketch (`fn adult(age:i64)->bool`, `!{io}`) was replaced by
 
 The game data is not included: the engine is developed with [Freedoom](https://freedoom.github.io/), and its [README](examples/tesseradoom/README.md) explains where to put the WAD file, how to play, and how each milestone was checked.
 
+## Examples
+
+| Example | What it shows |
+|---|---|
+| [`examples/tesseradoom/`](examples/tesseradoom/) | A DOOM-style engine (see above): modules, records and enums with `match`, fixed-point arithmetic, binary files, a game loop in a window |
+| [`examples/tictactoe/`](examples/tictactoe/) | A graphical game with the `ui` effect, split into a rules module and a window module |
+| [`examples/valid/calculator.tes`](examples/valid/calculator.tes) | A tokenizer, parser and evaluator for arithmetic expressions, with records, enums and `match` |
+| [`examples/valid/receipt.tes`](examples/valid/receipt.tes) | A shopping receipt: lists, loops, `var`/`set`, notes, and amounts in whole cents |
+| [`examples/invalid/`](examples/invalid/) | Programs the compiler rejects, one per error code, with the diagnostics it gives |
+| [`examples/runtime/`](examples/runtime/) | A program that stops with a runtime error (an index out of bounds) |
+| [`tests/web/app.tes`](tests/web/app.tes) | A web application, run as CGI, as a server and inside nginx, Apache and IIS (see [Web applications](#web-applications)) |
+
 ## Compiler bootstrap
 
 Tessera became self-hosting through staged compilation:
