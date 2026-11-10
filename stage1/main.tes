@@ -165,6 +165,21 @@ return runtime_text.std_url()
 if path == "std/html" {
 return runtime_text.std_html()
 }
+if path == "std/bytes" {
+return runtime_text.std_bytes()
+}
+if path == "std/math" {
+return runtime_text.std_math()
+}
+if path == "std/fixed" {
+return runtime_text.std_fixed()
+}
+if path == "std/palette" {
+return runtime_text.std_palette()
+}
+if path == "std/ppm" {
+return runtime_text.std_ppm()
+}
 ""
 }
 

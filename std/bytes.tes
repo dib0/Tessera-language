@@ -1,0 +1,32 @@
+// std/bytes: little-endian numbers and ASCII names in binary data (WAD, BMP, WAV and most other file formats).
+// Effects: none. Reading past the end of the data is runtime error R001, as for `data[i]`.
+
+note "Unsigned 16-bit little-endian number at `at`: 0 to 65535."
+pub fn read_u16_le(data: Bytes, at: Int) -> Int = bit_or(data[at], shift_left(data[at + 1], 8))
+
+note "Signed 16-bit little-endian number at `at`: -32768 to 32767."
+pub fn read_i16_le(data: Bytes, at: Int) -> Int {
+let raw = read_u16_le(data, at)
+if raw >= 32768 { raw - 65536 } else { raw }
+}
+
+note "Unsigned 32-bit little-endian number at `at`: 0 to 4294967295."
+pub fn read_u32_le(data: Bytes, at: Int) -> Int = bit_or(read_u16_le(data, at), shift_left(read_u16_le(data, at + 2), 16))
+
+note "Signed 32-bit little-endian number at `at`: -2147483648 to 2147483647."
+pub fn read_i32_le(data: Bytes, at: Int) -> Int {
+let raw = read_u32_le(data, at)
+if raw >= 2147483648 { raw - 4294967296 } else { raw }
+}
+
+note "`count` bytes from `at` as text, ending early at the first zero byte, as in zero-padded names. Bytes above 127 become `?`. R004 if the range is outside the data."
+pub fn read_ascii(data: Bytes, at: Int, count: Int) -> Text {
+var codes: List[Int] = []
+for value in byte_values(slice(data, at, at + count)) {
+if value == 0 {
+break
+}
+set codes += [if value > 127 { 63 } else { value }]
+}
+from_code_points(codes)
+}

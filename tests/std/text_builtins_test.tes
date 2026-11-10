@@ -1,0 +1,35 @@
+// Roadmap step S3.8 (`std/text`): pad_left, pad_right, parse_int and split are built-in functions
+// (language-design.md section 10), so these tests cover the built-ins instead of a module.
+
+test "pad_left and pad_right" {
+assert(pad_left("7", 3, "0") == "007")
+assert(pad_right("ab", 4, ".") == "ab..")
+assert(pad_left("", 2, " ") == "  ")
+assert(pad_right("", 0, " ") == "")
+assert(pad_left("longer", 3, "0") == "longer")
+assert(pad_left("-5", 4, "0") == "00-5")
+}
+
+test "parse_int: valid, negative, empty and invalid input" {
+assert(parse_int("42") == .Some(42))
+assert(parse_int("-42") == .Some(-42))
+assert(parse_int("0") == .Some(0))
+assert(parse_int("-0") == .Some(0))
+assert(parse_int("-9223372036854775808") == .Some(-9223372036854775807 - 1))
+assert(parse_int("") == .None)
+assert(parse_int("-") == .None)
+assert(parse_int("+5") == .None)
+assert(parse_int(" 5") == .None)
+assert(parse_int("5x") == .None)
+assert(parse_int("1.5") == .None)
+assert(parse_int("9223372036854775808") == .None)
+}
+
+test "split by one character" {
+assert(split("a,b,c", ",") == ["a", "b", "c"])
+assert(split("a,,b", ",") == ["a", "", "b"])
+assert(split("", ",") == [""])
+assert(split(",", ",") == ["", ""])
+assert(split("-1 2 -3", " ") == ["-1", "2", "-3"])
+assert(split("abc", "") == ["a", "b", "c"])
+}

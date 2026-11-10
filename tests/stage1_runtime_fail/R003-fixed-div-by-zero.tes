@@ -1,0 +1,4 @@
+import std/fixed
+fn main() -> Unit uses io {
+print(to_text(fixed.div(65536, 0)))
+}

@@ -1,0 +1,93 @@
+// std/fixed: 16.16 fixed-point numbers, as DOOM uses them (language-design.md section 7.6).
+// A number v is stored as the Int v * 65536. Integer arithmetic only, so results are the same on
+// every platform; `mul` and `div` cannot overflow for values in -2^31 to 2^31 - 1.
+// Effects: none.
+
+note "1.0 as a fixed-point number."
+pub fn one() -> Int = 65536
+
+pub fn from_int(value: Int) -> Int = shift_left(value, 16)
+
+note "The integer part, rounded toward negative infinity: 1.5 gives 1, -1.5 gives -2."
+pub fn floor_int(value: Int) -> Int = shift_right(value, 16)
+
+note "The product, rounded toward negative infinity like DOOM's FixedMul."
+pub fn mul(a: Int, b: Int) -> Int = shift_right(a * b, 16)
+
+note "The quotient, rounded toward zero. R003 when `b` is 0."
+pub fn div(a: Int, b: Int) -> Int = shift_left(a, 16) / b
+
+pub fn abs(value: Int) -> Int = if value < 0 { -value } else { value }
+
+note "sin(2π · index / count) as a fixed-point number, rounded to the nearest unit. `count` must be positive (R010)."
+pub fn sine(index: Int, count: Int) -> Int = turn_sine(4 * index, 4 * count)
+
+note "cos(2π · index / count) as a fixed-point number, rounded to the nearest unit. `count` must be positive (R010)."
+pub fn cosine(index: Int, count: Int) -> Int = turn_sine(4 * index + count, 4 * count)
+
+note "`sine(index, count)` for every index from 0 to `count - 1`."
+pub fn sine_table(count: Int) -> List[Int] {
+var table: List[Int] = []
+for index in range(0, count) {
+set table += [sine(index, count)]
+}
+table
+}
+
+note "`cosine(index, count)` for every index from 0 to `count - 1`."
+pub fn cosine_table(count: Int) -> List[Int] {
+var table: List[Int] = []
+for index in range(0, count) {
+set table += [cosine(index, count)]
+}
+table
+}
+
+note "π · 2^28, rounded."
+fn pi_28() -> Int = 843314857
+
+note "sin(2π · numerator / denominator). The angle is reduced to a quadrant, where a Taylor series with 28 fraction bits is far more precise than the 16 bits of the result. Every product stays below 2^59: the angle is below 2^28.7 and its square below 2^29.3."
+fn turn_sine(numerator: Int, denominator: Int) -> Int {
+if denominator <= 0 {
+fail("sine and cosine need a positive count, found \(denominator / 4)")
+}
+let turn = ((numerator % denominator) + denominator) % denominator
+let quadrant = (4 * turn) / denominator
+let rest = 4 * turn - quadrant * denominator
+// The angle inside the quadrant, from 0 up to π/2, with 28 fraction bits.
+let x = pi_28() * rest / (2 * denominator)
+let value = match quadrant {
+0 => series_sine(x)
+1 => series_cosine(x)
+2 => -series_sine(x)
+_ => -series_cosine(x)
+}
+let magnitude = shift_right(abs(value) + 2048, 12)
+if value < 0 { -magnitude } else { magnitude }
+}
+
+fn series_sine(x: Int) -> Int {
+let square = shift_right(x * x, 28)
+var term = x
+var sum = x
+var k = 1
+while term != 0 {
+set term = -(term * square / shift_left((2 * k) * (2 * k + 1), 28))
+set sum += term
+set k += 1
+}
+sum
+}
+
+fn series_cosine(x: Int) -> Int {
+let square = shift_right(x * x, 28)
+var term = shift_left(1, 28)
+var sum = term
+var k = 1
+while term != 0 {
+set term = -(term * square / shift_left((2 * k - 1) * (2 * k), 28))
+set sum += term
+set k += 1
+}
+sum
+}

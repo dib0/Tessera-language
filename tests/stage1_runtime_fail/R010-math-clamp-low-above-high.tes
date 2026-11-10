@@ -1,0 +1,4 @@
+import std/math
+fn main() -> Unit uses io {
+print(to_text(math.clamp(5, 10, 0)))
+}

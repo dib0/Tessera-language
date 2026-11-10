@@ -11,4 +11,6 @@ The files in `std/` are modules, not programs: `tessera1 check std/json.tes` rep
 | `std/json.tes` | yes | `tests/stage1_run/std_modules.tes`, harness task `json-total` | none | Working. Numbers are `Decimal`. |
 | `std/url.tes` | yes | `tests/stage1_run/std_modules.tes` | none | Working. |
 
+Draft 0.16 (roadmap Phase 3) added `std/bytes`, `std/math`, `std/fixed`, `std/palette` and `std/ppm`, each with tests in `tests/std/` (run by `stage1::standard_module_tests_pass`) and runtime-error cases in `tests/stage1_runtime_fail/`. None uses an effect.
+
 No file needs fixing or moving to `std/experimental/` (S3.1 is therefore only a check that new files keep this state). Stage 0 does not support modules and cannot compile any `std/` file; that is by design (stage 0 is frozen at draft 0.3).

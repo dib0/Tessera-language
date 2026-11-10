@@ -1,0 +1,4 @@
+import std/ppm
+fn main() -> Unit uses io {
+print(to_text(length(ppm.encode(2, 2, [0, 0, 0], [rgb(0, 0, 0)]))))
+}

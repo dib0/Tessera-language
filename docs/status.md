@@ -88,3 +88,18 @@ Performance: writing all 64,000 elements of a frame buffer 100 times takes about
 | S2.5 Console input | Existed (`read_line() -> Option[Text] uses io`) | `console_input_is_echoed_until_the_end`: empty lines, `\r\n`, a last line without a line break, and empty input |
 
 The pacing test measures wall-clock time, so a heavily loaded machine could push it over its upper bounds.
+
+## After Phase 3 (draft 0.16)
+
+`cargo test --release`: **24 passed, 0 failed**. Module tests in `tests/std/` use `test` declarations and run through `tessera1 test`.
+
+| Roadmap step | State | Check |
+|---|---|---|
+| S3.1 Clean up `std/` | Nothing to fix (see `std-audit.md`). `build.sh` and the runtime test now embed every file in `std/`, so a new module needs only a line in `stage1/main.tes` | all nine modules compile and are tested |
+| S3.2 `std/bytes` | **Added**, plus `read_i16_le` (sign extension cannot use `shift_left`) | `tests/std/bytes_test.tes`: expected values from Python's `struct` for edge patterns (0, -1, ±2^15, ±2^31, unaligned) |
+| S3.3 `std/fixed` | **Added**. `to_int` is called `floor_int` because `to_int` is the built-in for `Decimal` | All 168,678 entries of tables with 1, 3, 7, 360, 8192, 10240 and 65536 entries are within 0.5003 units of Python's `math.sin`/`math.cos`; `tests/std/fixed_test.tes` checks sample angles within one unit, exact quadrant values and the ±2^31 products |
+| S3.4 `std/math` | **Added** | `tests/std/math_test.tes`: zero, negatives, `Int` limits, `isqrt` of 2^63 - 1 and of every value below 2000; R002/R010 cases |
+| S3.5 `std/wad` | **Not a standard module** (game-specific; belongs to the DOOM port) | — |
+| S3.6 `std/palette` | **Added** as a generic 768-byte RGB palette reader; `PLAYPAL` is that format | entries 0, 1 and 255 of a synthetic palette match Python |
+| S3.7 `std/ppm` | **Added** as a pure `encode`; write with `write_bytes` | a 3 x 2 image is byte-identical to one built in Python; a 320 x 200 frame opened with ImageMagick (`identify`: PPM 320x200 8-bit sRGB) and showed the expected gradient and sine wave |
+| S3.8 `std/text` | **No module**: `pad_left`, `pad_right`, `parse_int`, `split` are built-ins | `tests/std/text_builtins_test.tes`: empty input, negative and invalid numbers, `Int` limits |

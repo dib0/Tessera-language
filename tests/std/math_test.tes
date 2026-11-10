@@ -1,0 +1,48 @@
+// Tests of std/math, including the limits of Int.
+import std/math
+
+fn smallest() -> Int = -9223372036854775807 - 1
+
+fn largest() -> Int = 9223372036854775807
+
+test "min and max" {
+assert(math.min(3, -4) == -4)
+assert(math.max(3, -4) == 3)
+assert(math.min(5, 5) == 5)
+assert(math.min(smallest(), largest()) == smallest())
+assert(math.max(smallest(), largest()) == largest())
+}
+
+test "clamp" {
+assert(math.clamp(5, 0, 10) == 5)
+assert(math.clamp(-5, 0, 10) == 0)
+assert(math.clamp(50, 0, 10) == 10)
+assert(math.clamp(7, 7, 7) == 7)
+assert(math.clamp(largest(), smallest(), 0) == 0)
+}
+
+test "abs" {
+assert(math.abs(0) == 0)
+assert(math.abs(-7) == 7)
+assert(math.abs(7) == 7)
+assert(math.abs(smallest() + 1) == largest())
+}
+
+test "isqrt" {
+assert(math.isqrt(0) == 0)
+assert(math.isqrt(1) == 1)
+assert(math.isqrt(2) == 1)
+assert(math.isqrt(3) == 1)
+assert(math.isqrt(4) == 2)
+assert(math.isqrt(99) == 9)
+assert(math.isqrt(100) == 10)
+assert(math.isqrt(4294967296) == 65536)
+assert(math.isqrt(4294967295) == 65535)
+assert(math.isqrt(largest()) == 3037000499)
+assert(math.isqrt(9223372030926249001) == 3037000499)
+assert(math.isqrt(9223372030926249000) == 3037000498)
+for value in range(0, 2000) {
+let root = math.isqrt(value)
+assert(root * root <= value and (root + 1) * (root + 1) > value)
+}
+}

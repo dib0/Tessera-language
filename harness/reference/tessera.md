@@ -301,6 +301,11 @@ Error messages belong on standard error: `exit_with(1, "error: \(reason)")` repo
 - `std/json`: `enum Json { Null, Bool(value), Number(value: Decimal), String(value), Array(items), Object(fields: Map[Text, Json]) }`; `parse(text) -> Result[Json, Text]`, `encode(json) -> Text`, `field(json, name) -> Option[Json]`, `as_text`, `as_int`, `as_decimal`, `as_bool` (each `-> Option[...]`), `as_list(json) -> List[Json]`, `text_field(json, name)`, `int_field(json, name)`.
 - `std/url`: `percent_encode`, `percent_decode -> Option[Text]`, `parse_query(text) -> Map[Text, Text]`, `path_segments(path) -> List[Text]`.
 - `std/html`: `escape(text)`; use it for every user value placed in HTML.
+- `std/bytes`: `read_u16_le`, `read_i16_le`, `read_u32_le`, `read_i32_le` (`(data: Bytes, at: Int) -> Int`), `read_ascii(data, at, count) -> Text` (stops at a zero byte).
+- `std/math`: `min`, `max`, `clamp(value, low, high)`, `abs`, `isqrt` (integer square root).
+- `std/fixed`: 16.16 fixed point: `one()`, `from_int`, `floor_int`, `mul`, `div`, `abs`, `sine(index, count)`, `cosine(index, count)` (angle `2π · index / count`), `sine_table(count)`, `cosine_table(count)`.
+- `std/palette`: `read(data: Bytes, at: Int) -> List[Int]` (256 colors from 768 RGB bytes, packed like `rgb`), `red`, `green`, `blue`.
+- `std/ppm`: `encode(width, height, pixels: List[Int], palette: List[Int]) -> Bytes` (P6 image of palette indexes; write it with `write_bytes`).
 - `std/http`: a web application has `fn handle(request: http.Request) -> http.Response` instead of `main` (no `io`). `Request` has `method` (`"GET"`), `path` (decoded), `query: Map[Text, Text]`, `headers: Map[Text, Text]` (lowercase names), `body: Bytes`. Responses: `http.text(status, body)`, `http.html(status, body)`, `http.json(status, body)`, `http.redirect(location)`, `http.not_found()`; `http.match_path("/items/:id", request.path) -> Option[Map[Text, Text]]`, `http.form(request)`, `http.cookie(request, name)`, `http.with_header(response, name, value)`, `http.with_cookie(response, name, value, max_age)`.
 
 Tests: `test "name" { assert(condition) }` at the top level of a file, run with `tessera1 test file.tes`.

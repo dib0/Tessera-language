@@ -1,0 +1,21 @@
+// Tests of std/ppm. The expected file was built byte by byte in Python.
+import std/ppm
+
+fn colors() -> List[Int] = [rgb(0, 0, 0), rgb(255, 0, 0), rgb(0, 255, 128), rgb(255, 255, 255)]
+
+test "a 3 x 2 image matches the reference bytes" {
+let image = ppm.encode(3, 2, [0, 1, 2, 3, 2, 1], colors())
+assert(image == bytes([80, 54, 10, 51, 32, 50, 10, 50, 53, 53, 10, 0, 0, 0, 255, 0, 0, 0, 255, 128, 255, 255, 255, 0, 255, 128, 255, 0, 0]))
+}
+
+test "a 320 x 200 frame has the right size and header" {
+var pixels = repeat([0], 320 * 200)
+for x in range(0, 320) {
+set pixels[x] = 3
+}
+let image = ppm.encode(320, 200, pixels, colors())
+let header = "P6\n320 200\n255\n"
+assert(length(image) == length(to_bytes(header)) + 320 * 200 * 3)
+assert(from_bytes(slice(image, 0, 15)) == .Some(header))
+assert(image[15] == 255 and image[15 + 320 * 3] == 0)
+}

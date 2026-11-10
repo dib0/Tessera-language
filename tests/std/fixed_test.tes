@@ -1,0 +1,70 @@
+// Tests of std/fixed. Sine and cosine references are Python's math.sin and math.cos * 65536, rounded.
+import std/fixed
+
+test "conversions" {
+assert(fixed.one() == 65536)
+assert(fixed.from_int(3) == 196608)
+assert(fixed.from_int(-2) == -131072)
+assert(fixed.floor_int(98304) == 1)
+assert(fixed.floor_int(-98304) == -2)
+assert(fixed.floor_int(65535) == 0)
+assert(fixed.abs(-98304) == 98304)
+}
+
+test "multiplication and division" {
+assert(fixed.mul(98304, 147456) == 221184)
+assert(fixed.mul(-98304, 32768) == -49152)
+assert(fixed.mul(-2147483648, -2147483648) == 70368744177664)
+assert(fixed.mul(2147483647, -2147483648) == -70368744144896)
+assert(fixed.div(458752, 131072) == 229376)
+assert(fixed.div(-65536, 196608) == -21845)
+assert(fixed.div(-2147483648, 65536) == -2147483648)
+}
+
+test "sine and cosine are within one unit of the reference" {
+assert(fixed.abs(fixed.sine(0, 8192) - (0)) <= 1)
+assert(fixed.abs(fixed.cosine(0, 8192) - (65536)) <= 1)
+assert(fixed.abs(fixed.sine(1, 8192) - (50)) <= 1)
+assert(fixed.abs(fixed.cosine(1, 8192) - (65536)) <= 1)
+assert(fixed.abs(fixed.sine(1024, 8192) - (46341)) <= 1)
+assert(fixed.abs(fixed.cosine(1024, 8192) - (46341)) <= 1)
+assert(fixed.abs(fixed.sine(2048, 8192) - (65536)) <= 1)
+assert(fixed.abs(fixed.cosine(2048, 8192) - (0)) <= 1)
+assert(fixed.abs(fixed.sine(4096, 8192) - (0)) <= 1)
+assert(fixed.abs(fixed.cosine(4096, 8192) - (-65536)) <= 1)
+assert(fixed.abs(fixed.sine(6144, 8192) - (-65536)) <= 1)
+assert(fixed.abs(fixed.cosine(6144, 8192) - (0)) <= 1)
+assert(fixed.abs(fixed.sine(8191, 8192) - (-50)) <= 1)
+assert(fixed.abs(fixed.cosine(8191, 8192) - (65536)) <= 1)
+assert(fixed.abs(fixed.sine(5000, 10240) - (4821)) <= 1)
+assert(fixed.abs(fixed.cosine(5000, 10240) - (-65358)) <= 1)
+assert(fixed.abs(fixed.sine(30, 360) - (32768)) <= 1)
+assert(fixed.abs(fixed.cosine(30, 360) - (56756)) <= 1)
+assert(fixed.abs(fixed.sine(45, 360) - (46341)) <= 1)
+assert(fixed.abs(fixed.cosine(45, 360) - (46341)) <= 1)
+assert(fixed.abs(fixed.sine(1, 7) - (51238)) <= 1)
+assert(fixed.abs(fixed.cosine(1, 7) - (40861)) <= 1)
+assert(fixed.abs(fixed.sine(-90, 360) - (-65536)) <= 1)
+assert(fixed.abs(fixed.cosine(-90, 360) - (0)) <= 1)
+assert(fixed.abs(fixed.sine(400, 360) - (42126)) <= 1)
+assert(fixed.abs(fixed.cosine(400, 360) - (50203)) <= 1)
+}
+
+test "exact values at the quadrants" {
+assert(fixed.sine(0, 8192) == 0)
+assert(fixed.sine(2048, 8192) == 65536)
+assert(fixed.sine(4096, 8192) == 0)
+assert(fixed.sine(6144, 8192) == -65536)
+assert(fixed.cosine(0, 8192) == 65536)
+assert(fixed.cosine(4096, 8192) == -65536)
+}
+
+test "tables" {
+let sines = fixed.sine_table(8192)
+let cosines = fixed.cosine_table(8192)
+assert(length(sines) == 8192 and length(cosines) == 8192)
+for index in range(0, 8192) {
+assert(cosines[index] == sines[(index + 2048) % 8192])
+}
+assert(length(fixed.sine_table(0)) == 0)
+}

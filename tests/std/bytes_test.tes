@@ -1,0 +1,43 @@
+// Tests of std/bytes. Expected values come from Python's struct module (little-endian "<H", "<h", "<I", "<i").
+import std/bytes
+
+fn sample() -> Bytes = bytes([0, 0, 255, 255, 0, 128, 255, 127, 52, 18, 120, 86, 52, 18, 255, 255, 255, 255, 0, 0, 0, 128, 255, 255, 255, 127, 1, 0, 0, 0, 69, 49, 77, 49, 0, 0, 0, 0, 84, 72, 73, 78, 71, 83, 88, 88, 65, 195, 66, 0])
+
+test "16-bit numbers match Python" {
+let data = sample()
+assert(bytes.read_u16_le(data, 0) == 0)
+assert(bytes.read_i16_le(data, 0) == 0)
+assert(bytes.read_u16_le(data, 2) == 65535)
+assert(bytes.read_i16_le(data, 2) == -1)
+assert(bytes.read_u16_le(data, 4) == 32768)
+assert(bytes.read_i16_le(data, 4) == -32768)
+assert(bytes.read_u16_le(data, 6) == 32767)
+assert(bytes.read_i16_le(data, 6) == 32767)
+assert(bytes.read_u16_le(data, 8) == 4660)
+assert(bytes.read_i16_le(data, 8) == 4660)
+assert(bytes.read_u16_le(data, 1) == 65280)
+}
+
+test "32-bit numbers match Python" {
+let data = sample()
+assert(bytes.read_u32_le(data, 10) == 305419896)
+assert(bytes.read_i32_le(data, 10) == 305419896)
+assert(bytes.read_u32_le(data, 14) == 4294967295)
+assert(bytes.read_i32_le(data, 14) == -1)
+assert(bytes.read_u32_le(data, 18) == 2147483648)
+assert(bytes.read_i32_le(data, 18) == -2147483648)
+assert(bytes.read_u32_le(data, 22) == 2147483647)
+assert(bytes.read_i32_le(data, 22) == 2147483647)
+assert(bytes.read_u32_le(data, 26) == 1)
+assert(bytes.read_i32_le(data, 26) == 1)
+assert(bytes.read_i32_le(data, 3) == -8388353)
+}
+
+test "zero-padded and full-width names" {
+let data = sample()
+assert(bytes.read_ascii(data, 30, 8) == "E1M1")
+assert(bytes.read_ascii(data, 38, 8) == "THINGSXX")
+assert(bytes.read_ascii(data, 38, 6) == "THINGS")
+assert(bytes.read_ascii(data, 46, 4) == "A?B")
+assert(bytes.read_ascii(data, 30, 0) == "")
+}

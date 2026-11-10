@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.15. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.15: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations and binary files (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
+**Status:** Draft 0.16. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.16: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files and the standard modules added in draft 0.16 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -176,6 +176,18 @@ From draft 0.14 to 0.15, host access for a DOOM port (Phase 2 of the DOOM roadma
 | `read_bytes(path)`, `write_bytes(path, data)` (section 10) | WAD files, images and saved games are binary; `read_text` refuses data that is not UTF-8. Both return failures as values (`FileError`), like `read_text` and `write_text`. |
 
 The rest of that phase already existed and is now covered by tests: command-line arguments (`args()`) and exit codes (`exit`, `exit_with`), a monotonic clock and `sleep` for frame pacing, and `read_line` for console input. `main` keeps taking no parameters: arguments come from `args()`, so the `env` effect stays visible in the signature (section 9.3).
+
+From draft 0.15 to 0.16, general-purpose standard modules (Phase 3 of the DOOM roadmap). Formats that belong to one game, such as WAD files, stay in the game's own modules.
+
+| Added | Why |
+|---|---|
+| `std/bytes`: little-endian numbers and zero-padded ASCII names in `Bytes` | Every binary file format needs them, and sign extension is easy to get wrong (section 7.6: `shift_left` never drops bits). |
+| `std/math`: `min`, `max`, `clamp`, `abs`, `isqrt` | Written by hand in many programs; `isqrt` is easy to get subtly wrong at large values. |
+| `std/fixed`: 16.16 fixed-point arithmetic and sine/cosine tables computed with integers only | Deterministic arithmetic for games and simulations (section 7.6), without floating point. |
+| `std/palette`: 256-color RGB palettes | Indexed-color images (DOOM's `PLAYPAL`, PCX, GIF color tables) store palettes as 768 bytes. |
+| `std/ppm`: binary PPM (P6) images | The simplest image format any viewer opens; lets a program show what it renders without a window. |
+
+No `std/text` module: `pad_left`, `pad_right`, `split` and `parse_int` are already built-in functions (section 10). `parse_int` keeps returning `Option[Int]`; a `Result` would only repeat the input in its error.
 
 ## 4. Source files and lexical structure
 
@@ -927,6 +939,13 @@ The runtime has no external dependencies, so SQLite is reached through the `sqli
 | `std/json` | `enum Json`, `parse`, `encode` (keys sorted), `quote`, `field`, `as_text`, `as_int`, `as_decimal`, `as_bool`, `as_list`, `text_field`, `int_field`, `from_int`. |
 | `std/url` | `percent_encode`, `percent_decode`, `parse_query`, `parse_query_all`, `encode_query`, `path_segments`. |
 | `std/html` | `escape`. |
+| `std/bytes` | `read_u16_le`, `read_i16_le`, `read_u32_le`, `read_i32_le` (`(data: Bytes, at: Int) -> Int`), `read_ascii(data, at, count) -> Text` (stops at the first zero byte; bytes above 127 become `?`). Reading past the end is R001. |
+| `std/math` | `min`, `max`, `abs` (R002 for the smallest `Int`), `clamp(value, low, high)` (R010 if `low > high`), `isqrt(value)` (largest `r` with `r * r <= value`; R010 for a negative value). |
+| `std/fixed` | 16.16 fixed point (section 7.6): `one`, `from_int`, `floor_int` (the integer part, rounded toward negative infinity; `to_int` is the built-in for `Decimal`), `mul`, `div` (rounds toward zero; R003 for 0), `abs`; `sine(index, count)` and `cosine(index, count)`, the value at angle `2π · index / count` rounded to the nearest unit (computed with 28 fraction bits, so within 0.0003 of a unit from exact; only values that are almost exactly halfway can round the other way), and `sine_table(count)`, `cosine_table(count)` for indexes `0` to `count - 1`. Integer arithmetic only, so every platform computes the same tables. |
+| `std/palette` | `read(data: Bytes, at: Int) -> List[Int]`: the 256 colors of a 768-byte RGB palette, packed like `rgb(red, green, blue)`; `red`, `green`, `blue` take them apart. |
+| `std/ppm` | `encode(width, height, pixels: List[Int], palette: List[Int]) -> Bytes`: a binary PPM (P6) image of palette indexes, row by row from the top left. R010 if the number of pixels is not `width * height` or a side is not positive; R001 for an index outside the palette. Write it with `write_bytes`. |
+
+The modules added in draft 0.16 use no effects; their tests are in `tests/std/`.
 
 Graphics (effect `ui`, section 9.4):
 

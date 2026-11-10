@@ -13,9 +13,14 @@ echo "== stage 0 (Rust)"
 tessera0=compiler/target/release/tessera
 
 echo "== embedding runtime/ into stage1/runtime_text.tes"
+std_modules=""
+for module in std/*.tes; do
+    name=$(basename "$module" .tes)
+    std_modules="$std_modules std_$name=$module"
+done
+# shellcheck disable=SC2086
 $tessera0 run tools/embed_runtime.tes -- stage1/runtime_text.tes core_runtime=runtime/core.rs ui_runtime=runtime/ui.rs \
-    extra_runtime=runtime/extra.rs web_runtime=runtime/web.rs adapter_runtime=runtime/adapter.rs \
-    std_http=std/http.tes std_json=std/json.tes std_url=std/url.tes std_html=std/html.tes
+    extra_runtime=runtime/extra.rs web_runtime=runtime/web.rs adapter_runtime=runtime/adapter.rs $std_modules
 
 echo "== bootstrap compiler (rustc on the generated seed bootstrap/tessera1.rs)"
 mkdir -p bin

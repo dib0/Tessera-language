@@ -1,0 +1,27 @@
+// Tests of std/palette. Synthetic palette after a 4-byte header: color i is (i, 255 - i, i * 7 % 256);
+// expected packed values computed in Python as (r << 16) | (g << 8) | b.
+import std/palette
+
+fn sample() -> Bytes {
+var values = [80, 65, 76, 33]
+for i in range(0, 256) {
+set values += [i, 255 - i, i * 7 % 256]
+}
+bytes(values)
+}
+
+test "entries 0, 1 and 255 match the reference" {
+let colors = palette.read(sample(), 4)
+assert(length(colors) == 256)
+assert(colors[0] == 65280)
+assert(colors[1] == 130567)
+assert(colors[255] == 16711929)
+assert(colors[255] == rgb(255, 0, 249))
+}
+
+test "components" {
+let colors = palette.read(sample(), 4)
+assert(palette.red(colors[200]) == 200)
+assert(palette.green(colors[200]) == 55)
+assert(palette.blue(colors[200]) == 120)
+}

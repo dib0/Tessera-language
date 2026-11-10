@@ -1,0 +1,4 @@
+import std/bytes
+fn main() -> Unit uses io {
+print(to_text(bytes.read_u32_le(bytes([1, 2, 3]), 0)))
+}

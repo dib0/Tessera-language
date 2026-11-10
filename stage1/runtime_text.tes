@@ -3277,6 +3277,172 @@ let lines = [
 join(lines, "\n")
 }
 
+note "Generated from std/bytes.tes; do not edit by hand."
+pub fn std_bytes() -> Text {
+let lines = [
+"// std/bytes: little-endian numbers and ASCII names in binary data (WAD, BMP, WAV and most other file formats).",
+"// Effects: none. Reading past the end of the data is runtime error R001, as for `data[i]`.",
+"",
+"note \"Unsigned 16-bit little-endian number at `at`: 0 to 65535.\"",
+"pub fn read_u16_le(data: Bytes, at: Int) -> Int = bit_or(data[at], shift_left(data[at + 1], 8))",
+"",
+"note \"Signed 16-bit little-endian number at `at`: -32768 to 32767.\"",
+"pub fn read_i16_le(data: Bytes, at: Int) -> Int {",
+"let raw = read_u16_le(data, at)",
+"if raw >= 32768 { raw - 65536 } else { raw }",
+"}",
+"",
+"note \"Unsigned 32-bit little-endian number at `at`: 0 to 4294967295.\"",
+"pub fn read_u32_le(data: Bytes, at: Int) -> Int = bit_or(read_u16_le(data, at), shift_left(read_u16_le(data, at + 2), 16))",
+"",
+"note \"Signed 32-bit little-endian number at `at`: -2147483648 to 2147483647.\"",
+"pub fn read_i32_le(data: Bytes, at: Int) -> Int {",
+"let raw = read_u32_le(data, at)",
+"if raw >= 2147483648 { raw - 4294967296 } else { raw }",
+"}",
+"",
+"note \"`count` bytes from `at` as text, ending early at the first zero byte, as in zero-padded names. Bytes above 127 become `?`. R004 if the range is outside the data.\"",
+"pub fn read_ascii(data: Bytes, at: Int, count: Int) -> Text {",
+"var codes: List[Int] = []",
+"for value in byte_values(slice(data, at, at + count)) {",
+"if value == 0 {",
+"break",
+"}",
+"set codes += [if value > 127 { 63 } else { value }]",
+"}",
+"from_code_points(codes)",
+"}",
+"",
+]
+join(lines, "\n")
+}
+
+note "Generated from std/fixed.tes; do not edit by hand."
+pub fn std_fixed() -> Text {
+let lines = [
+"// std/fixed: 16.16 fixed-point numbers, as DOOM uses them (language-design.md section 7.6).",
+"// A number v is stored as the Int v * 65536. Integer arithmetic only, so results are the same on",
+"// every platform; `mul` and `div` cannot overflow for values in -2^31 to 2^31 - 1.",
+"// Effects: none.",
+"",
+"note \"1.0 as a fixed-point number.\"",
+"pub fn one() -> Int = 65536",
+"",
+"pub fn from_int(value: Int) -> Int = shift_left(value, 16)",
+"",
+"note \"The integer part, rounded toward negative infinity: 1.5 gives 1, -1.5 gives -2.\"",
+"pub fn floor_int(value: Int) -> Int = shift_right(value, 16)",
+"",
+"note \"The product, rounded toward negative infinity like DOOM's FixedMul.\"",
+"pub fn mul(a: Int, b: Int) -> Int = shift_right(a * b, 16)",
+"",
+"note \"The quotient, rounded toward zero. R003 when `b` is 0.\"",
+"pub fn div(a: Int, b: Int) -> Int = shift_left(a, 16) / b",
+"",
+"pub fn abs(value: Int) -> Int = if value < 0 { -value } else { value }",
+"",
+"note \"sin(2π · index / count) as a fixed-point number, rounded to the nearest unit. `count` must be positive (R010).\"",
+"pub fn sine(index: Int, count: Int) -> Int = turn_sine(4 * index, 4 * count)",
+"",
+"note \"cos(2π · index / count) as a fixed-point number, rounded to the nearest unit. `count` must be positive (R010).\"",
+"pub fn cosine(index: Int, count: Int) -> Int = turn_sine(4 * index + count, 4 * count)",
+"",
+"note \"`sine(index, count)` for every index from 0 to `count - 1`.\"",
+"pub fn sine_table(count: Int) -> List[Int] {",
+"var table: List[Int] = []",
+"for index in range(0, count) {",
+"set table += [sine(index, count)]",
+"}",
+"table",
+"}",
+"",
+"note \"`cosine(index, count)` for every index from 0 to `count - 1`.\"",
+"pub fn cosine_table(count: Int) -> List[Int] {",
+"var table: List[Int] = []",
+"for index in range(0, count) {",
+"set table += [cosine(index, count)]",
+"}",
+"table",
+"}",
+"",
+"note \"π · 2^28, rounded.\"",
+"fn pi_28() -> Int = 843314857",
+"",
+"note \"sin(2π · numerator / denominator). The angle is reduced to a quadrant, where a Taylor series with 28 fraction bits is far more precise than the 16 bits of the result. Every product stays below 2^59: the angle is below 2^28.7 and its square below 2^29.3.\"",
+"fn turn_sine(numerator: Int, denominator: Int) -> Int {",
+"if denominator <= 0 {",
+"fail(\"sine and cosine need a positive count, found \\(denominator / 4)\")",
+"}",
+"let turn = ((numerator % denominator) + denominator) % denominator",
+"let quadrant = (4 * turn) / denominator",
+"let rest = 4 * turn - quadrant * denominator",
+"// The angle inside the quadrant, from 0 up to π/2, with 28 fraction bits.",
+"let x = pi_28() * rest / (2 * denominator)",
+"let value = match quadrant {",
+"0 => series_sine(x)",
+"1 => series_cosine(x)",
+"2 => -series_sine(x)",
+"_ => -series_cosine(x)",
+"}",
+"let magnitude = shift_right(abs(value) + 2048, 12)",
+"if value < 0 { -magnitude } else { magnitude }",
+"}",
+"",
+"fn series_sine(x: Int) -> Int {",
+"let square = shift_right(x * x, 28)",
+"var term = x",
+"var sum = x",
+"var k = 1",
+"while term != 0 {",
+"set term = -(term * square / shift_left((2 * k) * (2 * k + 1), 28))",
+"set sum += term",
+"set k += 1",
+"}",
+"sum",
+"}",
+"",
+"fn series_cosine(x: Int) -> Int {",
+"let square = shift_right(x * x, 28)",
+"var term = shift_left(1, 28)",
+"var sum = term",
+"var k = 1",
+"while term != 0 {",
+"set term = -(term * square / shift_left((2 * k - 1) * (2 * k), 28))",
+"set sum += term",
+"set k += 1",
+"}",
+"sum",
+"}",
+"",
+]
+join(lines, "\n")
+}
+
+note "Generated from std/html.tes; do not edit by hand."
+pub fn std_html() -> Text {
+let lines = [
+"// std/html: escaping text for HTML, so user input cannot become markup (cross-site scripting).",
+"",
+"note \"Escapes `&`, `<`, `>`, `\\\"` and `'`; safe in element content and in quoted attribute values.\"",
+"pub fn escape(text: Text) -> Text {",
+"var out = \"\"",
+"for piece in split(text, \"\") {",
+"set out += match piece {",
+"\"&\" => \"&amp;\"",
+"\"<\" => \"&lt;\"",
+"\">\" => \"&gt;\"",
+"\"\\\"\" => \"&quot;\"",
+"\"'\" => \"&#39;\"",
+"_ => piece",
+"}",
+"}",
+"out",
+"}",
+"",
+]
+join(lines, "\n")
+}
+
 note "Generated from std/http.tes; do not edit by hand."
 pub fn std_http() -> Text {
 let lines = [
@@ -3968,6 +4134,111 @@ let lines = [
 join(lines, "\n")
 }
 
+note "Generated from std/math.tes; do not edit by hand."
+pub fn std_math() -> Text {
+let lines = [
+"// std/math: small integer helpers. Effects: none.",
+"",
+"pub fn min(a: Int, b: Int) -> Int = if a < b { a } else { b }",
+"",
+"pub fn max(a: Int, b: Int) -> Int = if a > b { a } else { b }",
+"",
+"note \"`value` limited to `low` to `high`. Stops with R010 if `low > high`.\"",
+"pub fn clamp(value: Int, low: Int, high: Int) -> Int {",
+"if low > high {",
+"fail(\"clamp: low \\(low) is greater than high \\(high)\")",
+"}",
+"min(max(value, low), high)",
+"}",
+"",
+"note \"The absolute value. The smallest `Int` has no positive counterpart: R002.\"",
+"pub fn abs(value: Int) -> Int = if value < 0 { -value } else { value }",
+"",
+"note \"The integer square root: the largest `r` with `r * r <= value`, exact for every `Int` (digit by digit, no overflow). Stops with R010 for a negative value.\"",
+"pub fn isqrt(value: Int) -> Int {",
+"if value < 0 {",
+"fail(\"isqrt of the negative number \\(value)\")",
+"}",
+"var rest = value",
+"var root = 0",
+"var bit = shift_left(1, 62)",
+"while bit > rest {",
+"set bit = shift_right(bit, 2)",
+"}",
+"while bit != 0 {",
+"if rest >= root + bit {",
+"set rest -= root + bit",
+"set root = shift_right(root, 1) + bit",
+"} else {",
+"set root = shift_right(root, 1)",
+"}",
+"set bit = shift_right(bit, 2)",
+"}",
+"root",
+"}",
+"",
+]
+join(lines, "\n")
+}
+
+note "Generated from std/palette.tes; do not edit by hand."
+pub fn std_palette() -> Text {
+let lines = [
+"// std/palette: 256-color RGB palettes stored as 768 bytes, three per color (red, green, blue),",
+"// as in DOOM's PLAYPAL lump, PCX files and GIF color tables. Colors are packed like the built-in",
+"// `rgb(red, green, blue)`, so they can be drawn with the `ui` functions too.",
+"// Effects: none.",
+"",
+"note \"The 256 colors of the palette that starts at `at`. R001 if fewer than 768 bytes follow.\"",
+"pub fn read(data: Bytes, at: Int) -> List[Int] {",
+"var colors: List[Int] = []",
+"for index in range(0, 256) {",
+"let base = at + index * 3",
+"set colors += [rgb(data[base], data[base + 1], data[base + 2])]",
+"}",
+"colors",
+"}",
+"",
+"pub fn red(color: Int) -> Int = bit_and(shift_right(color, 16), 255)",
+"",
+"pub fn green(color: Int) -> Int = bit_and(shift_right(color, 8), 255)",
+"",
+"pub fn blue(color: Int) -> Int = bit_and(color, 255)",
+"",
+]
+join(lines, "\n")
+}
+
+note "Generated from std/ppm.tes; do not edit by hand."
+pub fn std_ppm() -> Text {
+let lines = [
+"// std/ppm: binary PPM (P6) images, the simplest format every image viewer opens.",
+"// Effects: none; write the result with `write_bytes`.",
+"",
+"note \"An image of `width` x `height` palette indexes, row by row from the top left; `palette` holds colors packed like `rgb(...)`. R010 for a side that is not positive or a pixel count other than `width * height`; R001 for an index outside the palette.\"",
+"pub fn encode(width: Int, height: Int, pixels: List[Int], palette: List[Int]) -> Bytes {",
+"if width <= 0 or height <= 0 {",
+"fail(\"ppm.encode: the image is \\(width) x \\(height); both sides must be positive\")",
+"}",
+"if length(pixels) != width * height {",
+"fail(\"ppm.encode: \\(length(pixels)) pixels for a \\(width) x \\(height) image, expected \\(width * height)\")",
+"}",
+"var body = bytes(repeat([0], width * height * 3))",
+"var at = 0",
+"for index in pixels {",
+"let color = palette[index]",
+"set body[at] = bit_and(shift_right(color, 16), 255)",
+"set body[at + 1] = bit_and(shift_right(color, 8), 255)",
+"set body[at + 2] = bit_and(color, 255)",
+"set at += 3",
+"}",
+"to_bytes(\"P6\\n\\(width) \\(height)\\n255\\n\") + body",
+"}",
+"",
+]
+join(lines, "\n")
+}
+
 note "Generated from std/url.tes; do not edit by hand."
 pub fn std_url() -> Text {
 let lines = [
@@ -4086,31 +4357,6 @@ let lines = [
 "for part in split(path, \"/\") {",
 "if part != \"\" {",
 "set out += [value_or(percent_decode(part), part)]",
-"}",
-"}",
-"out",
-"}",
-"",
-]
-join(lines, "\n")
-}
-
-note "Generated from std/html.tes; do not edit by hand."
-pub fn std_html() -> Text {
-let lines = [
-"// std/html: escaping text for HTML, so user input cannot become markup (cross-site scripting).",
-"",
-"note \"Escapes `&`, `<`, `>`, `\\\"` and `'`; safe in element content and in quoted attribute values.\"",
-"pub fn escape(text: Text) -> Text {",
-"var out = \"\"",
-"for piece in split(text, \"\") {",
-"set out += match piece {",
-"\"&\" => \"&amp;\"",
-"\"<\" => \"&lt;\"",
-"\">\" => \"&gt;\"",
-"\"\\\"\" => \"&quot;\"",
-"\"'\" => \"&#39;\"",
-"_ => piece",
 "}",
 "}",
 "out",

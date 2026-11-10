@@ -1,0 +1,4 @@
+import std/palette
+fn main() -> Unit uses io {
+print(to_text(length(palette.read(bytes(repeat([0], 767)), 0))))
+}

@@ -1,0 +1,4 @@
+import std/math
+fn main() -> Unit uses io {
+print(to_text(math.abs(-9223372036854775807 - 1)))
+}

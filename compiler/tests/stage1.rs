@@ -168,6 +168,11 @@ fn module_errors_are_reported() {
 #[test]
 fn embedded_runtime_is_up_to_date() {
     let generated = work_dir().join("runtime_text.tes");
+    // Every file in std/, in the order build.sh passes them (sorted by name).
+    let std_modules: Vec<String> = tes_files("std")
+        .iter()
+        .map(|path| format!("std_{}={}", path.file_stem().unwrap().to_string_lossy(), path.display()))
+        .collect();
     let out = stage0()
         .arg("run")
         .arg(root().join("tools/embed_runtime.tes"))
@@ -180,10 +185,7 @@ fn embedded_runtime_is_up_to_date() {
         .arg(format!("extra_runtime={}", root().join("runtime/extra.rs").display()))
         .arg(format!("web_runtime={}", root().join("runtime/web.rs").display()))
         .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
-        .arg(format!("std_http={}", root().join("std/http.tes").display()))
-        .arg(format!("std_json={}", root().join("std/json.tes").display()))
-        .arg(format!("std_url={}", root().join("std/url.tes").display()))
-        .arg(format!("std_html={}", root().join("std/html.tes").display()))
+        .args(&std_modules)
         .output()
         .unwrap();
     check_build(out, "embedding the runtime");
@@ -295,6 +297,19 @@ fn console_input_is_echoed_until_the_end() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1: first\n2: \n3: third with spaces\n4: last\nend after 4 lines\n");
     let empty = Command::new(&exe).stdin(std::process::Stdio::null()).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&empty.stdout), "end after 0 lines\n");
+}
+
+#[test]
+fn standard_module_tests_pass() {
+    let files = tes_files("tests/std");
+    assert!(files.len() >= 5);
+    for path in files {
+        let exe = work_dir().join(format!("std_{}", path.file_stem().unwrap().to_string_lossy()));
+        let out = Command::new(stage1()).arg("test").arg(&path).arg("-o").arg(&exe).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{}:\n{}{}", path.display(), stdout, String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains(" passed, 0 failed"), "{}:\n{}", path.display(), stdout);
+    }
 }
 
 #[test]

@@ -1,0 +1,20 @@
+// std/palette: 256-color RGB palettes stored as 768 bytes, three per color (red, green, blue),
+// as in DOOM's PLAYPAL lump, PCX files and GIF color tables. Colors are packed like the built-in
+// `rgb(red, green, blue)`, so they can be drawn with the `ui` functions too.
+// Effects: none.
+
+note "The 256 colors of the palette that starts at `at`. R001 if fewer than 768 bytes follow."
+pub fn read(data: Bytes, at: Int) -> List[Int] {
+var colors: List[Int] = []
+for index in range(0, 256) {
+let base = at + index * 3
+set colors += [rgb(data[base], data[base + 1], data[base + 2])]
+}
+colors
+}
+
+pub fn red(color: Int) -> Int = bit_and(shift_right(color, 16), 255)
+
+pub fn green(color: Int) -> Int = bit_and(shift_right(color, 8), 255)
+
+pub fn blue(color: Int) -> Int = bit_and(color, 255)

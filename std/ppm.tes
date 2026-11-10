@@ -1,0 +1,22 @@
+// std/ppm: binary PPM (P6) images, the simplest format every image viewer opens.
+// Effects: none; write the result with `write_bytes`.
+
+note "An image of `width` x `height` palette indexes, row by row from the top left; `palette` holds colors packed like `rgb(...)`. R010 for a side that is not positive or a pixel count other than `width * height`; R001 for an index outside the palette."
+pub fn encode(width: Int, height: Int, pixels: List[Int], palette: List[Int]) -> Bytes {
+if width <= 0 or height <= 0 {
+fail("ppm.encode: the image is \(width) x \(height); both sides must be positive")
+}
+if length(pixels) != width * height {
+fail("ppm.encode: \(length(pixels)) pixels for a \(width) x \(height) image, expected \(width * height)")
+}
+var body = bytes(repeat([0], width * height * 3))
+var at = 0
+for index in pixels {
+let color = palette[index]
+set body[at] = bit_and(shift_right(color, 16), 255)
+set body[at + 1] = bit_and(shift_right(color, 8), 255)
+set body[at + 2] = bit_and(color, 255)
+set at += 3
+}
+to_bytes("P6\n\(width) \(height)\n255\n") + body
+}
