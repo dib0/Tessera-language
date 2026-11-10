@@ -16,6 +16,7 @@ type_defs: List[checker.TypeDef]
 function_name: Text
 tmp: Int
 take_var: Text
+movable_params: List[Text]
 }
 
 type Code {
@@ -174,7 +175,7 @@ set out = out + definition_of(program.type_defs, e.name)
 .TestItem(_, _, _) => {}
 }
 }
-var g = Gen { paths: paths, type_defs: program.type_defs, function_name: "", tmp: 0, take_var: "" }
+var g = Gen { paths: paths, type_defs: program.type_defs, function_name: "", tmp: 0, take_var: "", movable_params: [] }
 for item in program.items {
 match item {
 .FunctionItem(f) => {
@@ -191,7 +192,7 @@ for item in program.items {
 match item {
 .TestItem(name, span, body) => {
 if mode == "tests" {
-let tg = g with { function_name: "test \"\(name)\"", tmp: 0, take_var: "" }
+let tg = g with { function_name: "test \"\(name)\"", tmp: 0, take_var: "", movable_params: [] }
 let block = match body.kind {
 .BlockExpr(b) => gen_block(tg, b, 0)
 _ => code(tg, "{}")
@@ -273,7 +274,15 @@ false
 }
 
 fn gen_function(start: Gen, f: ast.Function) -> Code {
-let g = start with { function_name: f.name, tmp: 0, take_var: "" }
+// Parameters used exactly once in the body: `var copy = parameter` at the top of the body can take
+// the value instead of sharing it, so changing `copy` in place needs no copy (spec 6.2).
+var movable: List[Text] = []
+for p in f.params {
+if scan_expr(f.body, p.name).count == 1 {
+set movable += [p.name]
+}
+}
+let g = start with { function_name: f.name, tmp: 0, take_var: "", movable_params: movable }
 var out = ""
 for n in f.notes {
 set out = "\(out)// note: \(replace_newlines(n.text))\n"
@@ -327,6 +336,13 @@ if name == "_" {
 return code(v.gen, "let _ = \(v.text);")
 }
 let m = if mutable { "mut " } else { "" }
+let moved = match value.kind {
+.Name(source_name) => indent == 1 and contains(g.movable_params, source_name)
+_ => false
+}
+if moved {
+return code(v.gen, "let \(m)v_\(name): \(rust_type(value.ty)) = v_\(value_name(value));")
+}
 if value.ty == .Never {
 return code(v.gen, "let \(m)v_\(name) = \(v.text);")
 }
@@ -339,6 +355,7 @@ let movable = match value.ty {
 .List(_) => true
 .Map(_, _) => true
 .Bytes => true
+.Named(_) => true
 _ => false
 }
 let prepared = if movable and usage.count == 1 and not usage.has_jump_or_loop { g with { take_var: name } } else { g }
@@ -365,6 +382,13 @@ code(e.gen, "\(e.text);")
 }
 
 // ---------- setting a place (spec 6.2) ----------
+
+fn value_name(e: ast.Expr) -> Text {
+match e.kind {
+.Name(name) => name
+_ => ""
+}
+}
 
 fn place_root_name(target: ast.Expr) -> Text {
 match target.kind {
@@ -552,7 +576,13 @@ match e.kind {
 .UnitLiteral => code(g, "()")
 .Name(name) => {
 if g.take_var == name {
-return code(g with { take_var: "" }, "std::mem::take(&mut v_\(name))")
+// Records and enums have no default value to leave behind, so they are moved; `v_x = f(v_x)` is
+// valid Rust because `x` is used once and assigned right after (rustc checks the move).
+let taken = match e.ty {
+.Named(_) => "v_\(name)"
+_ => "std::mem::take(&mut v_\(name))"
+}
+return code(g with { take_var: "" }, taken)
 }
 code(g, "v_\(name).clone()")
 }
@@ -1006,6 +1036,8 @@ _ => call_with_location("t_repeat", a, loc)
 "text_width" => call_with_location("t_text_width", a, loc)
 "present" => call_with_location("t_present", a, loc)
 "next_event" => call_with_location("t_next_event", a, loc)
+"poll_event" => call_with_location("t_poll_event", a, loc)
+"draw_pixels" => "t_draw_pixels(\(a[0]), \(a[1]), \(a[2]), &\(a[3]), \(a[4]), \(location(g, span)))"
 _ => call_plain("f_\(name)", a)
 }
 code(generated.gen, text)

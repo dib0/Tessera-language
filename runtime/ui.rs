@@ -25,6 +25,7 @@ struct T_Ui {
     height: u16,
     wm_delete: u32,
     events: VecDeque<Vec<u8>>,
+    input: Vec<u8>,
     min_keycode: u8,
     keysyms_per_keycode: u8,
     keysyms: Vec<u32>,
@@ -125,16 +126,76 @@ impl T_Ui {
         self.out.clear();
     }
 
-    fn read_packet(&mut self, loc: &str) -> Vec<u8> {
-        let mut packet = vec![0u8; 32];
-        t_read_exact(&mut self.stream, &mut packet, loc);
-        if packet[0] == 1 {
-            let extra = t_u32(&packet, 4) as usize * 4;
-            let mut rest = vec![0u8; extra];
-            t_read_exact(&mut self.stream, &mut rest, loc);
-            packet.extend_from_slice(&rest);
+    /// The next packet from the server: taken from `input` (bytes already received) when complete,
+    /// otherwise read. Without `wait`, returns None instead of blocking when no full packet is there.
+    fn next_packet(&mut self, wait: bool, loc: &str) -> Option<Vec<u8>> {
+        loop {
+            if self.input.len() >= 32 {
+                let size = if self.input[0] == 1 { 32 + t_u32(&self.input, 4) as usize * 4 } else { 32 };
+                if self.input.len() >= size {
+                    return Some(self.input.drain(..size).collect());
+                }
+            }
+            let mut buffer = [0u8; 65536];
+            if !wait {
+                if let Err(e) = self.stream.set_nonblocking(true) {
+                    t_ui_fail(format!("the connection to the X server failed: {}", e), loc)
+                }
+            }
+            let result = self.stream.read(&mut buffer);
+            if !wait {
+                let _ = self.stream.set_nonblocking(false);
+            }
+            match result {
+                Ok(0) => t_ui_fail("the X server closed the connection".to_string(), loc),
+                Ok(n) => self.input.extend_from_slice(&buffer[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return None,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => t_ui_fail(format!("the connection to the X server was lost: {}", e), loc),
+            }
         }
-        packet
+    }
+
+    fn read_packet(&mut self, loc: &str) -> Vec<u8> {
+        match self.next_packet(true, loc) {
+            Some(packet) => packet,
+            None => t_ui_fail("the X server stopped answering".to_string(), loc),
+        }
+    }
+
+    /// Turns a packet into an event, or None for packets a program does not see. A key release
+    /// directly followed by a press of the same key at the same time is the keyboard's automatic
+    /// repeat, not a real release; it is dropped.
+    fn event_of(&mut self, packet: Vec<u8>, loc: &str) -> Option<Rc<T_WindowEvent>> {
+        match packet[0] & 0x7f {
+            0 => t_x_error(&packet, loc),
+            12 => {
+                // Expose: the back buffer still holds the picture.
+                if t_u16(&packet, 16) == 0 { self.present(loc); }
+                None
+            }
+            4 => {
+                let x = t_i16(&packet, 24) as i64;
+                let y = t_i16(&packet, 26) as i64;
+                Some(Rc::new(T_WindowEvent::V_Click(x, y, packet[1] as i64)))
+            }
+            2 => self.key_name(packet[1], t_u16(&packet, 28)).map(|name| Rc::new(T_WindowEvent::V_Key(Rc::new(name)))),
+            3 => {
+                if self.events.is_empty() {
+                    if let Some(next) = self.next_packet(false, loc) { self.events.push_back(next); }
+                }
+                if let Some(next) = self.events.front() {
+                    if next[0] & 0x7f == 2 && next[1] == packet[1] && t_u32(next, 4) == t_u32(&packet, 4) {
+                        return None;
+                    }
+                }
+                self.key_name(packet[1], 0).map(|name| Rc::new(T_WindowEvent::V_KeyUp(Rc::new(name))))
+            }
+            33 => {
+                if t_u32(&packet, 12) == self.wm_delete { Some(Rc::new(T_WindowEvent::V_Close)) } else { None }
+            }
+            _ => None,
+        }
     }
 
     /// Wait for the reply to the last request. Errors for requests sent at or
@@ -243,6 +304,9 @@ impl T_Ui {
             0xff52 => "Up".into(),
             0xff53 => "Right".into(),
             0xff54 => "Down".into(),
+            0xffe1 | 0xffe2 => "Shift".into(),
+            0xffe3 | 0xffe4 => "Control".into(),
+            0xffe9 | 0xffea => "Alt".into(),
             _ => return None,
         };
         Some(name)
@@ -336,6 +400,7 @@ fn t_ui_connect(width: i64, height: i64, loc: &str) -> (T_Ui, u32, u8, u8, u8) {
         height: height as u16,
         wm_delete: 0,
         events: VecDeque::new(),
+        input: Vec::new(),
         min_keycode,
         keysyms_per_keycode: 0,
         keysyms: Vec::new(),
@@ -374,7 +439,7 @@ fn t_open_window(title: Rc<String>, width: i64, height: i64, loc: &str) {
     t_put32(&mut ui.out, 0);
     t_put32(&mut ui.out, 0x2 | 0x800);
     t_put32(&mut ui.out, 0xffffff);
-    t_put32(&mut ui.out, 0x1 | 0x4 | 0x8000 | 0x20000);
+    t_put32(&mut ui.out, 0x1 | 0x2 | 0x4 | 0x8000 | 0x20000);
     ui.end(start);
 
     let latin1: Vec<u8> = title.chars().map(|c| if (c as u32) < 256 { c as u32 as u8 } else { b'?' }).collect();
@@ -541,29 +606,63 @@ fn t_next_event(loc: &str) -> Rc<T_WindowEvent> {
                 Some(p) => p,
                 None => ui.read_packet(loc),
             };
-            match packet[0] & 0x7f {
-                0 => t_x_error(&packet, loc),
-                12 => {
-                    // Expose: the back buffer still holds the picture.
-                    if t_u16(&packet, 16) == 0 { ui.present(loc); }
+            if let Some(event) = ui.event_of(packet, loc) { return event; }
+        }
+    })
+}
+
+fn t_poll_event(loc: &str) -> Option<Rc<T_WindowEvent>> {
+    t_with_ui(loc, |ui| {
+        ui.flush(loc);
+        loop {
+            let packet = match ui.events.pop_front() {
+                Some(p) => p,
+                None => ui.next_packet(false, loc)?,
+            };
+            if let Some(event) = ui.event_of(packet, loc) { return Some(event); }
+        }
+    })
+}
+
+/// Draws rows of `width` colors at (x, y), each pixel as a scale x scale square, with PutImage
+/// (ZPixmap, 32 bits per pixel). The image is sent in bands of rows, as one request may carry at
+/// most 262,140 bytes without the BIG-REQUESTS extension.
+fn t_draw_pixels(x: i64, y: i64, width: i64, colors: &Rc<Vec<i64>>, scale: i64, loc: &str) {
+    if width < 1 || width > 4096 || !(1..=16).contains(&scale) || colors.len() as i64 % width != 0 {
+        t_fail("R004", format!("draw_pixels: width {} and scale {} do not fit {} colors (scale 1..16, width 1..4096, colors a multiple of width)", width, scale, colors.len()), loc)
+    }
+    if let Some(bad) = colors.iter().find(|c| !(0..=0xffffff).contains(*c)) {
+        t_fail("R011", format!("draw_pixels: {} is not a color (0..16777215)", bad), loc)
+    }
+    let rows = colors.len() as i64 / width;
+    let out_width = (width * scale) as usize;
+    let rows_per_band = ((262140 - 24) / (out_width * 4)).max(1);
+    t_with_ui(loc, |ui| {
+        let mut out_row = 0usize;
+        let total_rows = (rows * scale) as usize;
+        while out_row < total_rows {
+            let band = rows_per_band.min(total_rows - out_row);
+            let start = ui.begin(72, 2);
+            t_put32(&mut ui.out, ui.pixmap);
+            t_put32(&mut ui.out, ui.gc);
+            t_put16(&mut ui.out, out_width as u16);
+            t_put16(&mut ui.out, band as u16);
+            t_put16(&mut ui.out, t_coord(x));
+            t_put16(&mut ui.out, t_coord(y + out_row as i64));
+            ui.out.push(0);
+            ui.out.push(24);
+            t_put16(&mut ui.out, 0);
+            ui.out.reserve(out_width * band * 4);
+            for r in out_row..out_row + band {
+                let source = (r / scale as usize) * width as usize;
+                for c in &colors[source..source + width as usize] {
+                    let pixel = (*c as u32).to_le_bytes();
+                    for _ in 0..scale { ui.out.extend_from_slice(&pixel); }
                 }
-                4 => {
-                    let x = t_i16(&packet, 24) as i64;
-                    let y = t_i16(&packet, 26) as i64;
-                    return Rc::new(T_WindowEvent::V_Click(x, y, packet[1] as i64));
-                }
-                2 => {
-                    if let Some(name) = ui.key_name(packet[1], t_u16(&packet, 28)) {
-                        return Rc::new(T_WindowEvent::V_Key(Rc::new(name)));
-                    }
-                }
-                33 => {
-                    if t_u32(&packet, 12) == ui.wm_delete {
-                        return Rc::new(T_WindowEvent::V_Close);
-                    }
-                }
-                _ => {}
             }
+            ui.end(start);
+            out_row += band;
+            if ui.out.len() > 1 << 20 { ui.flush(loc); }
         }
     })
 }

@@ -1,0 +1,103 @@
+// M3: the map's linedefs drawn on a character grid with integer (Bresenham) line drawing.
+// `#` one-sided walls, `+` two-sided lines whose floors or ceilings differ, `.` other two-sided
+// lines, `P` the player 1 start. Effects: none.
+
+import level
+import std/math
+
+note "Marks one cell; stronger marks win: `#` over `+` over `.`. Changes `cells` in place when called as `set cells = plot(cells, ...)`."
+fn plot(cells: List[Int], width: Int, height: Int, x: Int, y: Int, code: Int) -> List[Int] {
+var out = cells
+if x < 0 or y < 0 or x >= width or y >= height {
+return out
+}
+let at = y * width + x
+let current = out[at]
+if not (current == 35 or (current == 43 and code == 46)) {
+set out[at] = code
+}
+out
+}
+
+fn trace_line(cells: List[Int], width: Int, height: Int, x0: Int, y0: Int, x1: Int, y1: Int, code: Int) -> List[Int] {
+var out = cells
+let dx = math.abs(x1 - x0)
+let dy = -math.abs(y1 - y0)
+let step_x = if x0 < x1 { 1 } else { -1 }
+let step_y = if y0 < y1 { 1 } else { -1 }
+var error = dx + dy
+var x = x0
+var y = y0
+while true {
+set out = plot(out, width, height, x, y, code)
+if x == x1 and y == y1 {
+break
+}
+let twice = 2 * error
+if twice >= dy {
+set error += dy
+set x += step_x
+}
+if twice <= dx {
+set error += dx
+set y += step_y
+}
+}
+out
+}
+
+fn line_code(l: level.Level, line: level.Linedef) -> Int {
+if line.back < 0 {
+return 35
+}
+let front = l.sectors[l.sidedefs[line.front].sector]
+let back = l.sectors[l.sidedefs[line.back].sector]
+if front.floor != back.floor or front.ceiling != back.ceiling { 43 } else { 46 }
+}
+
+note "The map as text, `width` characters wide. Characters are about twice as tall as wide, so a map unit row covers twice the units of a column."
+pub fn render(l: level.Level, width: Int) -> List[Text] {
+var min_x = l.vertexes[0].x
+var max_x = min_x
+var min_y = l.vertexes[0].y
+var max_y = min_y
+for v in l.vertexes {
+set min_x = math.min(min_x, v.x)
+set max_x = math.max(max_x, v.x)
+set min_y = math.min(min_y, v.y)
+set max_y = math.max(max_y, v.y)
+}
+let span_x = math.max(max_x - min_x, 1)
+let height = math.max(1, (max_y - min_y) * width / span_x / 2 + 1)
+var cells = repeat([32], width * height)
+for line in l.linedefs {
+let a = l.vertexes[line.start]
+let b = l.vertexes[line.end]
+set cells = trace_line(cells, width, height, scale(a.x - min_x, span_x, width), scale(max_y - a.y, span_x * 2, width), scale(b.x - min_x, span_x, width), scale(max_y - b.y, span_x * 2, width), line_code(l, line))
+}
+match level.find_thing(l, 1) {
+.Some(t) => {
+let x = scale(t.x - min_x, span_x, width)
+let y = scale(max_y - t.y, span_x * 2, width)
+if x >= 0 and x < width and y >= 0 and y < height {
+set cells[y * width + x] = 80
+}
+}
+.None => {}
+}
+var rows: List[Text] = []
+for y in range(0, height) {
+set rows += [trim_end(from_code_points(slice(cells, y * width, y * width + width)))]
+}
+rows
+}
+
+fn scale(offset: Int, span: Int, width: Int) -> Int = offset * (width - 1) / span
+
+fn trim_end(text: Text) -> Text {
+var codes = code_points(text)
+while length(codes) > 0 and codes[length(codes) - 1] == 32 {
+set codes = slice(codes, 0, length(codes) - 1)
+}
+from_code_points(codes)
+}

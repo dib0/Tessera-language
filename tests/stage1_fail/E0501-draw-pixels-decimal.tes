@@ -1,0 +1,4 @@
+fn main() -> Unit uses ui {
+open_window("x", 10, 10)
+draw_pixels(0, 0, 10, [1.5], 1)
+}

@@ -313,6 +313,21 @@ fn standard_module_tests_pass() {
 }
 
 #[test]
+fn stage1_builds_tesseradoom() {
+    // The largest example program must keep compiling. With game data in examples/tesseradoom/WAD
+    // (never committed, see its README) its milestone checks run as well.
+    let dir = root().join("examples/tesseradoom");
+    let exe = work_dir().join("tesseradoom");
+    check_build(Command::new(stage1()).arg("build").arg(dir.join("main.tes")).arg("-o").arg(&exe).arg("--opt").arg("1").output().unwrap(), "building examples/tesseradoom");
+    let usage = Command::new(&exe).output().unwrap();
+    assert_eq!(usage.status.code(), Some(64), "tesseradoom without arguments should print its usage");
+    if dir.join("WAD/freedoom1.wad").exists() && Command::new("python3").arg("--version").output().is_ok() {
+        let checks = Command::new(dir.join("checks/run_checks.sh")).output().unwrap();
+        assert!(checks.status.success(), "tesseradoom milestone checks failed:\n{}", String::from_utf8_lossy(&checks.stdout));
+    }
+}
+
+#[test]
 fn stage1_only_errors_are_reported() {
     let files = tes_files("tests/stage1_fail");
     assert!(files.len() >= 10);

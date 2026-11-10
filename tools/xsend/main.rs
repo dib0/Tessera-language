@@ -2,14 +2,16 @@
 // programs can be tested without a person clicking.
 //
 //   xsend <window-id> click <x> <y> [button]
-//   xsend <window-id> key <name>        (a single ASCII character, Escape or Enter)
+//   xsend <window-id> key <name>        (a single ASCII character, Escape, Enter, Left, Up,
+//                                        Right, Down, Control, Shift, Alt)
+//   xsend <window-id> keyup <name>      (the release of such a key)
 //   xsend <window-id> close             (window manager close request)
 //
 // Built by build.sh from runtime/core.rs + runtime/ui.rs + this file.
 
 fn xsend_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: xsend <window-id> click <x> <y> [button] | key <name> | close";
+    let usage = "usage: xsend <window-id> click <x> <y> [button] | key <name> | keyup <name> | close";
     if args.len() < 2 { eprintln!("{}", usage); std::process::exit(2) }
     let window = u32::from_str_radix(args[0].trim_start_matches("0x"), 16).unwrap_or_else(|_| { eprintln!("bad window id"); std::process::exit(2) });
     let loc = "xsend";
@@ -28,10 +30,17 @@ fn xsend_main() {
             event[26..28].copy_from_slice(&y.to_le_bytes());
             event[30] = 1;
         }
-        "key" if args.len() >= 3 => {
+        "key" | "keyup" if args.len() >= 3 => {
             let keysym: u32 = match args[2].as_str() {
                 "Escape" => 0xff1b,
                 "Enter" => 0xff0d,
+                "Left" => 0xff51,
+                "Up" => 0xff52,
+                "Right" => 0xff53,
+                "Down" => 0xff54,
+                "Shift" => 0xffe1,
+                "Control" => 0xffe3,
+                "Alt" => 0xffe9,
                 s if s.len() == 1 => s.as_bytes()[0] as u32,
                 _ => { eprintln!("unsupported key"); std::process::exit(2) }
             };
@@ -44,7 +53,7 @@ fn xsend_main() {
             let per = r[1] as usize;
             let syms: Vec<u32> = r[32..].chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
             let index = syms.iter().position(|&s| s == keysym).unwrap_or_else(|| { eprintln!("key not on keyboard"); std::process::exit(2) });
-            event[0] = 2;
+            event[0] = if args[1] == "keyup" { 3 } else { 2 };
             event[1] = min_keycode + (index / per) as u8;
             event[8..12].copy_from_slice(&root.to_le_bytes());
             event[12..16].copy_from_slice(&window.to_le_bytes());

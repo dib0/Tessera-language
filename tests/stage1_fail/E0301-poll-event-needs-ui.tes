@@ -1,0 +1,6 @@
+fn main() -> Unit uses io {
+match poll_event() {
+.Some(_) => print("event")
+.None => print("none")
+}
+}

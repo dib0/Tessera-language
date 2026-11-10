@@ -316,6 +316,8 @@ Error messages belong on standard error: `exit_with(1, "error: \(reason)")` repo
 
 Tests: `test "name" { assert(condition) }` at the top level of a file, run with `tessera1 test file.tes`.
 
+Windows (`uses ui`): `open_window(title, width, height)`, `fill_rectangle`, `draw_line`, `draw_text`, `draw_pixels(x, y, width, colors, scale)` (a whole image of `rgb` colors), `present()`; `next_event()` waits, `poll_event()` returns `Option[WindowEvent]` at once. `WindowEvent` is `.Click(x, y, button)`, `.Key(name)`, `.KeyUp(name)` or `.Close`.
+
 ## Diagnostics
 
 The compiler reports errors as `error[CODE]: message` with a location and usually a `help:` line. Common codes: E0202 unknown name, E0203 unknown function, E0204 name already defined (no shadowing), E0206 `var` never changed, E0211 built-in function redefined, E0301 missing effect, E0302 unused effect, E0501 type mismatch, E0505 type of `[]`/`.None`/`Result` unknown, E0508 unused value, E0509 match not exhaustive, E0518 variant type not known.

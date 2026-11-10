@@ -212,6 +212,8 @@ builtin("draw_text", [.Int, .Int, .Text, .Int], .Unit, "ui"),
 builtin("text_width", [.Text], .Int, "ui"),
 builtin("present", [], .Unit, "ui"),
 builtin("next_event", [], .Named("WindowEvent"), "ui"),
+builtin("poll_event", [], .Option(.Named("WindowEvent")), "ui"),
+builtin("draw_pixels", [.Int, .Int, .Int, list_of(.Int), .Int], .Unit, "ui"),
 ]
 }
 
@@ -239,8 +241,9 @@ note "The event type of the `ui` effect; the runtime in runtime/ui.rs builds the
 fn window_event_type(span: source.Span) -> TypeDef {
 let click = VariantType { name: "Click", fields: [FieldType { name: "x", ty: .Int }, FieldType { name: "y", ty: .Int }, FieldType { name: "button", ty: .Int }] }
 let key = VariantType { name: "Key", fields: [FieldType { name: "name", ty: .Text }] }
+let key_up = VariantType { name: "KeyUp", fields: [FieldType { name: "name", ty: .Text }] }
 let close = VariantType { name: "Close", fields: [] }
-TypeDef { name: "WindowEvent", is_enum: true, fields: [], variants: [click, key, close], span: span, public: true, prefix: "" }
+TypeDef { name: "WindowEvent", is_enum: true, fields: [], variants: [click, key, key_up, close], span: span, public: true, prefix: "" }
 }
 
 // ---------- type relations ----------
@@ -2786,7 +2789,7 @@ var c = start
 if b.effect != "" {
 set c = use_effect(c, b.effect, name, e.span)
 }
-if name == "next_event" {
+if name == "next_event" or name == "poll_event" {
 set c = mark_window_event(c, "WindowEvent")
 }
 if name == "exit_with" {

@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.17. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.17: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16 and `Float` (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
+**Status:** Draft 0.18. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.18: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16 and `Float` (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -200,7 +200,15 @@ From draft 0.16 to 0.17:
 
 Decided against: a 32-bit float type (one floating-point type is enough, principle 3), `%` on `Float`, and keeping infinities and NaN (they make `==` non-reflexive and silently poison results).
 
-Whether the DOOM port uses `Float` or 16.16 fixed point is still decision D2 of the DOOM roadmap. `+ - * / sqrt` are reproducible everywhere, but `sin`, `cos` and the other library functions can differ in the last bit between platforms, which demo playback (milestone M9) cannot tolerate unless angles come from tables.
+The DOOM port uses 16.16 fixed point (decision D2, [`docs/doom-decisions.md`](docs/doom-decisions.md)). `+ - * / sqrt` are reproducible everywhere, but `sin`, `cos` and the other library functions can differ in the last bit between platforms, which demo playback (milestone M9) cannot tolerate unless angles come from tables.
+
+From draft 0.17 to 0.18, the `ui` extension of DOOM decision D1 ([`docs/doom-decisions.md`](docs/doom-decisions.md)):
+
+| Added | Why |
+|---|---|
+| `draw_pixels(x, y, width, colors, scale)` | A rendered frame is 64,000 pixels; one X11 request per pixel is far too slow. `scale` enlarges it in the runtime instead of in the program. |
+| `poll_event()` | A game loop must not wait for input. |
+| `WindowEvent.KeyUp(name)`, and the key names `Shift`, `Control`, `Alt` | Games act on keys that are held down. Existing `match`es on `WindowEvent` need a `KeyUp` arm (or `_`). |
 
 ## 4. Source files and lexical structure
 
@@ -521,7 +529,7 @@ set world.things[3].angle = 90
   set a[0] = 9      // a is [9, 2, 3], b is still [1, 2, 3]
   ```
 
-**Performance guarantee.** `set x = f(x, ...)` where `x` is `Text` or a list, and `x` appears exactly once on the right side, updates `x` in place. Building a list or text with `append`, `concat`, `replace_at` or `+` in a loop is therefore linear, not quadratic. Setting a place (`set xs[i] = v`, `set r.field = v`) takes constant time, plus one copy of the list or record on the first change after a copy of it was made elsewhere (copy on write). These are implementation strategies that do not change the meaning of the program: no other code can observe the old value.
+**Performance guarantee.** `set x = f(x, ...)` where `x` is `Text`, a list, map, `Bytes`, record or enum (records and enums since draft 0.18), and `x` appears exactly once on the right side, updates `x` in place. Building a list or text with `append`, `concat`, `replace_at` or `+` in a loop is therefore linear, not quadratic. Setting a place (`set xs[i] = v`, `set r.field = v`) takes constant time, plus one copy of the list or record on the first change after a copy of it was made elsewhere (copy on write). A function that changes a list it receives, `fn plot(cells: List[Int], i: Int) -> List[Int] { var out = cells ... out }`, works in place too when `var out = cells` is a statement of the function body itself (not inside a loop or branch) and the parameter is used nowhere else; called as `set grid = plot(grid, i)`, no copy is made. These are implementation strategies that do not change the meaning of the program: no other code can observe the old value.
 
 ### 6.3 No shadowing
 
@@ -759,6 +767,7 @@ present()
 match next_event() {
 WindowEvent.Click(x, y, button) => { set running = false }
 WindowEvent.Key(name) => {}
+WindowEvent.KeyUp(name) => {}
 WindowEvent.Close => { set running = false }
 }
 }
@@ -770,8 +779,26 @@ WindowEvent.Close => { set running = false }
 ```tessera
 enum WindowEvent {
 Click(x: Int, y: Int, button: Int)   // button 1 left, 2 middle, 3 right, 4/5 scroll
-Key(name: Text)                      // "a", "A", "7", " ", "Escape", "Enter", "Backspace", "Tab", "Left", "Up", "Right", "Down"
+Key(name: Text)                      // "a", "A", "7", " ", "Escape", "Enter", "Backspace", "Tab", "Left", "Up", "Right", "Down", "Shift", "Control", "Alt"
+KeyUp(name: Text)                    // a key was released (draft 0.18); same names as `Key`
 Close                                // the user asked to close the window
+}
+```
+
+A key held down reports one `Key` and, when let go, one `KeyUp`; the keyboard's automatic repeat adds further `Key` events but no `KeyUp` in between. `KeyUp` names a letter key by the letter without Shift (`"a"`), so a program tracking held keys should compare lowercase names.
+
+**Games and animation** (draft 0.18). `next_event()` waits; `poll_event()` returns `.None` at once when nothing happened, so a loop can draw a new frame every few milliseconds and still react to input. `draw_pixels(x, y, width, colors, scale)` draws a whole image in one call: `colors` holds rows of `width` colors made with `rgb` (or read with `std/palette`), and each is drawn as a `scale` x `scale` square, so a 320 x 200 frame fills a 640 x 400 window with `scale` 2. It is far faster than one `fill_rectangle` per pixel.
+
+```tessera
+var frame = repeat([rgb(0, 0, 0)], 320 * 200)
+while true {
+// ... change frame ...
+draw_pixels(0, 0, 320, frame, 2)
+present()
+match poll_event() {
+.Some(event) => if event == .Close { return }
+.None => sleep(10)
+}
 }
 ```
 
@@ -1001,7 +1028,9 @@ Graphics (effect `ui`, section 9.4):
 | `draw_text` | `(x: Int, y: Int, text: Text, color: Int) -> Unit` | `(x, y)` is the top-left corner. One built-in monospaced font; characters outside Latin-1 show as `?`. |
 | `text_width` | `(text: Text) -> Int` | Width in pixels of `text` in that font. |
 | `present` | `() -> Unit` | Shows everything drawn since the last `present`. |
-| `next_event` | `() -> WindowEvent` | Waits for the next click, key press or close request. |
+| `next_event` | `() -> WindowEvent` | Waits for the next click, key press, key release or close request. |
+| `poll_event` | `() -> Option[WindowEvent]` | The next event if one is waiting, otherwise `.None` at once (draft 0.18). |
+| `draw_pixels` | `(x: Int, y: Int, width: Int, colors: List[Int], scale: Int) -> Unit` | Draws rows of `width` colors with their top-left corner at `(x, y)`, each pixel as a `scale` x `scale` square (draft 0.18). R004 if `width` or `scale` (1 to 16) is out of range or `length(colors)` is not a multiple of `width`; R011 for a value that is not a color (0 to 16777215). |
 
 Drawing calls without an open window, and losing the connection to the display, are runtime error R012.
 
@@ -1051,7 +1080,7 @@ Some errors can only be detected while running. A program cannot catch them; the
 | R001 | List or `Bytes` index out of bounds (indexing, `set xs[i] = v`, `replace_at`) |
 | R002 | Overflow: `Int` out of range, or a `Float` result too large to represent |
 | R003 | Division or remainder by zero |
-| R004 | Invalid `range` or `slice` bounds |
+| R004 | Invalid `range` or `slice` bounds, or another argument outside its allowed range |
 | R005 | Invalid Unicode code point |
 | R006 | File cannot be read |
 | R007 | File cannot be written |
@@ -1311,8 +1340,6 @@ Since draft 0.13 stage 1 inserts stack and time checks into generated functions 
 
 What complete applications, web applications and nginx/Apache hosting need beyond this list is analysed in [`application-roadmap.md`](application-roadmap.md), with a proposed order and the decisions that have to be made first.
 
-Decided for the DOOM port ([`docs/doom-decisions.md`](docs/doom-decisions.md), decision D1): the `ui` effect will be extended with `draw_pixels` (a whole frame in one call), `poll_event` (non-blocking) and a key-release event. Specified here before it is implemented.
-
 Not planned for the POC: concurrency, FFI, `unsafe`, package management (fetching modules from outside the project), web frameworks.
 
 ## 19. Open questions
@@ -1407,3 +1434,11 @@ First model runs (2026-11-08, Claude Opus 5.5, effort `medium`, 18 tasks). Avera
 - **Found: tasks can contradict built-ins.** `word-count` says only ASCII letters change case, so the model correctly wrote its own `ascii_lower` instead of the Unicode `to_lower`. This is a property of the task, not a gap in the language.
 - **Draft 0.13 (2026-11-08): output 12% cheaper on the same 18 tasks, and the application tasks pass first time.** All 63 runs passed on the first attempt, including the new map, JSON and web-handler tasks. The 54 programs of the old tasks use `let ... else` 39 times and `map(...)` 8 times; `word-count`, reworded so it no longer contradicts `to_lower`, dropped from 282 to 166 program tokens. The cost is the reference: about 2,100 more input tokens per request (most of them cached), because it now describes maps, decimals, functions as values, the standard modules and web applications.
 - **Found: lists are still built only to be joined** in 16 programs, now usually where each element is formatted with more than one value (`"\(a) \(b)"`), which a named function cannot express without a helper. Closures would remove these loops; they are deferred (section 18) until measurement shows they are worth the extra review burden.
+
+Findings from writing Tesseradoom (`examples/tesseradoom/`, about 3,000 lines in 13 modules, drafts 0.14 to 0.18):
+
+- **A missed in-place update cost a factor of 20.** The renderer threads its frame buffer through drawing functions as a record: `set c = draw_wall(view, c, ...)`. Draft 0.17 moved only text, lists, maps and bytes in that form, and shared records, so every drawing call copied the 64,000-pixel buffer: 44 frames per second. Moving records and enums too (draft 0.18) made the same program run at about 1,000. Two related forms still copy and had to be rewritten by hand: `return f(c)` and `set c = if a { f(c) } else { g(c) }`. Extending the rule to any last use of a variable would remove this class of trap; it needs a liveness analysis in the code generator.
+- **`var copy = parameter` now takes the parameter** when that is its only use (draft 0.18), so helper functions can change a list they receive without copying it.
+- **`range(a, b)` with `a > b` stops the program (R004).** That caught real bugs, but also made empty loops crash in three places (spans clipped to the screen). A `range` that is empty for `a >= b` would be the more common expectation; this is a candidate change, to be decided by measurement.
+- **No nested patterns** showed up twice (`.Error(.NotFound)`, `.Function(_, .Float, _)`); both were easy to rewrite with `==` or an `if`.
+- **Fixed point worked.** All game geometry is 16.16 `Int` with `shift_left`/`shift_right`; the bounds stated in section 7.6 were enough to avoid overflow everywhere except one quotient (a ray almost parallel to a wall), which now checks its magnitude first.

@@ -1,0 +1,321 @@
+// Tesseradoom: a DOOM-style engine in Tessera. See README.md.
+
+import wad
+import level
+import automap
+import geometry
+import raycast
+import render
+import art
+import movement
+import play
+import world
+import demo
+import std/math
+import std/palette
+import std/ppm
+
+fn usage() -> Text = "usage: tesseradoom [--wad FILE] info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
+
+fn load(path: Text) -> wad.Wad uses io, fs, env {
+let data = match read_bytes(path) {
+.Ok(d) => d
+.Error(e) => if e == .NotFound { exit_with(2, "error: WAD file `\(path)` not found; see README.md (Game data)") } else { exit_with(2, "error: cannot read `\(path)`") }
+}
+match wad.parse(data) {
+.Ok(w) => w
+.Error(message) => exit_with(2, "error: \(path): \(message)")
+}
+}
+
+fn info(w: wad.Wad) -> Unit uses io {
+print("type \(w.kind)")
+print("lumps \(length(w.lumps))")
+let maps = wad.map_names(w)
+print("maps \(length(maps)): \(join(maps, " "))")
+}
+
+fn load_level(w: wad.Wad, map: Text) -> level.Level uses io, env {
+match level.load(w, to_upper(map)) {
+.Ok(l) => l
+.Error(message) => exit_with(2, "error: \(message)")
+}
+}
+
+fn map_dump(l: level.Level) -> Unit uses io {
+print("map \(l.name)")
+print("things \(length(l.things))")
+print("vertexes \(length(l.vertexes))")
+print("linedefs \(length(l.linedefs))")
+print("sidedefs \(length(l.sidedefs))")
+print("sectors \(length(l.sectors))")
+print("segs \(length(l.segs))")
+print("subsectors \(length(l.subsectors))")
+print("nodes \(length(l.nodes))")
+match level.find_thing(l, 1) {
+.Some(t) => print("player 1 start \(t.x) \(t.y) angle \(t.angle)")
+.None => print("player 1 start none")
+}
+}
+
+fn load_demo(w: wad.Wad, name: Text) -> demo.Demo uses io, env {
+match demo.parse(required_lump(w, to_upper(name))) {
+.Ok(d) => d
+.Error(message) => exit_with(2, "error: \(name): \(message)")
+}
+}
+
+fn required_lump(w: wad.Wad, name: Text) -> Bytes uses io, env {
+match wad.lump(w, name) {
+.Some(data) => data
+.None => exit_with(2, "error: the WAD has no \(name) lump")
+}
+}
+
+fn write_image(w: wad.Wad, pixels: List[Int], path: Text) -> Unit uses io, fs, env {
+let colors = palette.read(required_lump(w, "PLAYPAL"), 0)
+match write_bytes(path, ppm.encode(geometry.screen_width(), geometry.screen_height(), pixels, colors)) {
+.Ok(_) => print("wrote \(path)")
+.Error(_) => exit_with(2, "error: cannot write \(path)")
+}
+}
+
+fn command_argument(arguments: List[Text], index: Int) -> Text uses io, env {
+if index >= length(arguments) {
+exit_with(64, usage())
+}
+arguments[index]
+}
+
+note "M6: reads commands until the end of input: `forward N`, `back N`, `left N`, `right N` (units), `turn DEGREES` (counter-clockwise), `where`, `look FILE.ppm`, `quit`. Prints the position after every command, in fixed point (16.16) for exact checking."
+fn walk_console(w: wad.Wad, l: level.Level) -> Unit uses io, fs, env {
+let trig = geometry.make_trig()
+let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
+var p = movement.start(l)
+print("at \(p.x) \(p.y) \(p.angle) \(p.sector)")
+while true {
+let line = read_line() else break
+let words = split(trim(line), " ")
+let amount = if length(words) > 1 { value_or(parse_int(words[1]), 0) } else { 0 }
+match words[0] {
+"forward" => set p = movement.walk(l, trig, p, shift_left(amount, 16), 0)
+"back" => set p = movement.walk(l, trig, p, -shift_left(amount, 16), 0)
+"right" => set p = movement.walk(l, trig, p, 0, shift_left(amount, 16))
+"left" => set p = movement.walk(l, trig, p, 0, -shift_left(amount, 16))
+"turn" => set p = movement.turn(p, amount * geometry.fine_angles() / 360)
+"look" => if length(words) > 1 { write_image(w, render.render(scene, movement.camera(l, p), trig), words[1]) }
+"where" => {}
+"quit" => break
+"" => {}
+_ => print_error("unknown command `\(words[0])`")
+}
+print("at \(p.x) \(p.y) \(p.angle) \(p.sector)")
+}
+}
+
+note "M8: the game world driven by commands, one per line: `forward N`, `back N`, `left N`, `right N` (units, in steps of 8 units per tic), `turn DEGREES`, `face X Y`, `goto X Y`, `use`, `fire`, `wait TICS`, `sector N`, `monsters`, `look FILE.ppm`. Prints the state after every command."
+fn game_console(w: wad.Wad, l: level.Level, monsters: Bool) -> Unit uses io, fs, env {
+let trig = geometry.make_trig()
+let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
+let sprites = art.load_sprites(w)
+var game = world.create(l)
+if not monsters {
+set game = world.without_monsters(game)
+}
+print(game_state(game))
+while true {
+let line = read_line() else break
+let words = split(trim(line), " ")
+let amount = if length(words) > 1 { value_or(parse_int(words[1]), 0) } else { 0 }
+let none = world.no_input()
+match words[0] {
+"forward" => set game = walk_tics(game, trig, none with { forward: 8 }, amount)
+"back" => set game = walk_tics(game, trig, none with { forward: -8 }, amount)
+"right" => set game = walk_tics(game, trig, none with { sideways: 8 }, amount)
+"left" => set game = walk_tics(game, trig, none with { sideways: -8 }, amount)
+"turn" => set game = world.tic(game, none with { turn: amount * geometry.fine_angles() / 360 }, trig)
+"face" => if length(words) >= 3 {
+set game = face_point(game, trig, value_or(parse_int(words[1]), 0), value_or(parse_int(words[2]), 0))
+}
+"goto" => if length(words) >= 3 {
+let x = value_or(parse_int(words[1]), 0)
+let y = value_or(parse_int(words[2]), 0)
+set game = face_point(game, trig, x, y)
+let dx = x - shift_right(game.player.x, 16)
+let dy = y - shift_right(game.player.y, 16)
+set game = walk_tics(game, trig, none with { forward: 8 }, math.isqrt(dx * dx + dy * dy))
+}
+"use" => set game = world.tic(world.tic(game, none with { use: true }, trig), none, trig)
+"fire" => set game = world.tic(game, none with { fire: true }, trig)
+"wait" => for _ in range(0, amount) {
+set game = world.tic(game, none, trig)
+}
+"monsters" => for m in game.mobjs {
+if m.present and m.state != .Idle and m.info.health > 0 {
+print("monster \(m.kind) at \(shift_right(m.x, 16)) \(shift_right(m.y, 16)) health \(m.health) \(state_name(m.state))")
+}
+}
+"sector" => {
+let s = game.level.sectors[amount]
+print("sector \(amount) floor \(s.floor) ceiling \(s.ceiling)")
+}
+"look" => if length(words) > 1 { write_image(w, render.render_world(scene, game.level.sectors, world.camera(game), trig, world.sprites(game), sprites), words[1]) }
+"" => {}
+_ => print_error("unknown command `\(words[0])`")
+}
+print(game_state(game))
+}
+}
+
+note "Walks `amount` units: one tic of `input` per 8 units, the last tic shorter."
+fn walk_tics(start: world.World, trig: geometry.Trig, input: world.Input, amount: Int) -> world.World {
+var game = start
+var left = amount
+while left > 0 {
+let part = math.min(left, 8)
+set game = world.tic(game, input with { forward: input.forward * part / 8, sideways: input.sideways * part / 8 }, trig)
+set left -= part
+}
+game
+}
+
+fn state_name(s: world.State) -> Text {
+match s {
+.Idle => "idle"
+.Chase(_) => "chasing"
+.Attack(_) => "attacking"
+.Pain(_) => "in pain"
+.Dead(_) => "dead"
+}
+}
+
+note "Turns the player towards a map point, in a tic without movement."
+fn face_point(start: world.World, trig: geometry.Trig, x: Int, y: Int) -> world.World {
+let p = start.player
+let dx = shift_left(x, 16) - p.x
+let dy = shift_left(y, 16) - p.y
+var best = 0
+var best_dot = 0
+for a in range(0, geometry.fine_angles()) {
+let dot = shift_right(dx, 8) * shift_right(trig.cosine[a], 8) + shift_right(dy, 8) * shift_right(trig.sine[a], 8)
+if a == 0 or dot > best_dot {
+set best = a
+set best_dot = dot
+}
+}
+world.tic(start, world.no_input() with { turn: geometry.wrap_angle(best - p.angle) }, trig)
+}
+
+fn game_state(g: world.World) -> Text {
+let p = g.player
+"tic \(g.tic) at \(shift_right(p.x, 16)) \(shift_right(p.y, 16)) angle \(p.angle * 360 / geometry.fine_angles()) sector \(p.sector) health \(g.stats.health) armor \(g.stats.armor) ammo \(g.stats.ammo) keys [\(join(g.stats.keys, " "))] items \(g.stats.items) kills \(g.stats.kills) secrets \(g.stats.secrets)\(if g.message_time > 0 { " message: \(g.message)" } else { "" })"
+}
+
+fn main() -> Unit uses io, fs, env, time, ui {
+var arguments = args()
+var path = "WAD/freedoom1.wad"
+if length(arguments) >= 2 and arguments[0] == "--wad" {
+set path = arguments[1]
+set arguments = slice(arguments, 2, length(arguments))
+}
+if length(arguments) == 0 {
+exit_with(64, usage())
+}
+let w = load(path)
+match arguments[0] {
+"info" => info(w)
+"raycast" => {
+let l = load_level(w, command_argument(arguments, 1))
+let columns = raycast.cast(l, geometry.make_trig(), geometry.start_camera(l))
+write_image(w, raycast.frame(columns, required_lump(w, "COLORMAP")), command_argument(arguments, 2))
+}
+"render" => {
+let l = load_level(w, command_argument(arguments, 1))
+let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
+var camera = geometry.start_camera(l)
+if length(arguments) >= 6 {
+let x = value_or(parse_int(arguments[3]), 0)
+let y = value_or(parse_int(arguments[4]), 0)
+let degrees = value_or(parse_int(arguments[5]), 0)
+let fx = shift_left(x, 16)
+let fy = shift_left(y, 16)
+set camera = geometry.Camera { x: fx, y: fy, z: shift_left(l.sectors[geometry.sector_at(l, fx, fy)].floor + geometry.eye_height(), 16), angle: geometry.degrees_to_fine(degrees) }
+}
+write_image(w, render.render(scene, camera, geometry.make_trig()), command_argument(arguments, 2))
+}
+"play" => {
+let l = load_level(w, command_argument(arguments, 1))
+let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
+let uncapped = contains(arguments, "--uncapped")
+let seconds = match index_of(arguments, "--seconds") {
+.Some(at) => if at + 1 < length(arguments) { value_or(parse_int(arguments[at + 1]), 0) } else { 0 }
+.None => 0
+}
+let result = play.run(scene, art.load_sprites(w), required_lump(w, "PLAYPAL"), seconds, uncapped, not contains(arguments, "--no-monsters"))
+let took = result[1]
+print("\(result[0]) frames in \(took) ms: \(if took > 0 { result[0] * 1000 / took } else { 0 }) frames per second")
+}
+"demo" => {
+let d = load_demo(w, command_argument(arguments, 1))
+let l = load_level(w, demo.map_name(d))
+let trig = geometry.make_trig()
+var game = world.create_at_skill(l, d.skill)
+if contains(arguments, "--no-monsters") {
+set game = world.without_monsters(game)
+}
+let count = if length(arguments) > 2 and arguments[2] != "--no-monsters" { math.min(value_or(parse_int(arguments[2]), 0), length(d.tics)) } else { length(d.tics) }
+print("demo \(arguments[1]): map \(demo.map_name(d)) skill \(d.skill) players \(d.players) tics \(length(d.tics))")
+print("at \(game.player.x) \(game.player.y) \(game.player.angle) \(game.player.sector) health \(game.stats.health)")
+for i in range(0, count) {
+set game = world.tic(game, d.tics[i], trig)
+print("at \(game.player.x) \(game.player.y) \(game.player.angle) \(game.player.sector) health \(game.stats.health)")
+}
+}
+"watch" => {
+let d = load_demo(w, command_argument(arguments, 1))
+let l = load_level(w, demo.map_name(d))
+let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
+let result = play.watch(scene, art.load_sprites(w), required_lump(w, "PLAYPAL"), d.tics, d.skill)
+print("\(result[0]) frames in \(result[1]) ms")
+}
+"game" => game_console(w, load_level(w, command_argument(arguments, 1)), not contains(arguments, "--no-monsters"))
+"walk" => walk_console(w, load_level(w, command_argument(arguments, 1)))
+"bench" => {
+let l = load_level(w, command_argument(arguments, 1))
+let frames = if length(arguments) > 2 { value_or(parse_int(arguments[2]), 100) } else { 100 }
+let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
+let trig = geometry.make_trig()
+let start = geometry.start_camera(l)
+let began = monotonic()
+var checksum = 0
+for frame in range(0, frames) {
+let camera = if contains(arguments, "--still") { start } else { start with { angle: geometry.wrap_angle(start.angle + frame * geometry.fine_angles() / frames) } }
+let pixels = render.render(scene, camera, trig)
+set checksum = (checksum + pixels[frame % length(pixels)]) % 1000000
+}
+let took = monotonic() - began
+print("\(frames) frames in \(took) ms: \(if took > 0 { frames * 1000 / took } else { 0 }) frames per second (checksum \(checksum))")
+}
+"columns" => {
+let l = load_level(w, command_argument(arguments, 1))
+let camera = geometry.start_camera(l)
+print("camera \(camera.x) \(camera.y) \(camera.z) \(camera.angle)")
+let columns = raycast.cast(l, geometry.make_trig(), camera)
+for x in range(0, length(columns)) {
+let c = columns[x]
+print("\(x) \(c.line) \(c.top) \(c.bottom)")
+}
+}
+"map" => map_dump(load_level(w, command_argument(arguments, 1)))
+"ascii" => {
+let width = if length(arguments) > 2 { value_or(parse_int(arguments[2]), 0) } else { 120 }
+if width < 10 or width > 1000 {
+exit_with(64, "error: WIDTH must be 10 to 1000")
+}
+for row in automap.render(load_level(w, command_argument(arguments, 1)), width) {
+print(row)
+}
+}
+_ => exit_with(64, usage())
+}
+}

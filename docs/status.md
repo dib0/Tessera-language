@@ -103,3 +103,9 @@ The pacing test measures wall-clock time, so a heavily loaded machine could push
 | S3.6 `std/palette` | **Added** as a generic 768-byte RGB palette reader; `PLAYPAL` is that format | entries 0, 1 and 255 of a synthetic palette match Python |
 | S3.7 `std/ppm` | **Added** as a pure `encode`; write with `write_bytes` | a 3 x 2 image is byte-identical to one built in Python; a 320 x 200 frame opened with ImageMagick (`identify`: PPM 320x200 8-bit sRGB) and showed the expected gradient and sine wave |
 | S3.8 `std/text` | **No module**: `pad_left`, `pad_right`, `parse_int`, `split` are built-ins | `tests/std/text_builtins_test.tes`: empty input, negative and invalid numbers, `Int` limits |
+
+## Draft 0.18 and Tesseradoom (Phase 4)
+
+`./build.sh` (fixpoint reached) and `cargo test --release`: **25 passed, 0 failed**, including `stage1::stage1_builds_tesseradoom`, which also runs `examples/tesseradoom/checks/run_checks.sh` when `WAD/freedoom1.wad` is present.
+
+Language changes made for the port (spec draft 0.18): `draw_pixels`, `poll_event` and `WindowEvent.KeyUp` (decision D1); `set x = f(x)` moves records and enums; `var copy = parameter` takes a parameter used only there. The milestone status is in `examples/tesseradoom/README.md`: M1 to M8 done and checked (M5 by eye), M9 playback only.

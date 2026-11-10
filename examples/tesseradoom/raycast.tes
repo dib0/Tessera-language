@@ -1,0 +1,64 @@
+// M4: one frame by casting a ray per screen column against every one-sided linedef (no BSP).
+// Walls run from the floor to the ceiling of the sector in front of them; floor and ceiling are
+// plain colors. Effects: none.
+
+import std/fixed
+import std/math
+import geometry
+import level
+
+note "What one column of the frame shows: the nearest one-sided linedef (or -1), and the rows where its wall starts and ends (clipped to the screen)."
+pub type Column {
+line: Int
+top: Int
+bottom: Int
+distance: Int
+}
+
+note "Screen row of a height (fixed) seen at a perpendicular distance (fixed)."
+pub fn project(height: Int, eye: Int, distance: Int) -> Int {
+geometry.screen_height() / 2 - (height - eye) * geometry.focal() / distance
+}
+
+pub fn cast(l: level.Level, trig: geometry.Trig, camera: geometry.Camera) -> List[Column] {
+let rays = geometry.column_rays(trig, camera.angle)
+var columns: List[Column] = []
+for x in range(0, geometry.screen_width()) {
+var best = Column { line: -1, top: 0, bottom: 0, distance: 0 }
+for index in range(0, length(l.linedefs)) {
+let line = l.linedefs[index]
+if line.back < 0 {
+let a = l.vertexes[line.start]
+let b = l.vertexes[line.end]
+let h = geometry.intersect(camera.x, camera.y, rays.dx[x], rays.dy[x], a.x, a.y, b.x, b.y)
+if h.hit and (best.line < 0 or h.distance < best.distance) {
+let sector = l.sectors[l.sidedefs[line.front].sector]
+let top = project(fixed.from_int(sector.ceiling), camera.z, h.distance)
+let bottom = project(fixed.from_int(sector.floor), camera.z, h.distance)
+set best = Column { line: index, top: math.clamp(top, 0, geometry.screen_height() - 1), bottom: math.clamp(bottom, 0, geometry.screen_height() - 1), distance: h.distance }
+}
+}
+}
+set columns += [best]
+}
+columns
+}
+
+note "The frame as palette indexes: walls in a shade per line, darker with distance through COLORMAP; ceiling and floor in two fixed colors."
+pub fn frame(columns: List[Column], colormap: Bytes) -> List[Int] {
+let width = geometry.screen_width()
+var pixels = repeat([0], width * geometry.screen_height())
+for x in range(0, width) {
+let c = columns[x]
+for y in range(0, geometry.screen_height()) {
+var color = if y < geometry.screen_height() / 2 { 5 } else { 108 }
+if c.line >= 0 and y >= c.top and y <= c.bottom {
+let base = 80 + (c.line * 7) % 24
+let light = math.clamp(fixed.floor_int(c.distance) / 64, 0, 31)
+set color = colormap[light * 256 + base]
+}
+set pixels[y * width + x] = color
+}
+}
+pixels
+}

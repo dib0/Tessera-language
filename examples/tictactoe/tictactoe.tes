@@ -123,6 +123,7 @@ set game = rules.new_game()
 return
 }
 }
+WindowEvent.KeyUp(_) => {}
 WindowEvent.Close => return
 }
 }

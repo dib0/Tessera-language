@@ -7,11 +7,11 @@ lives in [`examples/tesseradoom/`](../examples/tesseradoom/README.md).
 
 The existing `ui` effect (section 9.4 of `language-design.md`: X11 in safe Rust, no FFI, no
 `unsafe`) is extended rather than adding a native host module (roadmap option a) or piping frames
-to an external viewer (option b). The extension is specified in `language-design.md` before it is
-implemented, at milestone M7 at the latest. Planned:
+to an external viewer (option b). Implemented in draft 0.18:
 
-- `draw_pixels(x, y, width, colors: List[Int])`: a whole frame in one call, instead of one
-  rectangle per pixel.
+- `draw_pixels(x, y, width, colors: List[Int], scale)`: a whole frame in one call, instead of one
+  rectangle per pixel. `scale` was added during implementation, so a 320 x 200 frame fills a
+  640 x 400 window without the program building a four times larger list every frame.
 - `poll_event() -> Option[WindowEvent]`: returns immediately, so a game loop never blocks on input.
 - A key-release event (`KeyUp`), so held keys can be tracked.
 
@@ -32,6 +32,12 @@ The target is at least 35 frames per second at 320 x 200 on the development mach
 `--opt 3`. Frame time is measured from M4 on and recorded with each milestone. If the target is
 missed, first profile and improve the generated Rust or the runtime; change the data model only
 when that is not enough.
+
+Measured (2026-11-10, E1M1, `bench` and `play --uncapped`): about 1,000 frames per second for
+rendering alone and 684 in the window at 640 x 400. The first measurement was 44 frames per second
+for the starting view; the cause was in the compiler (`set c = f(c)` copied records instead of
+moving them, so every drawing call copied the frame buffer), and fixing it there (draft 0.18) made
+rendering about 20 times faster without changing the program.
 
 ## D4. License: MIT engine, Freedoom game data
 

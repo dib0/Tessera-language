@@ -1,0 +1,35 @@
+// Draft 0.18: `set r = f(r)` moves a record into `f`, and `var copy = parameter` takes a parameter
+// used only there. Neither may change a value that another name still holds.
+
+type Canvas {
+pixels: List[Int]
+count: Int
+}
+
+fn paint(canvas: Canvas, at: Int, color: Int) -> Canvas {
+var c = canvas
+set c.pixels[at] = color
+set c.count += 1
+c
+}
+
+fn paint_twice(canvas: Canvas) -> Canvas {
+var c = canvas
+set c = paint(c, 0, 7)
+set c = paint(c, 1, 8)
+c
+}
+
+fn main() -> Unit uses io, time {
+var canvas = Canvas { pixels: repeat([0], 1000000), count: 0 }
+let start = monotonic()
+for i in range(0, 100000) {
+set canvas = paint(canvas, i, 1)
+}
+let fast = monotonic() - start < 2000
+let saved = canvas
+set canvas = paint(canvas, 0, 9)
+set canvas = paint_twice(canvas)
+let kept = saved
+print("count \(canvas.count) first \(canvas.pixels[0]) second \(canvas.pixels[1]) saved \(kept.pixels[0]) \(kept.count) in place \(fast)")
+}

@@ -1,0 +1,186 @@
+// A map (level) parsed from its WAD lumps. Layouts from the public WAD format description:
+// THINGS 10 bytes, LINEDEFS 14, SIDEDEFS 30, VERTEXES 4, SEGS 12, SSECTORS 4, NODES 28, SECTORS 26,
+// little-endian 16-bit fields. Coordinates are whole map units (Int); the renderer and the game
+// convert them to 16.16 fixed point. Effects: none.
+
+import std/bytes
+import wad
+
+pub type Vertex {
+x: Int
+y: Int
+}
+
+pub type Thing {
+x: Int
+y: Int
+angle: Int
+kind: Int
+flags: Int
+}
+
+note "`front` and `back` are sidedef indexes; `back` is -1 for a one-sided line."
+pub type Linedef {
+start: Int
+end: Int
+flags: Int
+special: Int
+tag: Int
+front: Int
+back: Int
+}
+
+pub type Sidedef {
+x_offset: Int
+y_offset: Int
+upper: Text
+lower: Text
+middle: Text
+sector: Int
+}
+
+note "`angle` is in binary angle units (0 to 65535 for a full turn); `side` 0 runs along the linedef, 1 against it."
+pub type Seg {
+start: Int
+end: Int
+angle: Int
+linedef: Int
+side: Int
+offset: Int
+}
+
+pub type Subsector {
+count: Int
+first: Int
+}
+
+note "A bounding box in map units."
+pub type Box {
+top: Int
+bottom: Int
+left: Int
+right: Int
+}
+
+note "A BSP node: the partition line from (x, y) along (dx, dy), and its two children. A child with bit 15 set is a subsector (the lower 15 bits are its index), otherwise a node."
+pub type Node {
+x: Int
+y: Int
+dx: Int
+dy: Int
+right_box: Box
+left_box: Box
+right: Int
+left: Int
+}
+
+pub type Sector {
+floor: Int
+ceiling: Int
+floor_flat: Text
+ceiling_flat: Text
+light: Int
+special: Int
+tag: Int
+}
+
+pub type Level {
+name: Text
+things: List[Thing]
+vertexes: List[Vertex]
+linedefs: List[Linedef]
+sidedefs: List[Sidedef]
+segs: List[Seg]
+subsectors: List[Subsector]
+nodes: List[Node]
+sectors: List[Sector]
+}
+
+fn u16(data: Bytes, at: Int) -> Int = bytes.read_u16_le(data, at)
+
+fn i16(data: Bytes, at: Int) -> Int = bytes.read_i16_le(data, at)
+
+fn name8(data: Bytes, at: Int) -> Text = to_upper(bytes.read_ascii(data, at, 8))
+
+fn index_or_none(value: Int) -> Int = if value == 65535 { -1 } else { value }
+
+fn required(w: wad.Wad, map: Text, name: Text) -> Result[Bytes, Text] {
+match wad.map_lump(w, map, name) {
+.Some(data) => .Ok(data)
+.None => .Error("map \(map) has no \(name) lump")
+}
+}
+
+pub fn load(w: wad.Wad, map: Text) -> Result[Level, Text] {
+if wad.find(w, map) == .None {
+return .Error("no map named \(map)")
+}
+let thing_data = try required(w, map, "THINGS")
+var things: List[Thing] = []
+for at in range(0, length(thing_data) / 10) {
+let b = at * 10
+set things += [Thing { x: i16(thing_data, b), y: i16(thing_data, b + 2), angle: i16(thing_data, b + 4), kind: u16(thing_data, b + 6), flags: i16(thing_data, b + 8) }]
+}
+let vertex_data = try required(w, map, "VERTEXES")
+var vertexes: List[Vertex] = []
+for at in range(0, length(vertex_data) / 4) {
+set vertexes += [Vertex { x: i16(vertex_data, at * 4), y: i16(vertex_data, at * 4 + 2) }]
+}
+let line_data = try required(w, map, "LINEDEFS")
+var linedefs: List[Linedef] = []
+for at in range(0, length(line_data) / 14) {
+let b = at * 14
+set linedefs += [Linedef { start: u16(line_data, b), end: u16(line_data, b + 2), flags: u16(line_data, b + 4), special: u16(line_data, b + 6), tag: u16(line_data, b + 8), front: index_or_none(u16(line_data, b + 10)), back: index_or_none(u16(line_data, b + 12)) }]
+}
+let side_data = try required(w, map, "SIDEDEFS")
+var sidedefs: List[Sidedef] = []
+for at in range(0, length(side_data) / 30) {
+let b = at * 30
+set sidedefs += [Sidedef { x_offset: i16(side_data, b), y_offset: i16(side_data, b + 2), upper: name8(side_data, b + 4), lower: name8(side_data, b + 12), middle: name8(side_data, b + 20), sector: u16(side_data, b + 28) }]
+}
+let seg_data = try required(w, map, "SEGS")
+var segs: List[Seg] = []
+for at in range(0, length(seg_data) / 12) {
+let b = at * 12
+set segs += [Seg { start: u16(seg_data, b), end: u16(seg_data, b + 2), angle: u16(seg_data, b + 4), linedef: u16(seg_data, b + 6), side: u16(seg_data, b + 8), offset: i16(seg_data, b + 10) }]
+}
+let subsector_data = try required(w, map, "SSECTORS")
+var subsectors: List[Subsector] = []
+for at in range(0, length(subsector_data) / 4) {
+set subsectors += [Subsector { count: u16(subsector_data, at * 4), first: u16(subsector_data, at * 4 + 2) }]
+}
+let node_data = try required(w, map, "NODES")
+var nodes: List[Node] = []
+for at in range(0, length(node_data) / 28) {
+let b = at * 28
+let right_box = Box { top: i16(node_data, b + 8), bottom: i16(node_data, b + 10), left: i16(node_data, b + 12), right: i16(node_data, b + 14) }
+let left_box = Box { top: i16(node_data, b + 16), bottom: i16(node_data, b + 18), left: i16(node_data, b + 20), right: i16(node_data, b + 22) }
+set nodes += [Node { x: i16(node_data, b), y: i16(node_data, b + 2), dx: i16(node_data, b + 4), dy: i16(node_data, b + 6), right_box: right_box, left_box: left_box, right: u16(node_data, b + 24), left: u16(node_data, b + 26) }]
+}
+let sector_data = try required(w, map, "SECTORS")
+var sectors: List[Sector] = []
+for at in range(0, length(sector_data) / 26) {
+let b = at * 26
+set sectors += [Sector { floor: i16(sector_data, b), ceiling: i16(sector_data, b + 2), floor_flat: name8(sector_data, b + 4), ceiling_flat: name8(sector_data, b + 12), light: i16(sector_data, b + 20), special: u16(sector_data, b + 22), tag: u16(sector_data, b + 24) }]
+}
+.Ok(Level { name: map, things: things, vertexes: vertexes, linedefs: linedefs, sidedefs: sidedefs, segs: segs, subsectors: subsectors, nodes: nodes, sectors: sectors })
+}
+
+note "The first thing of the given type, such as 1 for the player 1 start."
+pub fn find_thing(l: Level, kind: Int) -> Option[Thing] {
+for t in l.things {
+if t.kind == kind {
+return .Some(t)
+}
+}
+.None
+}
+
+note "The sector of a sidedef's side of a linedef: `side` 0 is the front."
+pub fn line_sector(l: Level, line: Linedef, side: Int) -> Option[Int] {
+let index = if side == 0 { line.front } else { line.back }
+if index < 0 {
+return .None
+}
+.Some(l.sidedefs[index].sector)
+}

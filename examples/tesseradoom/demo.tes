@@ -1,0 +1,55 @@
+// M9: demo lumps (DEMO1 ...). Format from the public description of version 1.9 demos: a 13-byte
+// header (version 109, skill, episode, map, deathmatch, respawn, fast, no monsters, console player,
+// four "player present" bytes), then for every tic 4 bytes per present player (forward move and
+// side move as signed bytes, the turn as a signed byte that counts 256ths of a 16-bit angle, and
+// buttons: 1 fire, 2 use), ending with byte 0x80. Effects: none.
+
+import world
+
+pub type Demo {
+skill: Int
+episode: Int
+map: Int
+players: Int
+console: Int
+tics: List[world.Input]
+}
+
+fn signed(value: Int) -> Int = if value >= 128 { value - 256 } else { value }
+
+pub fn parse(data: Bytes) -> Result[Demo, Text] {
+if length(data) < 14 or data[0] != 109 {
+return .Error("only version 1.9 demos (first byte 109) are supported")
+}
+var players = 0
+for i in range(0, 4) {
+if data[9 + i] != 0 {
+set players += 1
+}
+}
+if players == 0 {
+return .Error("the demo has no players")
+}
+// Index of the console player among the players present.
+var console = 0
+for i in range(0, data[8]) {
+if data[9 + i] != 0 {
+set console += 1
+}
+}
+var tics: List[world.Input] = []
+var at = 13
+while at < length(data) and data[at] != 128 {
+let mine = at + console * 4
+if mine + 3 >= length(data) {
+return .Error("the demo ends in the middle of a tic")
+}
+let buttons = data[mine + 3]
+// The turn byte is the high byte of a 16-bit angle; a fine angle is 8 of those units.
+set tics += [world.no_input() with { forward_move: signed(data[mine]), side_move: signed(data[mine + 1]), turn: signed(data[mine + 2]) * 32, fire: bit_and(buttons, 1) != 0, use: bit_and(buttons, 2) != 0 }]
+set at += players * 4
+}
+.Ok(Demo { skill: data[1], episode: data[2], map: data[3], players: players, console: console, tics: tics })
+}
+
+pub fn map_name(d: Demo) -> Text = "E\(d.episode)M\(d.map)"

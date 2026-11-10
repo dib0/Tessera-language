@@ -1,0 +1,161 @@
+// Wall textures, flats, the sky and the light tables, decoded from the WAD.
+// Formats from the public WAD description: pictures ("patches") are column-based with runs of
+// pixels ("posts"); TEXTURE1/TEXTURE2 compose textures from patches listed in PNAMES; flats are
+// 64 x 64 raw palette indexes between F_START and F_END; COLORMAP has 34 tables of 256 entries
+// that darken a palette index. Effects: none.
+
+import std/bytes
+import wad
+
+note "A picture or texture as palette indexes, column by column (`x * height + y`); -1 is transparent."
+pub type Picture {
+name: Text
+width: Int
+height: Int
+left: Int
+top: Int
+pixels: List[Int]
+}
+
+pub type Art {
+textures: List[Picture]
+texture_index: Map[Text, Int]
+flats: List[Bytes]
+flat_index: Map[Text, Int]
+colormap: Bytes
+palette: Bytes
+}
+
+note "Decodes a picture lump. Posts that run past the bottom are cut off."
+pub fn decode_picture(name: Text, data: Bytes) -> Picture {
+let width = bytes.read_u16_le(data, 0)
+let height = bytes.read_u16_le(data, 2)
+var pixels = repeat([-1], width * height)
+for x in range(0, width) {
+var at = bytes.read_u32_le(data, 8 + x * 4)
+while at < length(data) and data[at] != 255 {
+let first = data[at]
+let count = data[at + 1]
+for i in range(0, count) {
+let y = first + i
+if y < height {
+set pixels[x * height + y] = data[at + 3 + i]
+}
+}
+set at += count + 4
+}
+}
+Picture { name: name, width: width, height: height, left: bytes.read_i16_le(data, 4), top: bytes.read_i16_le(data, 6), pixels: pixels }
+}
+
+note "Copies a picture onto a texture at (origin_x, origin_y); transparent pixels are skipped. Changes `pixels` in place when called as `set pixels = place(pixels, ...)`."
+fn place(pixels: List[Int], width: Int, height: Int, patch: Picture, origin_x: Int, origin_y: Int) -> List[Int] {
+var out = pixels
+for px in range(0, patch.width) {
+let x = origin_x + px
+if x >= 0 and x < width {
+for py in range(0, patch.height) {
+let y = origin_y + py
+let value = patch.pixels[px * patch.height + py]
+if value >= 0 and y >= 0 and y < height {
+set out[x * height + y] = value
+}
+}
+}
+}
+out
+}
+
+fn patch_names(w: wad.Wad) -> List[Text] {
+let data = wad.lump(w, "PNAMES") else return []
+var names: List[Text] = []
+for index in range(0, bytes.read_i32_le(data, 0)) {
+set names += [to_upper(bytes.read_ascii(data, 4 + index * 8, 8))]
+}
+names
+}
+
+note "Composes the textures named in `wanted` (other textures are skipped to save time and memory) from TEXTURE1 and TEXTURE2."
+pub fn load(w: wad.Wad, wanted: List[Text]) -> Art {
+let names = patch_names(w)
+var patches: Map[Text, Picture] = [:]
+var textures: List[Picture] = []
+var texture_index: Map[Text, Int] = [:]
+for lump_name in ["TEXTURE1", "TEXTURE2"] {
+match wad.lump(w, lump_name) {
+.Some(data) => {
+for index in range(0, bytes.read_i32_le(data, 0)) {
+let at = bytes.read_i32_le(data, 4 + index * 4)
+let name = to_upper(bytes.read_ascii(data, at, 8))
+if contains(wanted, name) and not contains(texture_index, name) {
+let width = bytes.read_i16_le(data, at + 12)
+let height = bytes.read_i16_le(data, at + 14)
+var pixels = repeat([0], width * height)
+for p in range(0, bytes.read_i16_le(data, at + 20)) {
+let entry = at + 22 + p * 10
+let patch_name = names[bytes.read_i16_le(data, entry + 4)]
+if not contains(patches, patch_name) {
+match wad.lump(w, patch_name) {
+.Some(patch_data) => {
+set patches = put(patches, patch_name, decode_picture(patch_name, patch_data))
+}
+.None => {}
+}
+}
+match get(patches, patch_name) {
+.Some(patch) => {
+set pixels = place(pixels, width, height, patch, bytes.read_i16_le(data, entry), bytes.read_i16_le(data, entry + 2))
+}
+.None => {}
+}
+}
+set texture_index = put(texture_index, name, length(textures))
+set textures += [Picture { name: name, width: width, height: height, left: 0, top: 0, pixels: pixels }]
+}
+}
+}
+.None => {}
+}
+}
+var flats: List[Bytes] = []
+var flat_index: Map[Text, Int] = [:]
+for index in wad.lumps_between(w, ["F_START", "FF_START"], ["F_END", "FF_END"]) {
+let lump = w.lumps[index]
+if lump.size == 4096 and not contains(flat_index, lump.name) {
+set flat_index = put(flat_index, lump.name, length(flats))
+set flats += [wad.lump_data(w, index)]
+}
+}
+let colormap = wad.lump(w, "COLORMAP") else return Art { textures: textures, texture_index: texture_index, flats: flats, flat_index: flat_index, colormap: bytes(repeat([0], 34 * 256)), palette: bytes(repeat([0], 768)) }
+let palette = wad.lump(w, "PLAYPAL") else return Art { textures: textures, texture_index: texture_index, flats: flats, flat_index: flat_index, colormap: colormap, palette: bytes(repeat([0], 768)) }
+Art { textures: textures, texture_index: texture_index, flats: flats, flat_index: flat_index, colormap: colormap, palette: palette }
+}
+
+note "Index of a texture, or -1 for `-` and unknown names."
+pub fn texture(a: Art, name: Text) -> Int = value_or(get(a.texture_index, name), -1)
+
+pub fn flat(a: Art, name: Text) -> Int = value_or(get(a.flat_index, name), -1)
+
+note "Sprite pictures between S_START and S_END, and where each frame is: `frames` maps a sprite name, frame letter and rotation digit (`TROOA1`; rotation 0 means every direction) to `picture * 2 + flipped`. A lump named `TROOA2A8` is rotation 2 of frame A and, mirrored, rotation 8."
+pub type Sprites {
+pictures: List[Picture]
+frames: Map[Text, Int]
+}
+
+pub fn load_sprites(w: wad.Wad) -> Sprites {
+var pictures: List[Picture] = []
+var frames: Map[Text, Int] = [:]
+for index in wad.lumps_between(w, ["S_START", "SS_START"], ["S_END", "SS_END"]) {
+let name = w.lumps[index].name
+let codes = code_points(name)
+if length(codes) >= 6 {
+let picture = length(pictures)
+set pictures += [decode_picture(name, wad.lump_data(w, index))]
+set frames = put(frames, from_code_points(slice(codes, 0, 6)), picture * 2)
+if length(codes) >= 8 {
+set frames = put(frames, from_code_points(slice(codes, 0, 4) + slice(codes, 6, 8)), picture * 2 + 1)
+}
+}
+}
+Sprites { pictures: pictures, frames: frames }
+}

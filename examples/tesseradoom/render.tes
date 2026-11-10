@@ -1,0 +1,481 @@
+// M5: the BSP renderer. Subsectors are visited front to back by walking the BSP tree from the
+// camera's side of each partition line. Every screen column keeps an open interval of rows
+// (`top` to `bottom`) that nearer walls have not covered yet. For each seg, each open column gets
+// an exact ray intersection (distance and texture position), then: ceiling or sky above the wall,
+// floor below it, and the wall itself; one-sided walls close the column, two-sided lines draw
+// their upper and lower parts and narrow the interval. Lighting uses COLORMAP: darker with lower
+// sector light and with distance. All geometry is 16.16 fixed point. Effects: none.
+
+import std/fixed
+import std/math
+import art
+import geometry
+import level
+
+note "Texture and flat indexes and seg lengths, worked out once per level."
+pub type Scene {
+level: level.Level
+art: art.Art
+upper: List[Int]
+lower: List[Int]
+middle: List[Int]
+floor_flat: List[Int]
+ceiling_flat: List[Int]
+sky_flat: Int
+sky: Int
+seg_length: List[Int]
+}
+
+pub type Canvas {
+pixels: List[Int]
+depth: List[Int]
+top: List[Int]
+bottom: List[Int]
+open: Int
+}
+
+note "The parts of a frame that change while playing: sector heights (doors, lifts) and lights."
+type View {
+scene: Scene
+sectors: List[level.Sector]
+camera: geometry.Camera
+rays: geometry.Rays
+}
+
+note "A thing to draw: position and floor height (fixed), its sprite name and frame letter, the direction it faces (fine angle) and the light of its sector."
+pub type SpriteDraw {
+x: Int
+y: Int
+z: Int
+sprite: Text
+frame: Text
+angle: Int
+light: Int
+}
+
+note "A sprite after projection, ready to draw from back to front."
+type Projected {
+depth: Int
+center: Int
+z: Int
+picture: Int
+flipped: Bool
+light: Int
+}
+
+pub fn prepare(l: level.Level, a: art.Art) -> Scene {
+var upper: List[Int] = []
+var lower: List[Int] = []
+var middle: List[Int] = []
+for side in l.sidedefs {
+set upper += [art.texture(a, side.upper)]
+set lower += [art.texture(a, side.lower)]
+set middle += [art.texture(a, side.middle)]
+}
+var floors: List[Int] = []
+var ceilings: List[Int] = []
+for sector in l.sectors {
+set floors += [art.flat(a, sector.floor_flat)]
+set ceilings += [art.flat(a, sector.ceiling_flat)]
+}
+var lengths: List[Int] = []
+for seg in l.segs {
+let p = l.vertexes[seg.start]
+let q = l.vertexes[seg.end]
+set lengths += [math.isqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y))]
+}
+// The sky texture follows the episode: E2M1 shows SKY2, and so on.
+let codes = code_points(l.name)
+let sky_name = if length(codes) == 4 and codes[0] == 69 { "SKY\(from_code_point(codes[1]))" } else { "SKY1" }
+Scene { level: l, art: a, upper: upper, lower: lower, middle: middle, floor_flat: floors, ceiling_flat: ceilings, sky_flat: art.flat(a, "F_SKY1"), sky: art.texture(a, sky_name), seg_length: lengths }
+}
+
+note "Every texture a level's sidedefs name, plus the skies; textures are composed only when used."
+pub fn wanted_textures(l: level.Level) -> List[Text] {
+var names: Map[Text, Bool] = ["SKY1": true, "SKY2": true, "SKY3": true, "SKY4": true]
+for side in l.sidedefs {
+set names = put(put(put(names, side.upper, true), side.lower, true), side.middle, true)
+}
+keys(names)
+}
+
+note "Renders the level as it was loaded, without things."
+pub fn render(scene: Scene, camera: geometry.Camera, trig: geometry.Trig) -> List[Int] = render_world(scene, scene.level.sectors, camera, trig, [], art.Sprites { pictures: [], frames: [:] })
+
+note "Renders a frame with the current sector heights and the given things."
+pub fn render_world(scene: Scene, sectors: List[level.Sector], camera: geometry.Camera, trig: geometry.Trig, things: List[SpriteDraw], sprites: art.Sprites) -> List[Int] {
+let width = geometry.screen_width()
+let height = geometry.screen_height()
+var canvas = Canvas { pixels: repeat([0], width * height), depth: repeat([far()], width * height), top: repeat([0], width), bottom: repeat([height - 1], width), open: width }
+let view = View { scene: scene, sectors: sectors, camera: camera, rays: geometry.column_rays(trig, camera.angle) }
+let nodes = length(scene.level.nodes)
+// Only `set canvas = f(canvas, ...)` changes the canvas in place (spec 6.2); other forms would copy it.
+if nodes == 0 {
+set canvas = draw_subsector(view, canvas, 0)
+} else {
+set canvas = draw_node(view, canvas, nodes - 1)
+}
+set canvas = draw_sprites(view, canvas, things, sprites, trig)
+canvas.pixels
+}
+
+fn far() -> Int = shift_left(1, 40)
+
+fn draw_node(view: View, canvas: Canvas, child: Int) -> Canvas {
+var c = canvas
+if c.open == 0 {
+return c
+}
+if bit_and(child, 32768) != 0 {
+set c = draw_subsector(view, c, bit_and(child, 32767))
+return c
+}
+let node = view.scene.level.nodes[child]
+let near_side = geometry.node_side(node, view.camera.x, view.camera.y)
+set c = draw_node(view, c, if near_side == 0 { node.right } else { node.left })
+set c = draw_node(view, c, if near_side == 0 { node.left } else { node.right })
+c
+}
+
+fn draw_subsector(view: View, canvas: Canvas, index: Int) -> Canvas {
+var c = canvas
+let sub = view.scene.level.subsectors[index]
+for seg in range(sub.first, sub.first + sub.count) {
+set c = draw_seg(view, c, seg)
+}
+c
+}
+
+note "Screen column where a map point (whole units) appears, or none when it is behind the near plane."
+fn screen_x(view: View, x: Int, y: Int) -> Int {
+let cam = view.camera
+let dx = fixed.from_int(x) - cam.x
+let dy = fixed.from_int(y) - cam.y
+let c = view.rays.dx[geometry.screen_width() / 2]
+let s = view.rays.dy[geometry.screen_width() / 2]
+let forward = fixed.mul(dx, c) + fixed.mul(dy, s)
+let side = fixed.mul(dx, s) - fixed.mul(dy, c)
+geometry.screen_width() / 2 + side * geometry.focal() / math.max(forward, 1)
+}
+
+note "View-space depth (fixed) of a map point."
+fn depth(view: View, x: Int, y: Int) -> Int {
+let cam = view.camera
+let dx = fixed.from_int(x) - cam.x
+let dy = fixed.from_int(y) - cam.y
+fixed.mul(dx, view.rays.dx[geometry.screen_width() / 2]) + fixed.mul(dy, view.rays.dy[geometry.screen_width() / 2])
+}
+
+note "The column range a seg can cover. Points behind the camera are replaced by the screen edge on their side, which can only widen the range; the exact intersection per column decides what is drawn."
+fn column_range(view: View, a: level.Vertex, b: level.Vertex) -> List[Int] {
+let near = fixed.one()
+let da = depth(view, a.x, a.y)
+let db = depth(view, b.x, b.y)
+if da < near and db < near {
+return [0, 0]
+}
+let left = if da < near { 0 } else { math.clamp(screen_x(view, a.x, a.y), 0, geometry.screen_width()) }
+let right = if db < near { geometry.screen_width() } else { math.clamp(screen_x(view, b.x, b.y) + 1, 0, geometry.screen_width()) }
+[left, right]
+}
+
+fn row_of(height: Int, eye: Int, distance: Int) -> Int = geometry.screen_height() / 2 - (height - eye) * geometry.focal() / distance
+
+fn light_row(light: Int, distance: Int) -> Int = math.clamp((255 - light) / 8 + fixed.floor_int(distance) / 96, 0, 31)
+
+fn draw_seg(view: View, canvas: Canvas, index: Int) -> Canvas {
+var c = canvas
+let scene = view.scene
+let l = scene.level
+let seg = l.segs[index]
+let a = l.vertexes[seg.start]
+let b = l.vertexes[seg.end]
+let cam = view.camera
+// The front side of a seg is on its right; from behind it is invisible.
+let facing = (b.x - a.x) * (cam.y - fixed.from_int(a.y)) - (b.y - a.y) * (cam.x - fixed.from_int(a.x))
+if facing >= 0 {
+return c
+}
+let range = column_range(view, a, b)
+if range[0] >= range[1] {
+return c
+}
+let line = l.linedefs[seg.linedef]
+let side_index = if seg.side == 0 { line.front } else { line.back }
+let back_index = if seg.side == 0 { line.back } else { line.front }
+let side = l.sidedefs[side_index]
+let front = view.sectors[side.sector]
+let two_sided = back_index >= 0
+let back = if two_sided { view.sectors[l.sidedefs[back_index].sector] } else { front }
+let front_sky = scene.ceiling_flat[side.sector] == scene.sky_flat
+let back_sky = two_sided and scene.ceiling_flat[l.sidedefs[back_index].sector] == scene.sky_flat
+let lower_unpegged = bit_and(line.flags, 16) != 0
+let upper_unpegged = bit_and(line.flags, 8) != 0
+let seg_length = scene.seg_length[index]
+let ceiling = fixed.from_int(front.ceiling)
+let floor = fixed.from_int(front.floor)
+let back_ceiling = fixed.from_int(back.ceiling)
+let back_floor = fixed.from_int(back.floor)
+for x in range(range[0], range[1]) {
+let top = c.top[x]
+let bottom = c.bottom[x]
+if top <= bottom {
+let hit = geometry.intersect(cam.x, cam.y, view.rays.dx[x], view.rays.dy[x], a.x, a.y, b.x, b.y)
+if hit.hit and hit.distance > 1024 {
+let distance = hit.distance
+let u = seg.offset + side.x_offset + fixed.floor_int(hit.along * seg_length)
+let light = light_row(front.light, distance)
+let wall_top = math.max(row_of(ceiling, cam.z, distance), top)
+let wall_bottom = math.min(row_of(floor, cam.z, distance) - 1, bottom)
+// Ceiling (or sky) above the wall, floor below it.
+if front_sky {
+set c = draw_sky(view, c, x, top, math.min(wall_top - 1, bottom))
+} else if ceiling > cam.z {
+set c = draw_flat(view, c, x, top, math.min(wall_top - 1, bottom), ceiling, scene.ceiling_flat[side.sector], front.light)
+}
+if floor < cam.z {
+set c = draw_flat(view, c, x, math.max(wall_bottom + 1, top), bottom, floor, scene.floor_flat[side.sector], front.light)
+}
+if not two_sided {
+let texture_top = if lower_unpegged { floor + fixed.from_int(texture_height(scene, scene.middle[side_index])) } else { ceiling }
+set c = draw_wall(view, c, x, wall_top, wall_bottom, scene.middle[side_index], u, texture_top + fixed.from_int(side.y_offset), distance, light)
+set c = mark_depth(c, x, wall_top, wall_bottom, distance)
+set c.top[x] = bottom + 1
+set c.bottom[x] = top - 1
+set c.open -= 1
+} else {
+var new_top = wall_top
+var new_bottom = wall_bottom
+if back_ceiling < ceiling and not (front_sky and back_sky) {
+let upper_end = math.min(row_of(back_ceiling, cam.z, distance) - 1, wall_bottom)
+let texture_top = if upper_unpegged { ceiling } else { back_ceiling + fixed.from_int(texture_height(scene, scene.upper[side_index])) }
+set c = draw_wall(view, c, x, wall_top, upper_end, scene.upper[side_index], u, texture_top + fixed.from_int(side.y_offset), distance, light)
+set c = mark_depth(c, x, wall_top, upper_end, distance)
+set new_top = math.max(new_top, upper_end + 1)
+}
+if back_floor > floor {
+let lower_start = math.max(row_of(back_floor, cam.z, distance), new_top)
+let texture_top = if lower_unpegged { ceiling } else { back_floor }
+set c = draw_wall(view, c, x, lower_start, wall_bottom, scene.lower[side_index], u, texture_top + fixed.from_int(side.y_offset), distance, light)
+set c = mark_depth(c, x, lower_start, wall_bottom, distance)
+set new_bottom = math.min(new_bottom, lower_start - 1)
+}
+// A closed door or a step up to the ceiling closes the column.
+if back_ceiling <= back_floor or new_top > new_bottom {
+set c = mark_depth(c, x, new_top, new_bottom, distance)
+set c.top[x] = bottom + 1
+set c.bottom[x] = top - 1
+set c.open -= 1
+} else {
+set c.top[x] = new_top
+set c.bottom[x] = new_bottom
+}
+}
+}
+}
+}
+c
+}
+
+fn texture_height(scene: Scene, texture: Int) -> Int = if texture < 0 { 0 } else { scene.art.textures[texture].height }
+
+note "Wall rows `from` to `to` of one column: texture column `u`; `texture_top` is the world height (fixed) of the texture's first row."
+fn draw_wall(view: View, canvas: Canvas, x: Int, from: Int, to: Int, texture: Int, u: Int, texture_top: Int, distance: Int, light: Int) -> Canvas {
+var c = canvas
+if texture < 0 or from > to {
+return c
+}
+let picture = view.scene.art.textures[texture]
+let pixels = picture.pixels
+let h = picture.height
+let column = ((u % picture.width) + picture.width) % picture.width * h
+let colormap = view.scene.art.colormap
+let shade = light * 256
+let width = geometry.screen_width()
+let focal = geometry.focal()
+// World height of a row's centre: eye + (centre_row - row - 0.5) * distance / focal.
+let step = distance / focal
+var v = texture_top - (view.camera.z + (2 * (geometry.screen_height() / 2 - from) - 1) * distance / (2 * focal))
+var at = from * width + x
+for _ in range(from, to + 1) {
+let row = ((shift_right(v, 16) % h) + h) % h
+let texel = pixels[column + row]
+if texel >= 0 {
+set c.pixels[at] = colormap[shade + texel]
+}
+set v += step
+set at += width
+}
+c
+}
+
+note "Floor or ceiling rows of one column at `height` (fixed): each pixel looks up the flat at the map point it shows."
+fn draw_flat(view: View, canvas: Canvas, x: Int, from: Int, to: Int, height: Int, flat: Int, light: Int) -> Canvas {
+var c = canvas
+if flat < 0 or from > to {
+return c
+}
+let texels = view.scene.art.flats[flat]
+let colormap = view.scene.art.colormap
+let cam = view.camera
+let dz = cam.z - height
+let ray_x = view.rays.dx[x]
+let ray_y = view.rays.dy[x]
+let centre = geometry.screen_height() / 2
+let width = geometry.screen_width()
+let scaled_height = dz * 2 * geometry.focal()
+let base_light = (255 - light) / 8
+var at = from * width + x
+for y in range(from, to + 1) {
+// The row's centre is (y + 0.5 - centre) / focal below the horizon; that fixes the distance.
+let below = 2 * y + 1 - 2 * centre
+if below != 0 and (below > 0) == (dz > 0) {
+let distance = scaled_height / below
+let wx = shift_right(cam.x + shift_right(ray_x * distance, 16), 16)
+let wy = shift_right(cam.y + shift_right(ray_y * distance, 16), 16)
+let texel = texels[(63 - bit_and(wy, 63)) * 64 + bit_and(wx, 63)]
+let shade = base_light + shift_right(distance, 16) / 96
+set c.pixels[at] = colormap[(if shade > 31 { 31 } else { shade }) * 256 + texel]
+set c.depth[at] = distance
+}
+set at += width
+}
+c
+}
+
+note "Sky rows of one column: the sky texture turns with the view (1024 texture columns per full turn) and is not darkened."
+fn draw_sky(view: View, canvas: Canvas, x: Int, from: Int, to: Int) -> Canvas {
+var c = canvas
+let sky = view.scene.sky
+if sky < 0 or from > to {
+return c
+}
+let picture = view.scene.art.textures[sky]
+let pixels = picture.pixels
+let h = picture.height
+let u = ((x * 256 / geometry.screen_width() - view.camera.angle * 1024 / geometry.fine_angles()) % picture.width + picture.width) % picture.width
+for y in range(from, to + 1) {
+let row = math.min(y * h / (geometry.screen_height() / 2 + 20), h - 1)
+let texel = pixels[u * h + row]
+if texel >= 0 {
+set c.pixels[y * geometry.screen_width() + x] = texel
+}
+}
+c
+}
+
+note "Records the distance of the wall covering rows `from` to `to` of a column, for hiding sprites behind it."
+fn mark_depth(canvas: Canvas, x: Int, from: Int, to: Int, distance: Int) -> Canvas {
+var c = canvas
+let first = math.max(from, 0)
+let last = math.min(to, geometry.screen_height() - 1)
+if first > last {
+return c
+}
+var at = first * geometry.screen_width() + x
+for _ in range(first, last + 1) {
+set c.depth[at] = distance
+set at += geometry.screen_width()
+}
+c
+}
+
+fn projected_depth(p: Projected) -> Int = -p.depth
+
+note "Which of the 8 rotations of a sprite faces the viewer: rotation 1 shows the front. The direction from the thing to the viewer is compared with the 8 directions the rotations stand for; integer arithmetic only."
+fn rotation(trig: geometry.Trig, thing_angle: Int, to_viewer_x: Int, to_viewer_y: Int) -> Int {
+var best = 0
+var best_dot = 0
+for k in range(0, 8) {
+let a = geometry.wrap_angle(thing_angle + k * geometry.fine_angles() / 8)
+let dot = shift_right(to_viewer_x, 8) * shift_right(trig.cosine[a], 8) + shift_right(to_viewer_y, 8) * shift_right(trig.sine[a], 8)
+if k == 0 or dot > best_dot {
+set best = k
+set best_dot = dot
+}
+}
+best + 1
+}
+
+fn draw_sprites(view: View, canvas: Canvas, things: List[SpriteDraw], sprites: art.Sprites, trig: geometry.Trig) -> Canvas {
+var c = canvas
+let cam = view.camera
+let ahead_x = view.rays.dx[geometry.screen_width() / 2]
+let ahead_y = view.rays.dy[geometry.screen_width() / 2]
+var projected: List[Projected] = []
+for t in things {
+let dx = t.x - cam.x
+let dy = t.y - cam.y
+let depth = fixed.mul(dx, ahead_x) + fixed.mul(dy, ahead_y)
+if depth > fixed.from_int(4) and depth < fixed.from_int(8192) {
+let side = fixed.mul(dx, ahead_y) - fixed.mul(dy, ahead_x)
+let center = geometry.screen_width() / 2 + side * geometry.focal() / depth
+if center > -200 and center < geometry.screen_width() + 200 {
+let rotated = get(sprites.frames, t.sprite + t.frame + to_text(rotation(trig, t.angle, -dx, -dy)))
+let entry: Option[Int] = match rotated {
+.Some(e) => .Some(e)
+.None => get(sprites.frames, t.sprite + t.frame + "0")
+}
+match entry {
+.Some(e) => {
+set projected += [Projected { depth: depth, center: center, z: t.z, picture: e / 2, flipped: e % 2 == 1, light: t.light }]
+}
+.None => {}
+}
+}
+}
+}
+for p in sort_by(projected, projected_depth) {
+set c = draw_sprite(view, c, sprites.pictures[p.picture], p)
+}
+c
+}
+
+fn draw_sprite(view: View, canvas: Canvas, picture: art.Picture, p: Projected) -> Canvas {
+var c = canvas
+let width = geometry.screen_width()
+let height = geometry.screen_height()
+// Pixels per map unit, and map units per pixel, both as fixed values.
+let per_unit = geometry.focal() * shift_left(1, 32) / p.depth
+if per_unit <= 0 {
+return c
+}
+let per_pixel = shift_left(1, 32) / per_unit
+let left = p.center - shift_right(picture.left * per_unit, 16)
+let right = left + shift_right(picture.width * per_unit, 16)
+let top_z = p.z + fixed.from_int(picture.top)
+let top = height / 2 - (top_z - view.camera.z) * geometry.focal() / p.depth
+let bottom = top + shift_right(picture.height * per_unit, 16)
+let colormap = view.scene.art.colormap
+let shade = math.clamp((255 - p.light) / 8 + fixed.floor_int(p.depth) / 96, 0, 31) * 256
+let pixels = picture.pixels
+let first_x = math.max(left, 0)
+let last_x = math.min(right, width)
+let first_y = math.max(top, 0)
+let last_y = math.min(bottom, height)
+// `range` stops the program when its start is past its end, so empty spans are skipped first.
+if first_x >= last_x or first_y >= last_y {
+return c
+}
+for x in range(first_x, last_x) {
+var u = shift_right((x - left) * per_pixel + per_pixel / 2, 16)
+if u >= picture.width {
+set u = picture.width - 1
+}
+if p.flipped {
+set u = picture.width - 1 - u
+}
+let column = u * picture.height
+for y in range(first_y, last_y) {
+let at = y * width + x
+if p.depth < c.depth[at] {
+let v = math.min(shift_right((y - top) * per_pixel + per_pixel / 2, 16), picture.height - 1)
+let texel = pixels[column + v]
+if texel >= 0 {
+set c.pixels[at] = colormap[shade + texel]
+}
+}
+}
+}
+c
+}

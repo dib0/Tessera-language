@@ -1,0 +1,115 @@
+// WAD files: the header, the lump directory, lumps by name, and the maps they contain.
+// Format: a 12-byte header ("IWAD" or "PWAD", lump count, directory offset), then a directory
+// of 16-byte entries (offset, size, 8-character name padded with zero bytes). All numbers are
+// little-endian. Effects: none; the caller reads the file.
+
+import std/bytes
+
+pub type Lump {
+name: Text
+offset: Int
+size: Int
+}
+
+pub type Wad {
+kind: Text
+data: Bytes
+lumps: List[Lump]
+}
+
+note "Parses the header and directory. Fails, instead of stopping, on data that is not a WAD or whose directory points outside the file."
+pub fn parse(data: Bytes) -> Result[Wad, Text] {
+if length(data) < 12 {
+return .Error("too short for a WAD header (\(length(data)) bytes)")
+}
+let kind = bytes.read_ascii(data, 0, 4)
+if kind != "IWAD" and kind != "PWAD" {
+return .Error("not a WAD file: the header starts with \"\(kind)\"")
+}
+let count = bytes.read_i32_le(data, 4)
+let directory = bytes.read_i32_le(data, 8)
+if count < 0 or directory < 0 or directory + count * 16 > length(data) {
+return .Error("the directory (\(count) entries at offset \(directory)) lies outside the file")
+}
+var lumps: List[Lump] = []
+for index in range(0, count) {
+let entry = directory + index * 16
+let offset = bytes.read_i32_le(data, entry)
+let size = bytes.read_i32_le(data, entry + 4)
+let name = to_upper(bytes.read_ascii(data, entry + 8, 8))
+if offset < 0 or size < 0 or offset + size > length(data) {
+return .Error("lump \(index) (\(name)) lies outside the file")
+}
+set lumps += [Lump { name: name, offset: offset, size: size }]
+}
+.Ok(Wad { kind: kind, data: data, lumps: lumps })
+}
+
+note "Index of the last lump with this name (case-insensitive), as later lumps replace earlier ones."
+pub fn find(wad: Wad, name: Text) -> Option[Int] {
+let wanted = to_upper(name)
+var index = length(wad.lumps) - 1
+while index >= 0 {
+if wad.lumps[index].name == wanted {
+return .Some(index)
+}
+set index -= 1
+}
+.None
+}
+
+pub fn lump_data(wad: Wad, index: Int) -> Bytes {
+let lump = wad.lumps[index]
+slice(wad.data, lump.offset, lump.offset + lump.size)
+}
+
+note "The data of the last lump with this name."
+pub fn lump(wad: Wad, name: Text) -> Option[Bytes] {
+let index = find(wad, name) else return .None
+.Some(lump_data(wad, index))
+}
+
+note "Map markers: lumps directly followed by a `THINGS` lump, in directory order."
+pub fn map_names(wad: Wad) -> List[Text] {
+var names: List[Text] = []
+for index in range(0, length(wad.lumps) - 1) {
+if wad.lumps[index + 1].name == "THINGS" {
+set names += [wad.lumps[index].name]
+}
+}
+names
+}
+
+note "A lump of a map, such as `LINEDEFS` of `E1M1`: searched among the lumps after the map marker, up to the next map."
+pub fn map_lump(wad: Wad, map: Text, name: Text) -> Option[Bytes] {
+let marker = find(wad, map) else return .None
+var index = marker + 1
+while index < length(wad.lumps) and index <= marker + 12 {
+let lump_name = wad.lumps[index].name
+if lump_name == name {
+return .Some(lump_data(wad, index))
+}
+if index > marker + 1 and lump_name == "THINGS" {
+return .None
+}
+set index += 1
+}
+.None
+}
+
+note "Every lump between two marker lumps, such as the flats between `F_START` and `F_END` (also `FF_START`)."
+pub fn lumps_between(wad: Wad, first: List[Text], last: List[Text]) -> List[Int] {
+var inside = false
+var found: List[Int] = []
+for index in range(0, length(wad.lumps)) {
+let name = wad.lumps[index].name
+if contains(first, name) {
+set inside = true
+} else if contains(last, name) {
+set inside = false
+} else if inside and wad.lumps[index].size > 0 {
+set found += [index]
+}
+}
+found
+}

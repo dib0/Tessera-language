@@ -1,0 +1,8 @@
+fn main() -> Unit uses ui {
+open_window("x", 10, 10)
+match next_event() {
+WindowEvent.Click(_, _, _) => {}
+WindowEvent.Key(_) => {}
+WindowEvent.Close => {}
+}
+}

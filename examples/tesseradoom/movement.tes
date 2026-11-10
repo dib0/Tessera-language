@@ -1,0 +1,113 @@
+// M6: moving the player through the map with collision against linedefs.
+// The player is a circle of radius 16 that is 56 units tall and can step up 24 units. A line
+// blocks the player when it is one-sided, flagged "blocks players and monsters" (flag 1), or when
+// the sector on its other side is too high to step onto or too low to fit under. Moves are split
+// into steps of at most 8 units, so the player cannot jump across a line; a blocked step tries to
+// slide along the wall (only the x part, then only the y part). Fixed point (16.16). Effects: none.
+
+import std/fixed
+import std/math
+import geometry
+import level
+
+pub fn radius() -> Int = 16
+
+pub fn player_height() -> Int = 56
+
+pub fn max_step() -> Int = 24
+
+pub type Player {
+x: Int
+y: Int
+angle: Int
+sector: Int
+}
+
+pub fn start(l: level.Level) -> Player {
+let c = geometry.start_camera(l)
+Player { x: c.x, y: c.y, angle: c.angle, sector: geometry.sector_at(l, c.x, c.y) }
+}
+
+pub fn camera(l: level.Level, p: Player) -> geometry.Camera {
+geometry.Camera { x: p.x, y: p.y, z: fixed.from_int(l.sectors[p.sector].floor + geometry.eye_height()), angle: p.angle }
+}
+
+note "Whether the player's circle at (x, y) (fixed) touches the segment a-b."
+pub fn touches(x: Int, y: Int, a: level.Vertex, b: level.Vertex) -> Bool = touches_radius(x, y, a, b, radius())
+
+note "Whether a circle of `size` units at (x, y) (fixed) touches the segment a-b. Distances are compared with 8 fraction bits, so squares stay below 2^52."
+pub fn touches_radius(x: Int, y: Int, a: level.Vertex, b: level.Vertex, size: Int) -> Bool {
+let r = fixed.from_int(size)
+// Quick rejection with the segment's bounding box.
+if x + r <= fixed.from_int(math.min(a.x, b.x)) or x - r >= fixed.from_int(math.max(a.x, b.x)) or y + r <= fixed.from_int(math.min(a.y, b.y)) or y - r >= fixed.from_int(math.max(a.y, b.y)) {
+return false
+}
+let lx = b.x - a.x
+let ly = b.y - a.y
+let ex = x - fixed.from_int(a.x)
+let ey = y - fixed.from_int(a.y)
+let length_squared = lx * lx + ly * ly
+// `ex` and `ey` are fixed, so the quotient is the fixed position (0.0 to 1.0) of the nearest point.
+let t = if length_squared == 0 { 0 } else { math.clamp((ex * lx + ey * ly) / length_squared, 0, fixed.one()) }
+let nx = shift_right(ex - lx * t, 8)
+let ny = shift_right(ey - ly * t, 8)
+let limit = shift_right(r, 8)
+nx * nx + ny * ny < limit * limit
+}
+
+note "Whether a line stops a player whose feet are at `floor` (whole units)."
+pub fn blocks(l: level.Level, line: level.Linedef, floor: Int) -> Bool {
+if line.back < 0 or bit_and(line.flags, 1) != 0 {
+return true
+}
+let front = l.sectors[l.sidedefs[line.front].sector]
+let back = l.sectors[l.sidedefs[line.back].sector]
+let opening_top = math.min(front.ceiling, back.ceiling)
+let opening_bottom = math.max(front.floor, back.floor)
+opening_top - opening_bottom < player_height() or opening_bottom - floor > max_step() or opening_top - math.max(floor, opening_bottom) < player_height()
+}
+
+note "Whether the player fits at (x, y) coming from a sector with this floor."
+pub fn fits(l: level.Level, x: Int, y: Int, floor: Int) -> Bool = fits_radius(l, x, y, floor, radius())
+
+note "Whether a circle of `size` units fits at (x, y) coming from a sector with this floor."
+pub fn fits_radius(l: level.Level, x: Int, y: Int, floor: Int, size: Int) -> Bool {
+for line in l.linedefs {
+if touches_radius(x, y, l.vertexes[line.start], l.vertexes[line.end], size) and blocks(l, line, floor) {
+return false
+}
+}
+true
+}
+
+fn step(l: level.Level, p: Player, dx: Int, dy: Int) -> Player {
+let floor = l.sectors[p.sector].floor
+for attempt in [[dx, dy], [dx, 0], [0, dy]] {
+let x = p.x + attempt[0]
+let y = p.y + attempt[1]
+if (attempt[0] != 0 or attempt[1] != 0) and fits(l, x, y, floor) {
+return p with { x: x, y: y, sector: geometry.sector_at(l, x, y) }
+}
+}
+p
+}
+
+note "Moves `forward` units ahead and `sideways` units to the right (fixed), in steps of at most 8 units."
+pub fn walk(l: level.Level, trig: geometry.Trig, start: Player, forward: Int, sideways: Int) -> Player {
+var p = start
+let c = trig.cosine[p.angle]
+let s = trig.sine[p.angle]
+let dx = fixed.mul(forward, c) + fixed.mul(sideways, s)
+let dy = fixed.mul(forward, s) - fixed.mul(sideways, c)
+let distance = math.max(math.abs(dx), math.abs(dy))
+let steps = math.max(1, (distance + fixed.from_int(8) - 1) / fixed.from_int(8))
+for i in range(0, steps) {
+// Integer division spreads any remainder over the steps without drift.
+let step_x = dx * (i + 1) / steps - dx * i / steps
+let step_y = dy * (i + 1) / steps - dy * i / steps
+set p = step(l, p, step_x, step_y)
+}
+p
+}
+
+pub fn turn(p: Player, fine: Int) -> Player = p with { angle: geometry.wrap_angle(p.angle + fine) }

@@ -1,0 +1,178 @@
+// M7 and M8: the game in a window. A fixed simulation rate of 35 tics per second; each tic applies
+// the keys held down (tracked from `Key` and `KeyUp` events) to the world, then a frame is rendered
+// and shown with `draw_pixels`, with a status line drawn over it. Keys: arrows or W/S to walk,
+// Left/Right to turn, A/D (or , and .) to step sideways, Shift to run, Space or E to use (doors,
+// switches), Control or F to fire, Escape to quit.
+
+import std/palette
+import std/math
+import art
+import geometry
+import render
+import world
+
+pub type Controls {
+forward: Bool
+back: Bool
+turn_left: Bool
+turn_right: Bool
+step_left: Bool
+step_right: Bool
+run: Bool
+use: Bool
+fire: Bool
+quit: Bool
+}
+
+pub fn no_controls() -> Controls = Controls { forward: false, back: false, turn_left: false, turn_right: false, step_left: false, step_right: false, run: false, use: false, fire: false, quit: false }
+
+note "Applies a key press (`down` true) or release to the held controls."
+pub fn press(start: Controls, key: Text, down: Bool) -> Controls {
+var c = start
+match to_lower(key) {
+"up" => set c.forward = down
+"w" => set c.forward = down
+"down" => set c.back = down
+"s" => set c.back = down
+"left" => set c.turn_left = down
+"right" => set c.turn_right = down
+"a" => set c.step_left = down
+"," => set c.step_left = down
+"d" => set c.step_right = down
+"." => set c.step_right = down
+"shift" => set c.run = down
+" " => set c.use = down
+"e" => set c.use = down
+"control" => set c.fire = down
+"f" => set c.fire = down
+"escape" => set c.quit = c.quit or down
+_ => {}
+}
+c
+}
+
+note "The world input for one tic, in the original game's units: forward 25 (50 running), sideways 24 (40), turning 80 fine angles (160)."
+pub fn input(c: Controls) -> world.Input {
+let forward = if c.run { 50 } else { 25 }
+let side = if c.run { 40 } else { 24 }
+let turn = if c.run { 160 } else { 80 }
+let forward_move = (if c.forward { forward } else { 0 }) - (if c.back { forward } else { 0 })
+let side_move = (if c.step_right { side } else { 0 }) - (if c.step_left { side } else { 0 })
+let turning = (if c.turn_left { turn } else { 0 }) - (if c.turn_right { turn } else { 0 })
+world.no_input() with { forward_move: forward_move, side_move: side_move, turn: turning, use: c.use, fire: c.fire }
+}
+
+note "The status line: health, armor, ammunition, keys and the latest message."
+pub fn status(w: world.World) -> Text {
+let keys = if length(w.stats.keys) == 0 { "" } else { "  KEYS \(join(w.stats.keys, " "))" }
+let message = if w.message_time > 0 { "   \(w.message)" } else { "" }
+"HEALTH \(w.stats.health)%  ARMOR \(w.stats.armor)%  AMMO \(w.stats.ammo)\(keys)\(message)"
+}
+
+note "Converts palette indexes to colors into `colors`, which is changed in place when called as `set colors = to_colors(colors, ...)`."
+pub fn to_colors(colors: List[Int], pixels: List[Int], palette_colors: List[Int]) -> List[Int] {
+var out = colors
+for i in range(0, length(pixels)) {
+set out[i] = palette_colors[pixels[i]]
+}
+out
+}
+
+note "Runs the game. `uncapped` renders as fast as possible (to measure the frame rate) instead of one frame per tic; `seconds` > 0 stops after that many seconds. Returns the number of frames shown and the time taken in milliseconds."
+pub fn run(scene: render.Scene, sprites: art.Sprites, playpal: Bytes, seconds: Int, uncapped: Bool, monsters: Bool) -> List[Int] uses ui, time {
+let l = scene.level
+let trig = geometry.make_trig()
+let scale = 2
+let width = geometry.screen_width()
+let height = geometry.screen_height()
+open_window("Tesseradoom - \(l.name)", width * scale, height * scale)
+let palette_colors = palette.read(playpal, 0)
+var colors = repeat([0], width * height)
+var game = world.create(l)
+if not monsters {
+set game = world.without_monsters(game)
+}
+var controls = no_controls()
+let started = monotonic()
+var tics = 0
+var frames = 0
+while not controls.quit {
+// Input: everything that arrived since the last frame.
+var waiting = true
+while waiting {
+match poll_event() {
+.Some(event) => match event {
+.Key(name) => set controls = press(controls, name, true)
+.KeyUp(name) => set controls = press(controls, name, false)
+.Close => set controls = controls with { quit: true }
+.Click(_, _, _) => {}
+}
+.None => set waiting = false
+}
+}
+// Simulation: catch up to 35 tics per second of elapsed time.
+let now = monotonic() - started
+while tics < now * 35 / 1000 {
+set game = world.tic(game, input(controls), trig)
+set tics += 1
+}
+set colors = to_colors(colors, render.render_world(scene, game.level.sectors, world.camera(game), trig, world.sprites(game), sprites), palette_colors)
+draw_pixels(0, 0, width, colors, scale)
+draw_text(9, height * scale - 21, status(game), rgb(0, 0, 0))
+draw_text(8, height * scale - 22, status(game), rgb(255, 220, 120))
+present()
+set frames += 1
+if seconds > 0 and now >= seconds * 1000 {
+set controls = controls with { quit: true }
+}
+if not uncapped {
+// Wait for the next tic.
+// Rounded up, so the loop never wakes just before the tic is due and renders it twice.
+let next = ((tics + 1) * 1000 + 34) / 35
+let wait = next - (monotonic() - started)
+if wait > 0 {
+sleep(wait)
+}
+}
+}
+[frames, monotonic() - started]
+}
+
+note "Plays back demo input in the window at 35 tics per second; any key or closing the window stops. Returns the frames shown and the time taken."
+pub fn watch(scene: render.Scene, sprites: art.Sprites, playpal: Bytes, tics: List[world.Input], skill: Int) -> List[Int] uses ui, time {
+let l = scene.level
+let trig = geometry.make_trig()
+let scale = 2
+let width = geometry.screen_width()
+let height = geometry.screen_height()
+open_window("Tesseradoom - demo of \(l.name)", width * scale, height * scale)
+let palette_colors = palette.read(playpal, 0)
+var colors = repeat([0], width * height)
+var game = world.create_at_skill(l, skill)
+let started = monotonic()
+var done = 0
+var frames = 0
+var stop = false
+while not stop and done < length(tics) {
+match poll_event() {
+.Some(event) => match event {
+.Key(_) => set stop = true
+.Close => set stop = true
+_ => {}
+}
+.None => {}
+}
+let due = math.min((monotonic() - started) * 35 / 1000, length(tics))
+while done < due {
+set game = world.tic(game, tics[done], trig)
+set done += 1
+}
+set colors = to_colors(colors, render.render_world(scene, game.level.sectors, world.camera(game), trig, world.sprites(game), sprites), palette_colors)
+draw_pixels(0, 0, width, colors, scale)
+draw_text(8, height * scale - 22, "DEMO tic \(done)  \(status(game))", rgb(255, 220, 120))
+present()
+set frames += 1
+sleep(5)
+}
+[frames, monotonic() - started]
+}

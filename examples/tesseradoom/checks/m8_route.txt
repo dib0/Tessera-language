@@ -1,0 +1,38 @@
+goto -160 256
+goto -160 160
+goto -160 352
+goto -160 256
+goto 128 256
+wait 45
+sector 98
+goto 736 256
+goto 736 272
+goto 752 272
+goto 752 288
+goto 768 288
+goto 768 304
+goto 784 304
+goto 784 320
+goto 800 320
+goto 800 490
+sector 10
+face 800 600
+use
+wait 50
+sector 10
+goto 800 592
+goto 784 592
+goto 784 608
+goto 672 608
+goto 672 656
+goto 656 656
+goto 656 672
+goto 592 672
+goto 592 704
+goto 568 712
+sector 48
+face 500 712
+use
+wait 50
+sector 48
+goto 470 712

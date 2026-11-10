@@ -9,7 +9,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 {
     cat "$runtime/core.rs"
-    printf '#[derive(Clone, PartialEq)]\nenum T_WindowEvent {\n    V_Click(i64, i64, i64),\n    V_Key(Rc<String>),\n    V_Close,\n}\n'
+    printf '#[derive(Clone, PartialEq)]\nenum T_WindowEvent {\n    V_Click(i64, i64, i64),\n    V_Key(Rc<String>),\n    V_KeyUp(Rc<String>),\n    V_Close,\n}\n'
     cat "$runtime/ui.rs"
     cat "$here/main.rs"
 } > "$tmp/xsend.rs"
