@@ -1311,6 +1311,8 @@ Since draft 0.13 stage 1 inserts stack and time checks into generated functions 
 
 What complete applications, web applications and nginx/Apache hosting need beyond this list is analysed in [`application-roadmap.md`](application-roadmap.md), with a proposed order and the decisions that have to be made first.
 
+Decided for the DOOM port ([`docs/doom-decisions.md`](docs/doom-decisions.md), decision D1): the `ui` effect will be extended with `draw_pixels` (a whole frame in one call), `poll_event` (non-blocking) and a key-release event. Specified here before it is implemented.
+
 Not planned for the POC: concurrency, FFI, `unsafe`, package management (fetching modules from outside the project), web frameworks.
 
 ## 19. Open questions

@@ -1,0 +1,3 @@
+# WAD files are never committed (decision D5); see ../README.md for where to get one.
+*
+!.gitignore
