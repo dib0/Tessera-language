@@ -20,6 +20,22 @@ set c = paint(c, 1, 8)
 c
 }
 
+note "Draft 0.20: ending a function with a call, returning a call, and passing the value in both branches of an `if` move it too."
+fn paint_returned(canvas: Canvas, at: Int) -> Canvas {
+if at < 0 {
+return canvas
+}
+return paint(canvas, at, 2)
+}
+
+fn paint_either(canvas: Canvas, at: Int) -> Canvas {
+var c = canvas
+set c = if at % 2 == 0 { paint(c, at, 3) } else { paint(c, at, 4) }
+c
+}
+
+fn paint_tail(canvas: Canvas, at: Int) -> Canvas = paint(canvas, at, 5)
+
 fn main() -> Unit uses io, time {
 var canvas = Canvas { pixels: repeat([0], 1000000), count: 0 }
 let start = monotonic()
@@ -32,4 +48,19 @@ set canvas = paint(canvas, 0, 9)
 set canvas = paint_twice(canvas)
 let kept = saved
 print("count \(canvas.count) first \(canvas.pixels[0]) second \(canvas.pixels[1]) saved \(kept.pixels[0]) \(kept.count) in place \(fast)")
+let again = monotonic()
+for i in range(0, 100000) {
+set canvas = paint_returned(canvas, i)
+set canvas = paint_either(canvas, i)
+set canvas = paint_tail(canvas, i)
+}
+let before_copy = canvas
+set canvas = paint_tail(canvas, 999999)
+print("returned, either and tail: \(canvas.pixels[0]) \(canvas.pixels[1]) \(canvas.pixels[999999]) kept \(before_copy.pixels[999999]) count \(canvas.count) in place \(monotonic() - again < 2000)")
+// Draft 0.20: a range whose start is not below its end is empty.
+var empty = 0
+for _ in range(5, 2) {
+set empty += 1
+}
+print("empty range ran \(empty) times, length \(length(range(3, 3)))")
 }

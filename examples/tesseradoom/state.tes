@@ -1,0 +1,279 @@
+// The game world's data and the helpers shared by the modules that change it (sectors, combat,
+// world, save). Positions are 16.16 fixed point, heights whole units, time in tics (1/35 s).
+// Effects: none.
+
+import std/fixed
+import std/math
+import std/plane
+import std/rng
+import level
+import movement
+import things
+
+note "A monster's state; the `match` in combat.think decides what happens in each."
+pub enum State {
+Idle
+Chase(stuck: Int)
+Attack(time: Int)
+Pain(time: Int)
+Dead(time: Int)
+}
+
+note "A thing in the world: monster, item, obstacle, barrel or decoration."
+pub type Mobj {
+kind: Int
+info: things.Info
+x: Int
+y: Int
+angle: Int
+sector: Int
+health: Int
+present: Bool
+state: State
+}
+
+note "What a moving sector does. Door heights are ceilings, lift and floor heights floors; `wait` is in tics, -1 for a door that stays open. A crusher moves its ceiling between `top` and 8 units above the floor."
+pub enum Motion {
+DoorOpening(top: Int, speed: Int, wait: Int)
+DoorWaiting(top: Int, speed: Int, time: Int, wait: Int)
+DoorClosing(top: Int, speed: Int, wait: Int)
+LiftLowering(low: Int, high: Int, speed: Int)
+LiftWaiting(low: Int, high: Int, speed: Int, time: Int)
+LiftRising(low: Int, high: Int, speed: Int)
+FloorLowering(target: Int, speed: Int)
+Crushing(top: Int, speed: Int, down: Bool, silent: Bool)
+Finished
+}
+
+pub type Mover {
+sector: Int
+motion: Motion
+}
+
+note "A sector whose light changes: `kind` is the sector special (1 blink, 2/3/4/12/13 strobe, 8 glow, 17 flicker), between `dark` and `bright`; `timer` counts down to the next change (for a glow its sign is the direction)."
+pub type Light {
+sector: Int
+kind: Int
+bright: Int
+dark: Int
+timer: Int
+}
+
+note "A flying projectile: a fireball, rocket, plasma ball or BFG ball. `owner` is the monster that fired it, or -1 for the player."
+pub type Missile {
+sprite: Text
+x: Int
+y: Int
+z: Int
+dx: Int
+dy: Int
+damage_min: Int
+damage_max: Int
+radius: Int
+splash: Bool
+owner: Int
+}
+
+note "A short animation at a place: bullet puffs, blood, explosions, teleport fog."
+pub type Effect {
+sprite: Text
+frames: Text
+x: Int
+y: Int
+z: Int
+time: Int
+speed: Int
+}
+
+note "A sound to play, at a map position (fixed)."
+pub type Sound {
+name: Text
+x: Int
+y: Int
+}
+
+note "The player's possessions. `ammo` and `max_ammo` are indexed by ammunition kind, `weapons` by weapon slot (see things.tes). Armor class 1 absorbs a third of the damage, class 2 half. Power-ups count down in tics."
+pub type Stats {
+health: Int
+armor: Int
+armor_class: Int
+ammo: List[Int]
+max_ammo: List[Int]
+weapons: List[Bool]
+weapon: Int
+keys: List[Text]
+kills: Int
+items: Int
+secrets: Int
+berserk: Bool
+invulnerable: Int
+radiation_suit: Int
+}
+
+note "One tic of input. `forward_move` and `side_move` are the original game's input values (walking 25 and 24, running 50 and 40): they push the player, who keeps momentum. `forward` and `sideways` move the player directly by that many units, for scripted tests. `weapon` picks a weapon slot, -1 for no change."
+pub type Input {
+forward: Int
+sideways: Int
+forward_move: Int
+side_move: Int
+turn: Int
+use: Bool
+fire: Bool
+weapon: Int
+}
+
+pub type World {
+level: level.Level
+skill: Int
+neighbors: List[List[Int]]
+centers: List[List[Int]]
+player: movement.Player
+stats: Stats
+mobjs: List[Mobj]
+movers: List[Mover]
+lights: List[Light]
+missiles: List[Missile]
+effects: List[Effect]
+switched: List[Int]
+sounds: List[Sound]
+tic: Int
+seed: Int
+message: Text
+message_time: Int
+cooldown: Int
+firing: Int
+fire_held: Bool
+use_held: Bool
+exited: Int
+momentum_x: Int
+momentum_y: Int
+damage_flash: Int
+bonus_flash: Int
+}
+
+pub fn no_input() -> Input = Input { forward: 0, sideways: 0, forward_move: 0, side_move: 0, turn: 0, use: false, fire: false, weapon: -1 }
+
+pub fn start_stats() -> Stats = Stats { health: 100, armor: 0, armor_class: 0, ammo: [50, 0, 0, 0], max_ammo: [200, 50, 50, 300], weapons: [true, true, false, false, false, false, false, false], weapon: 1, keys: [], kills: 0, items: 0, secrets: 0, berserk: false, invulnerable: 0, radiation_suit: 0 }
+
+// ---------- helpers ----------
+
+note "A random number from `low` to `high` (inclusive), advancing the world's seed."
+pub fn roll(world: World, low: Int, high: Int) -> List[Int] = rng.roll(world.seed, low, high)
+
+pub fn say(w: World, text: Text) -> World = w with { message: text, message_time: 105 }
+
+pub fn sound_at(world: World, name: Text, x: Int, y: Int) -> World {
+var w = world
+set w.sounds += [Sound { name: name, x: x, y: y }]
+w
+}
+
+pub fn sound_here(w: World, name: Text) -> World = sound_at(w, name, w.player.x, w.player.y)
+
+pub fn sector_sound(w: World, name: Text, sector: Int) -> World = sound_at(w, name, w.centers[sector][0], w.centers[sector][1])
+
+pub fn sector_floor(w: World, sector: Int) -> Int = w.level.sectors[sector].floor
+
+pub fn is_monster(m: Mobj) -> Bool {
+match m.info.role {
+.Monster(_) => true
+_ => false
+}
+}
+
+pub fn is_barrel(m: Mobj) -> Bool = m.info.role == .Barrel
+
+pub fn is_dead(m: Mobj) -> Bool {
+match m.state {
+.Dead(_) => true
+_ => false
+}
+}
+
+note "Whether a thing can be shot: a living monster or a barrel."
+pub fn is_target(m: Mobj) -> Bool = m.present and ((is_monster(m) and not is_dead(m)) or is_barrel(m))
+
+note "Whether a thing stops others from walking through it: obstacles, barrels and living monsters."
+pub fn is_solid(m: Mobj) -> Bool {
+if not m.present {
+return false
+}
+match m.info.role {
+.Obstacle => true
+.Barrel => true
+.Monster(_) => not is_dead(m)
+_ => false
+}
+}
+
+note "Whether a circle of `size` units at (x, y) overlaps a solid thing other than `self` (-1 for the player)."
+pub fn hits_thing(w: World, x: Int, y: Int, size: Int, self: Int) -> Bool {
+for i in range(0, length(w.mobjs)) {
+let m = w.mobjs[i]
+if i != self and is_solid(m) {
+let reach = fixed.from_int(size + m.info.radius)
+if math.abs(m.x - x) < reach and math.abs(m.y - y) < reach {
+return true
+}
+}
+}
+false
+}
+
+note "Whether a line is a wall for sight and shots: one-sided, or a two-sided line whose opening is closed."
+pub fn solid_line(l: level.Level, line: level.Linedef) -> Bool {
+if line.back < 0 {
+return true
+}
+let front = l.sectors[l.sidedefs[line.front].sector]
+let back = l.sectors[l.sidedefs[line.back].sector]
+math.min(front.ceiling, back.ceiling) <= math.max(front.floor, back.floor)
+}
+
+note "Whether the line between two points crosses a wall or a closed door, for monster sight, shots and explosions."
+pub fn blocked(w: World, x0: Int, y0: Int, x1: Int, y1: Int) -> Bool {
+let l = w.level
+for line in l.linedefs {
+if solid_line(l, line) {
+let a = l.vertexes[line.start]
+let b = l.vertexes[line.end]
+if plane.crosses(x0, y0, x1, y1, fixed.from_int(a.x), fixed.from_int(a.y), fixed.from_int(b.x), fixed.from_int(b.y)) {
+return true
+}
+}
+}
+false
+}
+
+pub fn distance_units(ax: Int, ay: Int, bx: Int, by: Int) -> Int {
+let dx = fixed.floor_int(ax - bx)
+let dy = fixed.floor_int(ay - by)
+math.isqrt(dx * dx + dy * dy)
+}
+
+pub fn add_effect(world: World, sprite: Text, frames: Text, x: Int, y: Int, z: Int, speed: Int) -> World {
+var w = world
+set w.effects += [Effect { sprite: sprite, frames: frames, x: x, y: y, z: z, time: 0, speed: speed }]
+w
+}
+
+note "Damage to the player: nothing while invulnerable; armor takes a third (class 1) or half (class 2) while it lasts."
+pub fn hurt_player(world: World, damage: Int) -> World {
+var w = world
+if damage <= 0 or w.stats.health <= 0 or w.stats.invulnerable > 0 {
+return w
+}
+let share = if w.stats.armor_class == 2 { damage / 2 } else { damage / 3 }
+let absorbed = math.min(w.stats.armor, share)
+set w.stats.armor -= absorbed
+if w.stats.armor == 0 {
+set w.stats.armor_class = 0
+}
+set w.stats.health = math.max(w.stats.health - (damage - absorbed), 0)
+set w.damage_flash = math.min(w.damage_flash + damage, 100)
+if w.stats.health == 0 {
+set w = sound_here(w, "DSPLDETH")
+return say(w, "You died - press use to try again")
+}
+sound_here(w, "DSPLPAIN")
+}

@@ -11,11 +11,13 @@ import movement
 import play
 import world
 import demo
+import state
+import save
 import std/math
 import std/palette
 import std/ppm
 
-fn usage() -> Text = "usage: tesseradoom [--wad FILE] info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
+fn usage() -> Text = "usage: tesseradoom [--wad FILE] start | info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
 
 fn load(path: Text) -> wad.Wad uses io, fs, env {
 let data = match read_bytes(path) {
@@ -80,6 +82,13 @@ match write_bytes(path, ppm.encode(geometry.screen_width(), geometry.screen_heig
 }
 }
 
+fn write_frame(a: play.Assets, pixels: List[Int], path: Text) -> Unit uses io, fs, env {
+match write_bytes(path, ppm.encode(geometry.screen_width(), geometry.screen_height(), pixels, a.palettes[0])) {
+.Ok(_) => print("wrote \(path)")
+.Error(_) => exit_with(2, "error: cannot write \(path)")
+}
+}
+
 fn command_argument(arguments: List[Text], index: Int) -> Text uses io, env {
 if index >= length(arguments) {
 exit_with(64, usage())
@@ -113,7 +122,7 @@ print("at \(p.x) \(p.y) \(p.angle) \(p.sector)")
 }
 }
 
-note "M8: the game world driven by commands, one per line: `forward N`, `back N`, `left N`, `right N` (units, in steps of 8 units per tic), `turn DEGREES`, `face X Y`, `goto X Y`, `use`, `fire`, `wait TICS`, `sector N`, `monsters`, `look FILE.ppm`. Prints the state after every command."
+note "M8: the game world driven by commands, one per line: `forward N`, `back N`, `left N`, `right N` (units, in steps of 8 units per tic), `turn DEGREES`, `face X Y`, `goto X Y`, `use`, `fire`, `wait TICS`, `sector N`, `monsters`, `weapon N`, `give`, `place X Y ANGLE`, `switch SIDEDEF`, `intermission FILE.ppm`, `save FILE`, `load FILE`, `look FILE.ppm`. Prints the state after every command."
 fn game_console(w: wad.Wad, l: level.Level, monsters: Bool) -> Unit uses io, fs, env {
 let trig = geometry.make_trig()
 let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
@@ -157,9 +166,35 @@ print("monster \(m.kind) at \(shift_right(m.x, 16)) \(shift_right(m.y, 16)) heal
 }
 "sector" => {
 let s = game.level.sectors[amount]
-print("sector \(amount) floor \(s.floor) ceiling \(s.ceiling)")
+print("sector \(amount) floor \(s.floor) ceiling \(s.ceiling) light \(s.light)")
 }
-"look" => if length(words) > 1 { write_image(w, render.render_world(scene, game.level.sectors, world.camera(game), trig, world.sprites(game), sprites), words[1]) }
+"look" => if length(words) > 1 { write_image(w, render.render_world(scene, game.level.sectors, game.switched, world.camera(game), trig, world.sprites(game), sprites), words[1]) }
+"weapon" => set game = world.tic(game, none with { weapon: amount - 1 }, trig)
+"give" => set game.stats = game.stats with { weapons: repeat([true], 8), ammo: game.stats.max_ammo, keys: ["blue", "yellow", "red"] }
+"place" => if length(words) >= 4 {
+let x = shift_left(value_or(parse_int(words[1]), 0), 16)
+let y = shift_left(value_or(parse_int(words[2]), 0), 16)
+set game.player = game.player with { x: x, y: y, angle: geometry.degrees_to_fine(value_or(parse_int(words[3]), 0)), sector: geometry.sector_at(l, x, y) }
+}
+"switch" => print("switch \(amount) \(game.switched[amount])")
+"intermission" => if length(words) > 1 {
+write_frame(play.load_assets(w), play.intermission_pixels(game, scene, play.load_assets(w)), words[1])
+}
+"save" => if length(words) > 1 {
+match write_text(words[1], save.write(game)) {
+.Ok(_) => print("saved \(words[1])")
+.Error(_) => print_error("cannot write \(words[1])")
+}
+}
+"load" => if length(words) > 1 {
+match read_text(words[1]) {
+.Ok(text) => match save.read(text, l) {
+.Ok(loaded) => set game = loaded
+.Error(message) => print_error(message)
+}
+.Error(_) => print_error("cannot read \(words[1])")
+}
+}
 "" => {}
 _ => print_error("unknown command `\(words[0])`")
 }
@@ -168,7 +203,7 @@ print(game_state(game))
 }
 
 note "Walks `amount` units: one tic of `input` per 8 units, the last tic shorter."
-fn walk_tics(start: world.World, trig: geometry.Trig, input: world.Input, amount: Int) -> world.World {
+fn walk_tics(start: state.World, trig: geometry.Trig, input: state.Input, amount: Int) -> state.World {
 var game = start
 var left = amount
 while left > 0 {
@@ -179,7 +214,9 @@ set left -= part
 game
 }
 
-fn state_name(s: world.State) -> Text {
+fn sound_name(s: state.Sound) -> Text = s.name
+
+fn state_name(s: state.State) -> Text {
 match s {
 .Idle => "idle"
 .Chase(_) => "chasing"
@@ -190,7 +227,7 @@ match s {
 }
 
 note "Turns the player towards a map point, in a tic without movement."
-fn face_point(start: world.World, trig: geometry.Trig, x: Int, y: Int) -> world.World {
+fn face_point(start: state.World, trig: geometry.Trig, x: Int, y: Int) -> state.World {
 let p = start.player
 let dx = shift_left(x, 16) - p.x
 let dy = shift_left(y, 16) - p.y
@@ -206,12 +243,12 @@ set best_dot = dot
 world.tic(start, world.no_input() with { turn: geometry.wrap_angle(best - p.angle) }, trig)
 }
 
-fn game_state(g: world.World) -> Text {
+fn game_state(g: state.World) -> Text {
 let p = g.player
-"tic \(g.tic) at \(shift_right(p.x, 16)) \(shift_right(p.y, 16)) angle \(p.angle * 360 / geometry.fine_angles()) sector \(p.sector) health \(g.stats.health) armor \(g.stats.armor) ammo \(g.stats.ammo) keys [\(join(g.stats.keys, " "))] items \(g.stats.items) kills \(g.stats.kills) secrets \(g.stats.secrets)\(if g.message_time > 0 { " message: \(g.message)" } else { "" })"
+"tic \(g.tic) at \(shift_right(p.x, 16)) \(shift_right(p.y, 16)) angle \(p.angle * 360 / geometry.fine_angles()) sector \(p.sector) health \(g.stats.health) armor \(g.stats.armor) ammo \(join(map(g.stats.ammo, to_text), "/")) weapon \(g.stats.weapon) keys [\(join(g.stats.keys, " "))] items \(g.stats.items) kills \(g.stats.kills) secrets \(g.stats.secrets)\(if g.exited > 0 { " exited \(g.exited) next \(world.next_map(g.level.name, g.exited == 2))" } else { "" }) missiles \(length(g.missiles)) effects \(length(g.effects))\(if length(g.sounds) > 0 { " sounds: \(join(map(g.sounds, sound_name), " "))" } else { "" })\(if g.message_time > 0 { " message: \(g.message)" } else { "" })"
 }
 
-fn main() -> Unit uses io, fs, env, time, ui {
+fn main() -> Unit uses io, fs, env, time, ui, audio {
 var arguments = args()
 var path = "WAD/freedoom1.wad"
 if length(arguments) >= 2 and arguments[0] == "--wad" {
@@ -251,7 +288,7 @@ let seconds = match index_of(arguments, "--seconds") {
 .Some(at) => if at + 1 < length(arguments) { value_or(parse_int(arguments[at + 1]), 0) } else { 0 }
 .None => 0
 }
-let result = play.run(scene, art.load_sprites(w), required_lump(w, "PLAYPAL"), seconds, uncapped, not contains(arguments, "--no-monsters"))
+let result = play.run(play.load_assets(w), l.name, 2, seconds, uncapped, not contains(arguments, "--no-monsters"))
 let took = result[1]
 print("\(result[0]) frames in \(took) ms: \(if took > 0 { result[0] * 1000 / took } else { 0 }) frames per second")
 }
@@ -275,7 +312,11 @@ print("at \(game.player.x) \(game.player.y) \(game.player.angle) \(game.player.s
 let d = load_demo(w, command_argument(arguments, 1))
 let l = load_level(w, demo.map_name(d))
 let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
-let result = play.watch(scene, art.load_sprites(w), required_lump(w, "PLAYPAL"), d.tics, d.skill)
+let result = play.watch(play.load_assets(w), scene, d.tics, d.skill)
+print("\(result[0]) frames in \(result[1]) ms")
+}
+"start" => {
+let result = play.run(play.load_assets(w), "", 2, 0, false, not contains(arguments, "--no-monsters"))
 print("\(result[0]) frames in \(result[1]) ms")
 }
 "game" => game_console(w, load_level(w, command_argument(arguments, 1)), not contains(arguments, "--no-monsters"))

@@ -307,6 +307,12 @@ impl T_Ui {
             0xffe1 | 0xffe2 => "Shift".into(),
             0xffe3 | 0xffe4 => "Control".into(),
             0xffe9 | 0xffea => "Alt".into(),
+            0xffbe..=0xffc9 => format!("F{}", keysym - 0xffbe + 1),
+            0xffff => "Delete".into(),
+            0xff50 => "Home".into(),
+            0xff57 => "End".into(),
+            0xff55 => "PageUp".into(),
+            0xff56 => "PageDown".into(),
             _ => return None,
         };
         Some(name)

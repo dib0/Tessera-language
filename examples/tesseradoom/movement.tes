@@ -7,6 +7,7 @@
 
 import std/fixed
 import std/math
+import std/plane
 import geometry
 import level
 
@@ -35,25 +36,8 @@ geometry.Camera { x: p.x, y: p.y, z: fixed.from_int(l.sectors[p.sector].floor + 
 note "Whether the player's circle at (x, y) (fixed) touches the segment a-b."
 pub fn touches(x: Int, y: Int, a: level.Vertex, b: level.Vertex) -> Bool = touches_radius(x, y, a, b, radius())
 
-note "Whether a circle of `size` units at (x, y) (fixed) touches the segment a-b. Distances are compared with 8 fraction bits, so squares stay below 2^52."
-pub fn touches_radius(x: Int, y: Int, a: level.Vertex, b: level.Vertex, size: Int) -> Bool {
-let r = fixed.from_int(size)
-// Quick rejection with the segment's bounding box.
-if x + r <= fixed.from_int(math.min(a.x, b.x)) or x - r >= fixed.from_int(math.max(a.x, b.x)) or y + r <= fixed.from_int(math.min(a.y, b.y)) or y - r >= fixed.from_int(math.max(a.y, b.y)) {
-return false
-}
-let lx = b.x - a.x
-let ly = b.y - a.y
-let ex = x - fixed.from_int(a.x)
-let ey = y - fixed.from_int(a.y)
-let length_squared = lx * lx + ly * ly
-// `ex` and `ey` are fixed, so the quotient is the fixed position (0.0 to 1.0) of the nearest point.
-let t = if length_squared == 0 { 0 } else { math.clamp((ex * lx + ey * ly) / length_squared, 0, fixed.one()) }
-let nx = shift_right(ex - lx * t, 8)
-let ny = shift_right(ey - ly * t, 8)
-let limit = shift_right(r, 8)
-nx * nx + ny * ny < limit * limit
-}
+note "Whether a circle of `size` units at (x, y) (fixed) touches the segment a-b (std/plane)."
+pub fn touches_radius(x: Int, y: Int, a: level.Vertex, b: level.Vertex, size: Int) -> Bool = plane.circle_touches(x, y, size, a.x, a.y, b.x, b.y)
 
 note "Whether a line stops a player whose feet are at `floor` (whole units)."
 pub fn blocks(l: level.Level, line: level.Linedef, floor: Int) -> Bool {

@@ -4,6 +4,7 @@
 
 import std/fixed
 import std/math
+import std/plane
 import geometry
 import level
 
@@ -30,7 +31,7 @@ let line = l.linedefs[index]
 if line.back < 0 {
 let a = l.vertexes[line.start]
 let b = l.vertexes[line.end]
-let h = geometry.intersect(camera.x, camera.y, rays.dx[x], rays.dy[x], a.x, a.y, b.x, b.y)
+let h = plane.intersect(camera.x, camera.y, rays.dx[x], rays.dy[x], a.x, a.y, b.x, b.y)
 if h.hit and (best.line < 0 or h.distance < best.distance) {
 let sector = l.sectors[l.sidedefs[line.front].sector]
 let top = project(fixed.from_int(sector.ceiling), camera.z, h.distance)

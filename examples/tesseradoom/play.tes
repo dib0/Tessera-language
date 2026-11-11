@@ -1,132 +1,497 @@
-// M7 and M8: the game in a window. A fixed simulation rate of 35 tics per second; each tic applies
-// the keys held down (tracked from `Key` and `KeyUp` events) to the world, then a frame is rendered
-// and shown with `draw_pixels`, with a status line drawn over it. Keys: arrows or W/S to walk,
-// Left/Right to turn, A/D (or , and .) to step sideways, Shift to run, Space or E to use (doors,
-// switches), Control or F to fire, Escape to quit.
+// The game in a window: title screen, menus (new game with episode and skill, load, save, help,
+// quit), the game at 35 tics per second with sound, the weapon in hand and a status line, the
+// screen between levels, and demo viewing. Menu graphics, the font and the sounds come from the
+// WAD. Keys in the game: arrows or W/S to walk, Left/Right to turn, A/D (or , and .) to step
+// sideways, Shift to run, Space or E to use, Control or F to fire, 1 to 7 to pick a weapon,
+// Escape for the menu, F2 to save, F3 to load.
 
-import std/palette
+import std/keys
 import std/math
+import std/palette
+import std/raster
+import std/sound
 import art
+import combat
 import geometry
+import level
 import render
+import save
+import state
+import things
+import wad
 import world
 
-pub type Controls {
-forward: Bool
-back: Bool
-turn_left: Bool
-turn_right: Bool
-step_left: Bool
-step_right: Bool
-run: Bool
-use: Bool
-fire: Bool
+note "The world input for one tic from the keys held down (std/keys), in the original game's units: forward 25 (50 running), sideways 24 (40), turning 80 fine angles (160)."
+pub fn input(k: keys.Keys) -> state.Input {
+let run = keys.held(k, "shift")
+let forward = if run { 50 } else { 25 }
+let side = if run { 40 } else { 24 }
+let turn = if run { 160 } else { 80 }
+let forward_move = (if keys.any_held(k, ["up", "w"]) { forward } else { 0 }) - (if keys.any_held(k, ["down", "s"]) { forward } else { 0 })
+let side_move = (if keys.any_held(k, ["d", "."]) { side } else { 0 }) - (if keys.any_held(k, ["a", ","]) { side } else { 0 })
+let turning = (if keys.held(k, "left") { turn } else { 0 }) - (if keys.held(k, "right") { turn } else { 0 })
+state.no_input() with { forward_move: forward_move, side_move: side_move, turn: turning, use: keys.any_held(k, [" ", "e"]), fire: keys.any_held(k, ["control", "f"]) }
+}
+
+// ---------- assets ----------
+
+note "Everything loaded once from the WAD: sprites, sounds, the font, menu pictures, the 14 palettes and the light tables."
+pub type Assets {
+wad: wad.Wad
+sprites: art.Sprites
+sounds: Map[Text, sound.Sound]
+font: raster.Font
+pictures: Map[Text, art.Graphic]
+palettes: List[List[Int]]
+shades: List[List[Int]]
+trig: geometry.Trig
+}
+
+fn menu_pictures() -> List[Text] = ["TITLEPIC", "HELP1", "M_DOOM", "M_NGAME", "M_LOADG", "M_SAVEG", "M_RDTHIS", "M_QUITG", "M_SKULL1", "M_SKULL2", "M_EPISOD", "M_EPI1", "M_EPI2", "M_EPI3", "M_EPI4", "M_NEWG", "M_SKILL", "M_JKILL", "M_ROUGH", "M_HURT", "M_ULTRA", "M_NMARE", "M_LSLEFT", "M_LSCNTR", "M_LSRGHT", "WIMAP0", "WIMAP1", "WIMAP2"]
+
+pub fn load_assets(w: wad.Wad) -> Assets {
+var pictures: Map[Text, art.Graphic] = [:]
+for name in menu_pictures() {
+match art.picture(w, name) {
+.Some(p) => set pictures = put(pictures, name, art.graphic(p))
+.None => {}
+}
+}
+// The heads-up font: characters 33 to 95 from the lumps STCFN033 to STCFN095.
+var glyphs: Map[Int, raster.Image] = [:]
+for code in range(33, 96) {
+match art.picture(w, "STCFN\(pad_left(to_text(code), 3, "0"))") {
+.Some(p) => set glyphs = put(glyphs, code, art.graphic(p).image)
+.None => {}
+}
+}
+// COLORMAP's light tables as lists, for darkening with raster.remap.
+let colormap = value_or(wad.lump(w, "COLORMAP"), bytes(repeat([0], 34 * 256)))
+var shades: List[List[Int]] = []
+for row in range(0, 32) {
+set shades += [byte_values(slice(colormap, row * 256, row * 256 + 256))]
+}
+let playpal = value_or(wad.lump(w, "PLAYPAL"), bytes(repeat([0], 768)))
+var palettes: List[List[Int]] = []
+for index in range(0, 14) {
+set palettes += [if length(playpal) >= (index + 1) * 768 { palette.read(playpal, index * 768) } else { palette.read(playpal, 0) }]
+}
+Assets { wad: w, sprites: art.load_sprites(w), sounds: art.load_sounds(w), font: raster.Font { glyphs: glyphs, space: 4, transparent: -1 }, pictures: pictures, palettes: palettes, shades: shades, trig: geometry.make_trig() }
+}
+
+// ---------- sound ----------
+
+fn play(a: Assets, name: Text, volume: Int, pan: Int) -> Unit uses audio {
+match get(a.sounds, name) {
+.Some(s) => sound.play(s, volume, pan)
+.None => {}
+}
+}
+
+note "Plays a tic's sounds where they happen (std/sound): quieter with distance (silent from 1,200 units) and panned to their side."
+fn play_world_sounds(a: Assets, g: state.World) -> Unit uses audio {
+let p = g.player
+for s in g.sounds {
+let heard = sound.position(shift_right(s.x - p.x, 16), shift_right(s.y - p.y, 16), a.trig.sine[p.angle], -a.trig.cosine[p.angle], 1200)
+if heard[0] > 0 {
+play(a, s.name, heard[0] * 9 / 10, heard[1])
+}
+}
+}
+
+// ---------- the application ----------
+
+note "Where the program is: `title`, `main`, `episode`, `skill`, `load`, `save`, `help` (menus), `game`, or `intermission` (between levels). `in_game` tells whether a game runs behind the menus."
+type App {
+screen: Text
+item: Int
+episode: Int
+in_game: Bool
+game: state.World
+scene: render.Scene
+start_stats: state.Stats
+controls: keys.Keys
+monsters: Bool
 quit: Bool
+message: Text
 }
 
-pub fn no_controls() -> Controls = Controls { forward: false, back: false, turn_left: false, turn_right: false, step_left: false, step_right: false, run: false, use: false, fire: false, quit: false }
-
-note "Applies a key press (`down` true) or release to the held controls."
-pub fn press(start: Controls, key: Text, down: Bool) -> Controls {
-var c = start
-match to_lower(key) {
-"up" => set c.forward = down
-"w" => set c.forward = down
-"down" => set c.back = down
-"s" => set c.back = down
-"left" => set c.turn_left = down
-"right" => set c.turn_right = down
-"a" => set c.step_left = down
-"," => set c.step_left = down
-"d" => set c.step_right = down
-"." => set c.step_right = down
-"shift" => set c.run = down
-" " => set c.use = down
-"e" => set c.use = down
-"control" => set c.fire = down
-"f" => set c.fire = down
-"escape" => set c.quit = c.quit or down
-_ => {}
+fn level_scene(a: Assets, map: Text) -> Option[render.Scene] {
+match level.load(a.wad, map) {
+.Ok(l) => .Some(render.prepare(l, art.load(a.wad, render.wanted_textures(l))))
+.Error(_) => .None
 }
-c
 }
 
-note "The world input for one tic, in the original game's units: forward 25 (50 running), sideways 24 (40), turning 80 fine angles (160)."
-pub fn input(c: Controls) -> world.Input {
-let forward = if c.run { 50 } else { 25 }
-let side = if c.run { 40 } else { 24 }
-let turn = if c.run { 160 } else { 80 }
-let forward_move = (if c.forward { forward } else { 0 }) - (if c.back { forward } else { 0 })
-let side_move = (if c.step_right { side } else { 0 }) - (if c.step_left { side } else { 0 })
-let turning = (if c.turn_left { turn } else { 0 }) - (if c.turn_right { turn } else { 0 })
-world.no_input() with { forward_move: forward_move, side_move: side_move, turn: turning, use: c.use, fire: c.fire }
+note "Starts a level with the given possessions."
+fn start_level(app: App, a: Assets, map: Text, skill: Int, stats: state.Stats) -> App {
+var next = app
+let scene = level_scene(a, map) else return app with { message: "No map named \(map)" }
+var game = world.enter(scene.level, skill, stats)
+if not app.monsters {
+set game = world.without_monsters(game)
+}
+set next = next with { scene: scene, game: game, start_stats: game.stats, in_game: true, screen: "game", controls: keys.none(), message: "" }
+next
 }
 
-note "The status line: health, armor, ammunition, keys and the latest message."
-pub fn status(w: world.World) -> Text {
-let keys = if length(w.stats.keys) == 0 { "" } else { "  KEYS \(join(w.stats.keys, " "))" }
-let message = if w.message_time > 0 { "   \(w.message)" } else { "" }
-"HEALTH \(w.stats.health)%  ARMOR \(w.stats.armor)%  AMMO \(w.stats.ammo)\(keys)\(message)"
-}
+fn slot_path(slot: Int) -> Text = "saves/tesseradoom-\(slot).sav"
 
-note "Converts palette indexes to colors into `colors`, which is changed in place when called as `set colors = to_colors(colors, ...)`."
-pub fn to_colors(colors: List[Int], pixels: List[Int], palette_colors: List[Int]) -> List[Int] {
-var out = colors
-for i in range(0, length(pixels)) {
-set out[i] = palette_colors[pixels[i]]
+fn slot_descriptions() -> List[Text] uses fs {
+var out: List[Text] = []
+for slot in range(0, 6) {
+let description = match read_text(slot_path(slot)) {
+.Ok(text) => save.describe(text)
+.Error(_) => ""
+}
+set out += [if description == "" { "empty slot" } else { description }]
 }
 out
 }
 
-note "Runs the game. `uncapped` renders as fast as possible (to measure the frame rate) instead of one frame per tic; `seconds` > 0 stops after that many seconds. Returns the number of frames shown and the time taken in milliseconds."
-pub fn run(scene: render.Scene, sprites: art.Sprites, playpal: Bytes, seconds: Int, uncapped: Bool, monsters: Bool) -> List[Int] uses ui, time {
-let l = scene.level
-let trig = geometry.make_trig()
+fn save_game(app: App, slot: Int) -> App uses fs {
+let _ = create_directory("saves")
+match write_text(slot_path(slot), save.write(app.game)) {
+.Ok(_) => app with { screen: "game", game: state.say(app.game, "Game saved") }
+.Error(_) => app with { message: "Could not save the game" }
+}
+}
+
+fn load_game(app: App, a: Assets, slot: Int) -> App uses fs {
+let text = match read_text(slot_path(slot)) {
+.Ok(t) => t
+.Error(_) => return app with { message: "That slot is empty" }
+}
+let h = save.header(text) else return app with { message: "Not a saved game" }
+let scene = level_scene(a, h[0]) else return app with { message: "No map named \(h[0])" }
+match save.read(text, scene.level) {
+.Ok(game) => app with { scene: scene, game: state.say(game, "Game loaded"), start_stats: game.stats, in_game: true, screen: "game", controls: keys.none(), message: "" }
+.Error(message) => app with { message: message }
+}
+}
+
+fn menu_items(screen: Text) -> List[Text] {
+match screen {
+"main" => ["M_NGAME", "M_LOADG", "M_SAVEG", "M_RDTHIS", "M_QUITG"]
+"episode" => ["M_EPI1", "M_EPI2", "M_EPI3", "M_EPI4"]
+"skill" => ["M_JKILL", "M_ROUGH", "M_HURT", "M_ULTRA", "M_NMARE"]
+"load" => ["0", "1", "2", "3", "4", "5"]
+"save" => ["0", "1", "2", "3", "4", "5"]
+_ => []
+}
+}
+
+note "A key press or release, by screen."
+fn key(app: App, a: Assets, name: Text, down: Bool) -> App uses audio, fs {
+var next = app
+if app.screen == "game" {
+if down and name == "Escape" {
+play(a, "DSSWTCHN", 80, 0)
+return next with { screen: "main", item: 0, controls: keys.none() }
+}
+if down and name == "F2" {
+play(a, "DSSWTCHN", 80, 0)
+return next with { screen: "save", item: 0, controls: keys.none() }
+}
+if down and name == "F3" {
+play(a, "DSSWTCHN", 80, 0)
+return next with { screen: "load", item: 0, controls: keys.none() }
+}
+set next.controls = keys.update(app.controls, if down { WindowEvent.Key(name) } else { WindowEvent.KeyUp(name) })
+// Cheat codes, typed during play: idkfa gives everything, iddqd makes the player invulnerable.
+if keys.typed(next.controls, "idkfa") {
+set next.controls = keys.forget_typed(next.controls)
+set next.game.stats = next.game.stats with { weapons: repeat([true], 8), ammo: next.game.stats.max_ammo, keys: ["blue", "yellow", "red"], armor: 200, armor_class: 2 }
+set next.game = state.say(next.game, "Very happy ammo added")
+}
+if keys.typed(next.controls, "iddqd") {
+set next.controls = keys.forget_typed(next.controls)
+set next.game.stats.invulnerable = 1000000
+set next.game = state.say(next.game, "Degreelessness mode on")
+}
+if down {
+match parse_int(name) {
+.Some(n) => if n >= 1 and n <= 7 {
+set next.game = combat.select_weapon(next.game, n - 1)
+}
+.None => {}
+}
+}
+return next
+}
+if not down {
+return next
+}
+if app.screen == "title" or app.screen == "help" {
+play(a, "DSSWTCHN", 80, 0)
+return next with { screen: "main", item: 0 }
+}
+if app.screen == "intermission" {
+let following = world.next_map(app.game.level.name, app.game.exited == 2)
+if following == "" {
+return next with { screen: "main", item: 0, in_game: false, message: "Episode complete. Well done!" }
+}
+return start_level(next, a, following, app.game.skill, app.game.stats)
+}
+let count = length(menu_items(app.screen))
+match name {
+"Up" => {
+play(a, "DSPSTOP", 60, 0)
+return next with { item: (app.item + count - 1) % count, message: "" }
+}
+"Down" => {
+play(a, "DSPSTOP", 60, 0)
+return next with { item: (app.item + 1) % count, message: "" }
+}
+"Escape" => {
+play(a, "DSSWTCHX", 80, 0)
+let back = match app.screen {
+"main" => if app.in_game { "game" } else { "title" }
+"skill" => "episode"
+_ => "main"
+}
+return next with { screen: back, item: if back == "skill" { 2 } else { 0 }, message: "" }
+}
+"Enter" => {}
+_ => return next
+}
+play(a, "DSPISTOL", 80, 0)
+match app.screen {
+"main" => match app.item {
+0 => return next with { screen: "episode", item: 0 }
+1 => return next with { screen: "load", item: 0 }
+2 => return if app.in_game { next with { screen: "save", item: 0 } } else { next with { message: "You can only save during a game" } }
+3 => return next with { screen: "help" }
+_ => return next with { quit: true }
+}
+"episode" => return next with { screen: "skill", episode: app.item + 1, item: 2 }
+"skill" => return start_level(next, a, "E\(app.episode)M1", app.item, state.start_stats())
+"load" => return load_game(next, a, app.item)
+"save" => return save_game(next, app.item)
+_ => {}
+}
+next
+}
+
+// ---------- drawing ----------
+
+fn picture_at(frame: raster.Image, a: Assets, name: Text, x: Int, y: Int) -> raster.Image {
+var out = frame
+match get(a.pictures, name) {
+.Some(g) => set out = raster.blit(out, g.image, x - g.left, y - g.top, -1)
+.None => {}
+}
+out
+}
+
+fn write(frame: raster.Image, a: Assets, x: Int, y: Int, message: Text) -> raster.Image = raster.text(frame, a.font, x, y, to_upper(message))
+
+fn centered(frame: raster.Image, a: Assets, y: Int, message: Text) -> raster.Image = write(frame, a, (geometry.screen_width() - raster.measure(a.font, to_upper(message))) / 2, y, message)
+
+fn black(a: Assets) -> raster.Image = raster.blank(geometry.screen_width(), geometry.screen_height(), 0)
+
+fn initial(color: Text) -> Text = to_upper(slice_text(color, 0, 1))
+
+note "The status line and message: health, armor, the current weapon's ammunition, keys."
+fn hud(frame: raster.Image, a: Assets, g: state.World) -> raster.Image {
+var out = frame
+let s = g.stats
+let kind = things.ammo_kind(s.weapon)
+let ammo = if kind < 0 { "" } else { "  \(to_upper(things.ammo_name(kind))) \(s.ammo[kind])/\(s.max_ammo[kind])" }
+let held_keys = if length(s.keys) == 0 { "" } else { "  KEYS \(join(map(s.keys, initial), ""))" }
+set out = write(out, a, 4, 190, "HEALTH \(s.health)%  ARMOR \(s.armor)%\(ammo)\(held_keys)")
+if g.message_time > 0 {
+set out = write(out, a, 4, 3, g.message)
+}
+out
+}
+
+note "The weapon in hand and its flash, placed with their sprite offsets as the format defines for weapon sprites (relative to the point (1, 32) of the screen)."
+fn weapon(frame: raster.Image, a: Assets, g: state.World) -> raster.Image {
+var out = frame
+if g.stats.health <= 0 {
+return out
+}
+for name in world.weapon_view(g) {
+match get(a.sprites.frames, name) {
+.Some(entry) => {
+let hand = art.graphic(a.sprites.pictures[entry / 2])
+set out = raster.blit(out, hand.image, 1 - hand.left, 32 - hand.top, -1)
+}
+.None => {}
+}
+}
+out
+}
+
+fn game_frame(app: App, a: Assets) -> raster.Image = view_frame(app.scene, app.game, a)
+
+fn view_frame(scene: render.Scene, g: state.World, a: Assets) -> raster.Image {
+var frame = raster.from_pixels(geometry.screen_width(), render.render_world(scene, g.level.sectors, g.switched, world.camera(g), a.trig, world.sprites(g), a.sprites))
+set frame = weapon(frame, a, g)
+set frame = hud(frame, a, g)
+frame
+}
+
+fn menu_frame(app: App, a: Assets, tic: Int, descriptions: List[Text]) -> raster.Image {
+var pixels = if app.in_game { raster.remap(game_frame(app, a), a.shades[18]) } else { raster.remap(picture_at(black(a), a, "TITLEPIC", 0, 0), a.shades[14]) }
+let skull = if (tic / 8) % 2 == 0 { "M_SKULL1" } else { "M_SKULL2" }
+let items = menu_items(app.screen)
+match app.screen {
+"main" => {
+set pixels = picture_at(pixels, a, "M_DOOM", 94, 2)
+for i in range(0, length(items)) {
+set pixels = picture_at(pixels, a, items[i], 97, 64 + i * 16)
+}
+set pixels = picture_at(pixels, a, skull, 65, 59 + app.item * 16)
+}
+"episode" => {
+set pixels = picture_at(pixels, a, "M_EPISOD", 54, 38)
+for i in range(0, length(items)) {
+set pixels = picture_at(pixels, a, items[i], 48, 63 + i * 16)
+}
+set pixels = picture_at(pixels, a, skull, 16, 58 + app.item * 16)
+}
+"skill" => {
+set pixels = picture_at(pixels, a, "M_NEWG", 96, 14)
+set pixels = picture_at(pixels, a, "M_SKILL", 54, 38)
+for i in range(0, length(items)) {
+set pixels = picture_at(pixels, a, items[i], 48, 63 + i * 16)
+}
+set pixels = picture_at(pixels, a, skull, 16, 58 + app.item * 16)
+}
+_ => {
+// Load and save: six slots with their descriptions.
+set pixels = picture_at(pixels, a, if app.screen == "load" { "M_LOADG" } else { "M_SAVEG" }, 72, 28)
+for i in range(0, 6) {
+let y = 59 + i * 16
+set pixels = picture_at(pixels, a, "M_LSLEFT", 72, y)
+for k in range(0, 24) {
+set pixels = picture_at(pixels, a, "M_LSCNTR", 80 + k * 8, y)
+}
+set pixels = picture_at(pixels, a, "M_LSRGHT", 272, y)
+set pixels = write(pixels, a, 80, y - 4, descriptions[i])
+}
+set pixels = picture_at(pixels, a, skull, 40, 54 + app.item * 16)
+}
+}
+if app.message != "" {
+set pixels = centered(pixels, a, 170, app.message)
+}
+pixels
+}
+
+fn intermission_frame(app: App, a: Assets) -> raster.Image = raster.from_pixels(geometry.screen_width(), intermission_pixels(app.game, app.scene, a))
+
+note "The screen between levels: the level's name, kills, items and secrets in percent, the time, and the next map."
+pub fn intermission_pixels(g: state.World, scene: render.Scene, a: Assets) -> List[Int] {
+let codes = code_points(g.level.name)
+let episode = if length(codes) == 4 { codes[1] - 49 } else { 0 }
+var pixels = picture_at(black(a), a, "WIMAP\(math.clamp(episode, 0, 2))", 0, 0)
+set pixels = raster.remap(pixels, a.shades[10])
+var monsters = 0
+var items = 0
+for m in g.mobjs {
+match m.info.role {
+.Monster(_) => if m.present {
+set monsters += 1
+}
+.Item(_) => set items += 1
+_ => {}
+}
+}
+var secrets = 0
+for s in scene.level.sectors {
+if s.special == 9 {
+set secrets += 1
+}
+}
+set pixels = centered(pixels, a, 40, "\(g.level.name) FINISHED")
+set pixels = centered(pixels, a, 70, "KILLS \(percent(g.stats.kills, monsters))%")
+set pixels = centered(pixels, a, 86, "ITEMS \(percent(g.stats.items, items))%")
+set pixels = centered(pixels, a, 102, "SECRETS \(percent(g.stats.secrets, secrets))%")
+set pixels = centered(pixels, a, 118, "TIME \(g.tic / 35 / 60):\(pad_left(to_text(g.tic / 35 % 60), 2, "0"))")
+let following = world.next_map(g.level.name, g.exited == 2)
+set pixels = centered(pixels, a, 150, if following == "" { "PRESS A KEY" } else { "NEXT: \(following) - PRESS A KEY" })
+pixels.pixels
+}
+
+fn percent(part: Int, whole: Int) -> Int = if whole <= 0 { 100 } else { math.min(part * 100 / whole, 100) }
+
+note "Runs the game in a window until the player quits. With `start_map` empty it starts at the title screen, otherwise directly in that map. `uncapped` renders as fast as possible (to measure), `seconds` > 0 stops after that many seconds. Returns the number of frames shown and the time taken in milliseconds."
+pub fn run(a: Assets, start_map: Text, skill: Int, seconds: Int, uncapped: Bool, monsters: Bool) -> List[Int] uses ui, time, audio, fs {
 let scale = 2
 let width = geometry.screen_width()
 let height = geometry.screen_height()
-open_window("Tesseradoom - \(l.name)", width * scale, height * scale)
-let palette_colors = palette.read(playpal, 0)
-var colors = repeat([0], width * height)
-var game = world.create(l)
-if not monsters {
-set game = world.without_monsters(game)
+open_window("Tesseradoom", width * scale, height * scale)
+let first = if start_map == "" { "E1M1" } else { start_map }
+let scene = level_scene(a, first) else return [0, 0]
+let game = world.create_at_skill(scene.level, skill)
+var app = App { screen: "title", item: 0, episode: 1, in_game: false, game: game, scene: scene, start_stats: game.stats, controls: keys.none(), monsters: monsters, quit: false, message: "" }
+if start_map != "" {
+set app = start_level(app, a, start_map, skill, state.start_stats())
 }
-var controls = no_controls()
+var slots = slot_descriptions()
 let started = monotonic()
 var tics = 0
 var frames = 0
-while not controls.quit {
-// Input: everything that arrived since the last frame.
+var dead_since = 0
+while not app.quit {
 var waiting = true
 while waiting {
 match poll_event() {
 .Some(event) => match event {
-.Key(name) => set controls = press(controls, name, true)
-.KeyUp(name) => set controls = press(controls, name, false)
-.Close => set controls = controls with { quit: true }
+.Key(name) => {
+let before = app.screen
+set app = key(app, a, name, true)
+if app.screen == "load" or app.screen == "save" or before == "save" {
+set slots = slot_descriptions()
+}
+}
+.KeyUp(name) => set app = key(app, a, name, false)
+.Close => set app.quit = true
 .Click(_, _, _) => {}
 }
 .None => set waiting = false
 }
 }
-// Simulation: catch up to 35 tics per second of elapsed time.
 let now = monotonic() - started
-while tics < now * 35 / 1000 {
-set game = world.tic(game, input(controls), trig)
+let due = now * 35 / 1000
+while tics < due {
+if app.screen == "game" {
+set app.game = world.tic(app.game, input(app.controls), a.trig)
+play_world_sounds(a, app.game)
+if app.game.exited > 0 {
+set app.screen = "intermission"
+set app.controls = keys.release_all(app.controls)
+}
+if app.game.stats.health <= 0 {
+set dead_since += 1
+if dead_since > 35 and keys.any_held(app.controls, [" ", "e"]) {
+set dead_since = 0
+set app = start_level(app, a, app.game.level.name, app.game.skill, app.start_stats)
+}
+} else {
+set dead_since = 0
+}
+}
 set tics += 1
 }
-set colors = to_colors(colors, render.render_world(scene, game.level.sectors, world.camera(game), trig, world.sprites(game), sprites), palette_colors)
-draw_pixels(0, 0, width, colors, scale)
-draw_text(9, height * scale - 21, status(game), rgb(0, 0, 0))
-draw_text(8, height * scale - 22, status(game), rgb(255, 220, 120))
+let frame = match app.screen {
+"game" => game_frame(app, a)
+"intermission" => intermission_frame(app, a)
+"title" => picture_at(black(a), a, "TITLEPIC", 0, 0)
+"help" => picture_at(black(a), a, "HELP1", 0, 0)
+_ => menu_frame(app, a, tics, slots)
+}
+let palette_index = if app.screen == "game" { world.palette_index(app.game) } else { 0 }
+draw_pixels(0, 0, width, raster.remap(frame, a.palettes[palette_index]).pixels, scale)
 present()
 set frames += 1
 if seconds > 0 and now >= seconds * 1000 {
-set controls = controls with { quit: true }
+set app.quit = true
 }
 if not uncapped {
-// Wait for the next tic.
 // Rounded up, so the loop never wakes just before the tic is due and renders it twice.
 let next = ((tics + 1) * 1000 + 34) / 35
 let wait = next - (monotonic() - started)
@@ -138,17 +503,13 @@ sleep(wait)
 [frames, monotonic() - started]
 }
 
-note "Plays back demo input in the window at 35 tics per second; any key or closing the window stops. Returns the frames shown and the time taken."
-pub fn watch(scene: render.Scene, sprites: art.Sprites, playpal: Bytes, tics: List[world.Input], skill: Int) -> List[Int] uses ui, time {
-let l = scene.level
-let trig = geometry.make_trig()
+note "Plays back demo input in the window at 35 tics per second, with sound; any key or closing the window stops. Returns the frames shown and the time taken."
+pub fn watch(a: Assets, scene: render.Scene, tics: List[state.Input], skill: Int) -> List[Int] uses ui, time, audio {
 let scale = 2
 let width = geometry.screen_width()
 let height = geometry.screen_height()
-open_window("Tesseradoom - demo of \(l.name)", width * scale, height * scale)
-let palette_colors = palette.read(playpal, 0)
-var colors = repeat([0], width * height)
-var game = world.create_at_skill(l, skill)
+open_window("Tesseradoom - demo of \(scene.level.name)", width * scale, height * scale)
+var game = world.create_at_skill(scene.level, skill)
 let started = monotonic()
 var done = 0
 var frames = 0
@@ -164,12 +525,12 @@ _ => {}
 }
 let due = math.min((monotonic() - started) * 35 / 1000, length(tics))
 while done < due {
-set game = world.tic(game, tics[done], trig)
+set game = world.tic(game, tics[done], a.trig)
+play_world_sounds(a, game)
 set done += 1
 }
-set colors = to_colors(colors, render.render_world(scene, game.level.sectors, world.camera(game), trig, world.sprites(game), sprites), palette_colors)
-draw_pixels(0, 0, width, colors, scale)
-draw_text(8, height * scale - 22, "DEMO tic \(done)  \(status(game))", rgb(255, 220, 120))
+let frame = write(view_frame(scene, game, a), a, 250, 3, "DEMO \(done)")
+draw_pixels(0, 0, width, raster.remap(frame, a.palettes[world.palette_index(game)]).pixels, scale)
 present()
 set frames += 1
 sleep(5)

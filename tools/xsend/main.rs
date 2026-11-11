@@ -3,7 +3,7 @@
 //
 //   xsend <window-id> click <x> <y> [button]
 //   xsend <window-id> key <name>        (a single ASCII character, Escape, Enter, Left, Up,
-//                                        Right, Down, Control, Shift, Alt)
+//                                        Right, Down, Control, Shift, Alt, F1 to F12)
 //   xsend <window-id> keyup <name>      (the release of such a key)
 //   xsend <window-id> close             (window manager close request)
 //
@@ -41,6 +41,7 @@ fn xsend_main() {
                 "Shift" => 0xffe1,
                 "Control" => 0xffe3,
                 "Alt" => 0xffe9,
+                f if f.len() >= 2 && f.starts_with('F') && f[1..].parse::<u32>().map_or(false, |n| (1..=12).contains(&n)) => 0xffbe + f[1..].parse::<u32>().unwrap() - 1,
                 s if s.len() == 1 => s.as_bytes()[0] as u32,
                 _ => { eprintln!("unsupported key"); std::process::exit(2) }
             };

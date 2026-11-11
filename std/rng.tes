@@ -1,0 +1,19 @@
+// std/rng: a seeded, repeatable random number generator for games, simulations and tests: the
+// same seed always gives the same numbers, on every platform. Not for secrets; use the built-in
+// `random_int` (effect `random`) for those. A linear congruential generator modulo 2^31 whose
+// products stay below 2^62. Effects: none.
+
+note "The next seed after `seed` (0 to 2^31 - 1)."
+pub fn next(seed: Int) -> Int = (seed * 1103515245 + 12345) % 2147483648
+
+note "A number from 0 to 255 and the next seed: [value, seed]."
+pub fn byte(seed: Int) -> List[Int] {
+let n = next(seed)
+[shift_right(n, 16) % 256, n]
+}
+
+note "A number from `low` to `high` (inclusive, at most 256 apart for an even spread) and the next seed: [value, seed]."
+pub fn roll(seed: Int, low: Int, high: Int) -> List[Int] {
+let r = byte(seed)
+[low + r[0] * (high - low + 1) / 256, r[1]]
+}

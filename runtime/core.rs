@@ -180,7 +180,9 @@ fn t_replace_at<T: Clone>(mut l: Rc<Vec<T>>, i: i64, x: T, loc: &str) -> Rc<Vec<
     l
 }
 fn t_range(start: i64, end: i64, loc: &str) -> Rc<Vec<i64>> {
-    if start > end { t_fail("R004", format!("invalid range({}, {}): start is greater than end", start, end), loc) }
+    // Empty when start >= end (draft 0.20; before, start > end was R004).
+    let _ = loc;
+    if start >= end { return Rc::new(Vec::new()); }
     t_charge((end - start) as usize * 8);
     Rc::new((start..end).collect())
 }

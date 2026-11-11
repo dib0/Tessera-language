@@ -180,6 +180,21 @@ return runtime_text.std_palette()
 if path == "std/ppm" {
 return runtime_text.std_ppm()
 }
+if path == "std/raster" {
+return runtime_text.std_raster()
+}
+if path == "std/sound" {
+return runtime_text.std_sound()
+}
+if path == "std/keys" {
+return runtime_text.std_keys()
+}
+if path == "std/plane" {
+return runtime_text.std_plane()
+}
+if path == "std/rng" {
+return runtime_text.std_rng()
+}
 ""
 }
 

@@ -5,6 +5,9 @@
 // that darken a palette index. Effects: none.
 
 import std/bytes
+import std/math
+import std/raster
+import std/sound
 import wad
 
 note "A picture or texture as palette indexes, column by column (`x * height + y`); -1 is transparent."
@@ -158,4 +161,45 @@ set frames = put(frames, from_code_points(slice(codes, 0, 4) + slice(codes, 6, 8
 }
 }
 Sprites { pictures: pictures, frames: frames }
+}
+
+note "Every sound effect lump (names starting with DS, format 3): an 8-byte header with the sample rate and count, then the samples, of which the first and last 16 are padding."
+pub fn load_sounds(w: wad.Wad) -> Map[Text, sound.Sound] {
+var sounds: Map[Text, sound.Sound] = [:]
+for index in range(0, length(w.lumps)) {
+let lump = w.lumps[index]
+if starts_with(lump.name, "DS") and lump.size > 40 {
+let data = wad.lump_data(w, index)
+if bytes.read_u16_le(data, 0) == 3 {
+let count = math.min(bytes.read_u32_le(data, 4), length(data) - 8)
+if count > 32 {
+set sounds = put(sounds, lump.name, sound.Sound { samples: slice(data, 24, 8 + count - 16), rate: bytes.read_u16_le(data, 2) })
+}
+}
+}
+}
+sounds
+}
+
+note "A picture lump by name, such as a menu graphic (`M_DOOM`) or a font character (`STCFN065`)."
+pub fn picture(w: wad.Wad, name: Text) -> Option[Picture] {
+let data = wad.lump(w, name) else return .None
+.Some(decode_picture(name, data))
+}
+
+note "A picture as a std/raster image (row by row, -1 transparent), with the offsets that place it."
+pub type Graphic {
+image: raster.Image
+left: Int
+top: Int
+}
+
+pub fn graphic(p: Picture) -> Graphic {
+var pixels = repeat([-1], p.width * p.height)
+for x in range(0, p.width) {
+for y in range(0, p.height) {
+set pixels[y * p.width + x] = p.pixels[x * p.height + y]
+}
+}
+Graphic { image: raster.Image { width: p.width, height: p.height, pixels: pixels }, left: p.left, top: p.top }
 }

@@ -1,0 +1,60 @@
+// std/keys: which keys are held down, from the `Key` and `KeyUp` window events, and what was
+// typed recently (for shortcuts and codes). Key names are compared in lower case, so Shift does
+// not matter. Effects: none.
+
+pub type Keys {
+held: List[Text]
+typed: Text
+}
+
+pub fn none() -> Keys = Keys { held: [], typed: "" }
+
+note "The keys after a window event: `Key` holds a key down and adds a one-character key to the typed text (the last 32 characters are kept), `KeyUp` lets go. Other events change nothing."
+pub fn update(keys: Keys, event: WindowEvent) -> Keys {
+match event {
+.Key(name) => {
+let lower = to_lower(name)
+let held = if contains(keys.held, lower) { keys.held } else { keys.held + [lower] }
+var typed = keys.typed
+if length(name) == 1 {
+set typed += lower
+if length(typed) > 32 {
+set typed = slice_text(typed, length(typed) - 32, length(typed))
+}
+}
+keys with { held: held, typed: typed }
+}
+.KeyUp(name) => keys with { held: filter_out(keys.held, to_lower(name)) }
+_ => keys
+}
+}
+
+fn filter_out(names: List[Text], name: Text) -> List[Text] {
+var out: List[Text] = []
+for n in names {
+if n != name {
+set out += [n]
+}
+}
+out
+}
+
+pub fn held(keys: Keys, name: Text) -> Bool = contains(keys.held, to_lower(name))
+
+note "Whether any of the named keys is held."
+pub fn any_held(keys: Keys, names: List[Text]) -> Bool {
+for name in names {
+if held(keys, name) {
+return true
+}
+}
+false
+}
+
+note "Whether the typed text ends with `word` (lower case); use `forget_typed` after acting on it."
+pub fn typed(keys: Keys, word: Text) -> Bool = ends_with(keys.typed, to_lower(word))
+
+pub fn forget_typed(keys: Keys) -> Keys = keys with { typed: "" }
+
+note "Lets go of every key, for example when a menu opens."
+pub fn release_all(keys: Keys) -> Keys = keys with { held: [] }

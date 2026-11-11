@@ -1,0 +1,186 @@
+// Saved games: the world written as text, one record per line, and read back on top of a freshly
+// loaded level. Everything that changes while playing is saved (player, possessions, sector
+// heights and lights, used specials, switches, things, moving sectors, light effects,
+// projectiles); short-lived effects and messages are not. Effects: none; play.tes reads and
+// writes the files.
+
+import level
+import state
+import things
+import world
+
+fn number(word: Text) -> Int = value_or(parse_int(word), 0)
+
+fn flag(value: Bool) -> Text = if value { "1" } else { "0" }
+
+fn monster_state(s: state.State) -> Text {
+match s {
+.Idle => "idle 0"
+.Chase(n) => "chase \(n)"
+.Attack(n) => "attack \(n)"
+.Pain(n) => "pain \(n)"
+.Dead(n) => "dead \(n)"
+}
+}
+
+fn read_state(name: Text, n: Int) -> state.State {
+match name {
+"chase" => .Chase(n)
+"attack" => .Attack(n)
+"pain" => .Pain(n)
+"dead" => .Dead(n)
+_ => .Idle
+}
+}
+
+fn motion(m: state.Motion) -> Text {
+match m {
+.DoorOpening(top, speed, wait) => "door-opening \(top) \(speed) \(wait) 0"
+.DoorWaiting(top, speed, time, wait) => "door-waiting \(top) \(speed) \(time) \(wait)"
+.DoorClosing(top, speed, wait) => "door-closing \(top) \(speed) \(wait) 0"
+.LiftLowering(low, high, speed) => "lift-lowering \(low) \(high) \(speed) 0"
+.LiftWaiting(low, high, speed, time) => "lift-waiting \(low) \(high) \(speed) \(time)"
+.LiftRising(low, high, speed) => "lift-rising \(low) \(high) \(speed) 0"
+.FloorLowering(target, speed) => "floor-lowering \(target) \(speed) 0 0"
+.Crushing(top, speed, down, silent) => "crushing \(top) \(speed) \(flag(down)) \(flag(silent))"
+.Finished => "finished 0 0 0 0"
+}
+}
+
+fn read_motion(name: Text, a: Int, b: Int, c: Int, d: Int) -> state.Motion {
+match name {
+"door-opening" => .DoorOpening(a, b, c)
+"door-waiting" => .DoorWaiting(a, b, c, d)
+"door-closing" => .DoorClosing(a, b, c)
+"lift-lowering" => .LiftLowering(a, b, c)
+"lift-waiting" => .LiftWaiting(a, b, c, d)
+"lift-rising" => .LiftRising(a, b, c)
+"floor-lowering" => .FloorLowering(a, b)
+"crushing" => .Crushing(a, b, c == 1, d == 1)
+_ => .Finished
+}
+}
+
+fn numbers(values: List[Int]) -> Text = join(map(values, to_text), " ")
+
+fn flags(values: List[Bool]) -> Text = join(map(values, flag), "")
+
+note "The text of a saved game."
+pub fn write(w: state.World) -> Text {
+let p = w.player
+let s = w.stats
+var out = ["tesseradoom-save 1", "map \(w.level.name) \(w.skill) \(w.tic) \(w.seed) \(w.exited)"]
+set out += ["player \(p.x) \(p.y) \(p.angle) \(p.sector) \(w.momentum_x) \(w.momentum_y)"]
+set out += ["stats \(s.health) \(s.armor) \(s.armor_class) \(numbers(s.ammo)) \(numbers(s.max_ammo)) \(flags(s.weapons)) \(s.weapon) \(s.kills) \(s.items) \(s.secrets) \(flag(s.berserk)) \(s.invulnerable) \(s.radiation_suit)"]
+set out += ["keys \(join(s.keys, " "))"]
+set out += ["timers \(w.cooldown) \(w.firing)"]
+for i in range(0, length(w.level.sectors)) {
+let sector = w.level.sectors[i]
+set out += ["sector \(i) \(sector.floor) \(sector.ceiling) \(sector.light) \(sector.special)"]
+}
+for i in range(0, length(w.level.linedefs)) {
+set out += ["line \(i) \(w.level.linedefs[i].special)"]
+}
+for i in range(0, length(w.switched)) {
+if w.switched[i] != 0 {
+set out += ["switch \(i) \(w.switched[i])"]
+}
+}
+for m in w.mobjs {
+set out += ["mobj \(m.kind) \(m.x) \(m.y) \(m.angle) \(m.sector) \(m.health) \(flag(m.present)) \(monster_state(m.state))"]
+}
+for m in w.movers {
+set out += ["mover \(m.sector) \(motion(m.motion))"]
+}
+for l in w.lights {
+set out += ["light \(l.sector) \(l.kind) \(l.bright) \(l.dark) \(l.timer)"]
+}
+for m in w.missiles {
+set out += ["missile \(m.sprite) \(m.x) \(m.y) \(m.z) \(m.dx) \(m.dy) \(m.damage_min) \(m.damage_max) \(m.radius) \(flag(m.splash)) \(m.owner)"]
+}
+join(out, "\n") + "\n"
+}
+
+note "The map and skill a saved game needs, read from its second line, or .None for a text that is not a saved game."
+pub fn header(text: Text) -> Option[List[Text]] {
+let rows = lines(text)
+if length(rows) < 2 or rows[0] != "tesseradoom-save 1" {
+return .None
+}
+let words = split(rows[1], " ")
+if length(words) < 4 or words[0] != "map" {
+return .None
+}
+.Some([words[1], words[2], words[3]])
+}
+
+note "A one-line description for the save menu: map and game time."
+pub fn describe(text: Text) -> Text {
+match header(text) {
+.Some(h) => {
+let seconds = number(h[2]) / 35
+"\(h[0])  \(seconds / 60):\(pad_left(to_text(seconds % 60), 2, "0"))"
+}
+.None => ""
+}
+}
+
+fn bits(text: Text) -> List[Bool] {
+var out: List[Bool] = []
+for c in split(text, "") {
+set out += [c == "1"]
+}
+out
+}
+
+note "The world of a saved game, on top of `l`, the freshly loaded level it names."
+pub fn read(text: Text, l: level.Level) -> Result[state.World, Text] {
+let h = header(text) else return .Error("not a saved game")
+if h[0] != l.name {
+return .Error("the save is for \(h[0]), not \(l.name)")
+}
+var w = world.create_at_skill(l, number(h[1]))
+// The saved records replace what a fresh level starts with.
+set w.mobjs = []
+set w.lights = []
+for row in lines(text) {
+let v = split(row, " ")
+match v[0] {
+"map" => {
+set w.tic = number(v[3])
+set w.seed = number(v[4])
+set w.exited = number(v[5])
+}
+"player" => {
+set w.player = w.player with { x: number(v[1]), y: number(v[2]), angle: number(v[3]), sector: number(v[4]) }
+set w.momentum_x = number(v[5])
+set w.momentum_y = number(v[6])
+}
+"stats" => if length(v) >= 20 {
+set w.stats = w.stats with { health: number(v[1]), armor: number(v[2]), armor_class: number(v[3]), ammo: [number(v[4]), number(v[5]), number(v[6]), number(v[7])], max_ammo: [number(v[8]), number(v[9]), number(v[10]), number(v[11])], weapons: bits(v[12]), weapon: number(v[13]), kills: number(v[14]), items: number(v[15]), secrets: number(v[16]), berserk: v[17] == "1", invulnerable: number(v[18]), radiation_suit: number(v[19]) }
+}
+"keys" => set w.stats.keys = filter(slice(v, 1, length(v)), not_empty)
+"timers" => {
+set w.cooldown = number(v[1])
+set w.firing = number(v[2])
+}
+"sector" => {
+let i = number(v[1])
+set w.level.sectors[i] = w.level.sectors[i] with { floor: number(v[2]), ceiling: number(v[3]), light: number(v[4]), special: number(v[5]) }
+}
+"line" => set w.level.linedefs[number(v[1])].special = number(v[2])
+"switch" => set w.switched[number(v[1])] = number(v[2])
+"mobj" => {
+let kind = number(v[1])
+set w.mobjs += [state.Mobj { kind: kind, info: things.info(kind), x: number(v[2]), y: number(v[3]), angle: number(v[4]), sector: number(v[5]), health: number(v[6]), present: v[7] == "1", state: read_state(v[8], number(v[9])) }]
+}
+"mover" => set w.movers += [state.Mover { sector: number(v[1]), motion: read_motion(v[2], number(v[3]), number(v[4]), number(v[5]), number(v[6])) }]
+"light" => set w.lights += [state.Light { sector: number(v[1]), kind: number(v[2]), bright: number(v[3]), dark: number(v[4]), timer: number(v[5]) }]
+"missile" => set w.missiles += [state.Missile { sprite: v[1], x: number(v[2]), y: number(v[3]), z: number(v[4]), dx: number(v[5]), dy: number(v[6]), damage_min: number(v[7]), damage_max: number(v[8]), radius: number(v[9]), splash: v[10] == "1", owner: number(v[11]) }]
+_ => {}
+}
+}
+.Ok(w)
+}
+
+fn not_empty(t: Text) -> Bool = t != ""

@@ -4,7 +4,7 @@
 // side move as signed bytes, the turn as a signed byte that counts 256ths of a 16-bit angle, and
 // buttons: 1 fire, 2 use), ending with byte 0x80. Effects: none.
 
-import world
+import state
 
 pub type Demo {
 skill: Int
@@ -12,7 +12,7 @@ episode: Int
 map: Int
 players: Int
 console: Int
-tics: List[world.Input]
+tics: List[state.Input]
 }
 
 fn signed(value: Int) -> Int = if value >= 128 { value - 256 } else { value }
@@ -37,7 +37,7 @@ if data[9 + i] != 0 {
 set console += 1
 }
 }
-var tics: List[world.Input] = []
+var tics: List[state.Input] = []
 var at = 13
 while at < length(data) and data[at] != 128 {
 let mine = at + console * 4
@@ -46,7 +46,7 @@ return .Error("the demo ends in the middle of a tic")
 }
 let buttons = data[mine + 3]
 // The turn byte is the high byte of a 16-bit angle; a fine angle is 8 of those units.
-set tics += [world.no_input() with { forward_move: signed(data[mine]), side_move: signed(data[mine + 1]), turn: signed(data[mine + 2]) * 32, fire: bit_and(buttons, 1) != 0, use: bit_and(buttons, 2) != 0 }]
+set tics += [state.no_input() with { forward_move: signed(data[mine]), side_move: signed(data[mine + 1]), turn: signed(data[mine + 2]) * 32, fire: bit_and(buttons, 1) != 0, use: bit_and(buttons, 2) != 0 }]
 set at += players * 4
 }
 .Ok(Demo { skill: data[1], episode: data[2], map: data[3], players: players, console: console, tics: tics })

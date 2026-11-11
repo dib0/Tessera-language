@@ -1,0 +1,146 @@
+// std/raster: images drawn in software. An image is a grid of Int values, row by row from the
+// top left: colors made with `rgb` (draw it with `draw_pixels`), or palette indexes (turn them
+// into colors with `remap`). Every function returns the changed image and changes it in place
+// when called as `set image = raster.f(image, ...)`. Drawing is clipped to the image.
+// Effects: none.
+
+import std/math
+
+pub type Image {
+width: Int
+height: Int
+pixels: List[Int]
+}
+
+note "A bitmap font: one image per character code, drawn with `transparent` pixels left out. `space` is the width of a character the font does not have."
+pub type Font {
+glyphs: Map[Int, Image]
+space: Int
+transparent: Int
+}
+
+note "A `width` x `height` image filled with `value`. R010 for a side that is not positive."
+pub fn blank(width: Int, height: Int, value: Int) -> Image {
+if width <= 0 or height <= 0 {
+fail("raster.blank: the image is \(width) x \(height); both sides must be positive")
+}
+Image { width: width, height: height, pixels: repeat([value], width * height) }
+}
+
+note "An image from a list of values, `width` per row. R010 if the length is not a multiple of `width`."
+pub fn from_pixels(width: Int, pixels: List[Int]) -> Image {
+if width <= 0 or length(pixels) % width != 0 {
+fail("raster.from_pixels: \(length(pixels)) values do not make rows of \(width)")
+}
+Image { width: width, height: length(pixels) / width, pixels: pixels }
+}
+
+note "The value at (x, y), or `outside` when that is not in the image."
+pub fn pixel(image: Image, x: Int, y: Int, outside: Int) -> Int = if x < 0 or y < 0 or x >= image.width or y >= image.height { outside } else { image.pixels[y * image.width + x] }
+
+note "Fills the rectangle with its top-left corner at (x, y)."
+pub fn fill(image: Image, x: Int, y: Int, width: Int, height: Int, value: Int) -> Image {
+var out = image
+let left = math.max(x, 0)
+let right = math.min(x + width, out.width)
+let top = math.max(y, 0)
+let bottom = math.min(y + height, out.height)
+if left >= right or top >= bottom {
+return out
+}
+for row in range(top, bottom) {
+for column in range(left, right) {
+set out.pixels[row * out.width + column] = value
+}
+}
+out
+}
+
+note "A straight line from (x0, y0) to (x1, y1), both ends included, with integer (Bresenham) steps."
+pub fn line(image: Image, x0: Int, y0: Int, x1: Int, y1: Int, value: Int) -> Image {
+var out = image
+let dx = math.abs(x1 - x0)
+let dy = -math.abs(y1 - y0)
+let step_x = if x0 < x1 { 1 } else { -1 }
+let step_y = if y0 < y1 { 1 } else { -1 }
+var error = dx + dy
+var x = x0
+var y = y0
+while true {
+if x >= 0 and y >= 0 and x < out.width and y < out.height {
+set out.pixels[y * out.width + x] = value
+}
+if x == x1 and y == y1 {
+break
+}
+let twice = 2 * error
+if twice >= dy {
+set error += dy
+set x += step_x
+}
+if twice <= dx {
+set error += dx
+set y += step_y
+}
+}
+out
+}
+
+note "Copies `source` with its top-left corner at (x, y), leaving out pixels equal to `transparent`."
+pub fn blit(image: Image, source: Image, x: Int, y: Int, transparent: Int) -> Image {
+var out = image
+let left = math.max(x, 0)
+let right = math.min(x + source.width, out.width)
+let top = math.max(y, 0)
+let bottom = math.min(y + source.height, out.height)
+if left >= right or top >= bottom {
+return out
+}
+for row in range(top, bottom) {
+let from = (row - y) * source.width - x
+for column in range(left, right) {
+let value = source.pixels[from + column]
+if value != transparent {
+set out.pixels[row * out.width + column] = value
+}
+}
+}
+out
+}
+
+note "Replaces every value v by `table[v]`: palette indexes to colors, or a light table that darkens. R001 for a value outside the table."
+pub fn remap(image: Image, table: List[Int]) -> Image {
+var out = image
+for i in range(0, length(out.pixels)) {
+set out.pixels[i] = table[out.pixels[i]]
+}
+out
+}
+
+note "Width in pixels of a text in a font."
+pub fn measure(font: Font, message: Text) -> Int {
+var total = 0
+for code in code_points(message) {
+set total += match get(font.glyphs, code) {
+.Some(g) => g.width
+.None => font.space
+}
+}
+total
+}
+
+note "Draws a text with its top-left corner at (x, y)."
+pub fn text(image: Image, font: Font, x: Int, y: Int, message: Text) -> Image {
+var out = image
+var at = x
+for code in code_points(message) {
+match get(font.glyphs, code) {
+.Some(g) => {
+set out = blit(out, g, at, y, font.transparent)
+set at += g.width
+}
+.None => set at += font.space
+}
+}
+out
+}

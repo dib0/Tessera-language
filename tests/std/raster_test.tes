@@ -1,0 +1,48 @@
+// Tests of std/raster.
+import std/raster
+
+fn row(image: raster.Image, y: Int) -> List[Int] = slice(image.pixels, y * image.width, y * image.width + image.width)
+
+test "fill and pixel, clipped at the edges" {
+var image = raster.blank(4, 3, 0)
+set image = raster.fill(image, -1, 1, 3, 5, 7)
+assert(row(image, 0) == [0, 0, 0, 0])
+assert(row(image, 1) == [7, 7, 0, 0])
+assert(row(image, 2) == [7, 7, 0, 0])
+assert(raster.pixel(image, 0, 1, -1) == 7)
+assert(raster.pixel(image, 9, 9, -1) == -1)
+}
+
+test "lines include both ends and go both ways" {
+var image = raster.blank(5, 5, 0)
+set image = raster.line(image, 0, 0, 4, 4, 1)
+set image = raster.line(image, 4, 0, 0, 0, 2)
+assert(row(image, 0) == [2, 2, 2, 2, 2])
+assert(raster.pixel(image, 2, 2, 0) == 1 and raster.pixel(image, 4, 4, 0) == 1 and raster.pixel(image, 3, 2, 0) == 0)
+set image = raster.line(image, -10, 4, 10, 4, 3)
+assert(row(image, 4) == [3, 3, 3, 3, 3])
+}
+
+test "blit leaves out the transparent value and clips" {
+let sprite = raster.from_pixels(2, [5, -1, -1, 6])
+var image = raster.blank(3, 3, 0)
+set image = raster.blit(image, sprite, 2, 2, -1)
+set image = raster.blit(image, sprite, -1, 0, -1)
+assert(row(image, 0) == [0, 0, 0])
+assert(row(image, 1) == [6, 0, 0])
+assert(row(image, 2) == [0, 0, 5])
+}
+
+test "remap through a table" {
+let image = raster.remap(raster.from_pixels(3, [0, 1, 2]), [rgb(0, 0, 0), rgb(255, 0, 0), rgb(0, 0, 255)])
+assert(image.pixels == [0, 16711680, 255])
+}
+
+test "text in a bitmap font" {
+let a = raster.from_pixels(2, [1, 1, 1, 0])
+let font = raster.Font { glyphs: [65: a], space: 3, transparent: 0 }
+assert(raster.measure(font, "A A") == 7)
+let image = raster.text(raster.blank(8, 2, 9), font, 0, 0, "A A")
+assert(row(image, 0) == [1, 1, 9, 9, 9, 1, 1, 9])
+assert(row(image, 1) == [1, 9, 9, 9, 9, 1, 9, 9])
+}

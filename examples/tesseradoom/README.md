@@ -44,20 +44,27 @@ data, and no bundled WAD files.
 
 ```sh
 ../../bin/tessera1 build main.tes -o tesseradoom --opt 3     # after ../../build.sh
-./tesseradoom play E1M1                  # in a window (X11), 35 tics per second
+./tesseradoom start                      # title screen and menus, in a window (X11), with sound
+./tesseradoom play E1M1                  # straight into a map, 35 tics per second
 ./tesseradoom play E1M1 --no-monsters
 ./tesseradoom watch DEMO1                # play back a demo lump
 ./tesseradoom render E1M1 frame.ppm      # one frame from the player 1 start, as an image
 ./tesseradoom info                       # WAD type, lump count, map names
 ```
 
-All commands: `info`, `map MAP`, `ascii MAP [WIDTH]`, `raycast MAP OUT.ppm`, `columns MAP`,
+All commands: `start`, `info`, `map MAP`, `ascii MAP [WIDTH]`, `raycast MAP OUT.ppm`, `columns MAP`,
 `render MAP OUT.ppm [X Y ANGLE]`, `bench MAP [FRAMES] [--still]`, `walk MAP`, `play MAP`,
 `game MAP`, `demo DEMOn [TICS]`, `watch DEMOn`; `--wad FILE` before the command picks another WAD.
 `walk` and `game` read commands from standard input (see `checks/m8_route.txt`).
 
 Keys in the window: arrows or W/S to walk, Left/Right to turn, A/D (or `,` and `.`) to step
-sideways, Shift to run, Space or E to use doors and switches, Control or F to fire, Escape to quit.
+sideways, Shift to run, Space or E to use doors and switches, Control or F to fire, 1 to 7 to pick a
+weapon (1 again for the chainsaw), Escape for the menu, F2 to save, F3 to load. The classic codes
+`idkfa` (all weapons, ammunition and keys) and `iddqd` (invulnerability) work while playing.
+
+Saved games go to `saves/` in the current directory (six slots, plain text). Sound plays through
+`aplay` or `pw-cat` (see `play_sound` in the language specification); without either the game is
+silent.
 
 ## Modules
 
@@ -66,16 +73,25 @@ sideways, Shift to run, Space or E to use doors and switches, Control or F to fi
 | `wad.tes` | WAD header, directory, lumps by name, map lumps (M1) |
 | `level.tes` | THINGS, LINEDEFS, SIDEDEFS, VERTEXES, SEGS, SSECTORS, NODES, SECTORS (M2) |
 | `automap.tes` | ASCII map with integer line drawing (M3) |
-| `geometry.tes` | 16.16 camera, column rays, ray/segment intersection, BSP point location |
+| `geometry.tes` | 16.16 camera, column rays, BSP point location |
 | `raycast.tes` | One frame by raycasting against linedefs, no BSP (M4) |
-| `art.tes` | Pictures, composed wall textures, flats, sprites, COLORMAP and PLAYPAL |
-| `render.tes` | BSP renderer: textured walls, floors, ceilings, sky, lighting, sprites (M5) |
+| `art.tes` | Pictures, composed wall textures, flats, sprites, sound lumps, COLORMAP and PLAYPAL |
+| `render.tes` | BSP renderer: textured walls, floors, ceilings, sky, lighting, switch textures, sprites (M5) |
 | `movement.tes` | Collision against linedefs (M6) |
-| `things.tes` | Thing types: sprites, sizes, items, monsters |
-| `world.tes` | The game: momentum, items, doors, lifts, switches, secrets, shooting, monsters (M8) |
-| `play.tes` | The window: input, 35 tics per second, status line, demo viewing (M7) |
+| `things.tes` | Thing types: sprites, sizes, items, weapons, monsters and their sounds |
+| `state.tes` | The world's data and shared helpers |
+| `world.tes` | One tic: the player (momentum, using, items), then everything else (M8) |
+| `sectors.tes` | Doors, lifts, floors, crushers, teleporters, switches, light effects, damaging floors, secrets |
+| `combat.tes` | Weapons, instant shots, projectiles, explosions, barrels, monsters |
+| `save.tes` | Saved games as text |
+| `play.tes` | The window: title, menus, the game with sound, weapon and status line, intermission, demos (M7) |
 | `demo.tes` | Demo lumps (M9) |
 | `main.tes` | Command line |
+
+General parts live in the standard library and are used from there: `std/raster` (drawing on the
+frame: menus, font, weapon), `std/sound` (positional sound), `std/keys` (held keys and the cheat
+codes), `std/plane` (ray, segment and circle geometry) and `std/rng` (repeatable randomness), next
+to `std/fixed`, `std/math`, `std/bytes`, `std/palette` and `std/ppm`.
 
 ## Milestones and checks
 
@@ -94,6 +110,11 @@ needs `python3` and Pillow). The compiler test suite runs it too when the WAD is
 | M8 Gameplay core | done | `checks/m8check.py` on `checks/m8_route.txt`: health bonuses and shells picked up, the lift lowers, two doors open, the player ends in the secret room behind the second |
 | M9 Demo parity | playback only | demos play back (version 1.9 format, momentum and friction as published); parity cannot be checked or reached, see below |
 
+Beyond the roadmap, `run_checks.sh` also checks: rockets fly and explode, imps throw fireballs, a
+teleporter (E4M6) moves the player to its destination, a crusher (E2M9) cycles, a blinking light
+changes, the exit switch changes texture and ends the level, and a saved game loads back
+byte-identical and continues exactly as the original for 400 tics with monsters.
+
 ### M9: why there is no parity check
 
 Matching the original game tic by tic needs (1) a reference run of the same demo by a
@@ -108,7 +129,6 @@ through or into a wall.
 
 ## Not implemented
 
-Sound, weapons other than the pistol and shotgun (picking up others only adds ammunition),
-projectiles (monsters attack with instant hits), monsters flying or floating, teleporters, crushing
-ceilings, light effects, switch textures changing when pressed, the automap in the window, saving,
-and the intermission screens.
+Music (the language has no synthesizer yet), the status bar with the face, the automap in the
+window, the options menu, monsters that fly (the cacodemon and lost soul walk), the super shotgun
+and the rest of DOOM II, and line specials Freedoom's first episode does not use.

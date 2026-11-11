@@ -17,6 +17,8 @@ function_name: Text
 tmp: Int
 take_var: Text
 movable_params: List[Text]
+moving: List[Text]
+top_block: Bool
 }
 
 type Code {
@@ -175,7 +177,7 @@ set out = out + definition_of(program.type_defs, e.name)
 .TestItem(_, _, _) => {}
 }
 }
-var g = Gen { paths: paths, type_defs: program.type_defs, function_name: "", tmp: 0, take_var: "", movable_params: [] }
+var g = Gen { paths: paths, type_defs: program.type_defs, function_name: "", tmp: 0, take_var: "", movable_params: [], moving: [], top_block: false }
 for item in program.items {
 match item {
 .FunctionItem(f) => {
@@ -192,7 +194,7 @@ for item in program.items {
 match item {
 .TestItem(name, span, body) => {
 if mode == "tests" {
-let tg = g with { function_name: "test \"\(name)\"", tmp: 0, take_var: "", movable_params: [] }
+let tg = g with { function_name: "test \"\(name)\"", tmp: 0, take_var: "", movable_params: [], moving: [], top_block: false }
 let block = match body.kind {
 .BlockExpr(b) => gen_block(tg, b, 0)
 _ => code(tg, "{}")
@@ -282,7 +284,7 @@ if scan_expr(f.body, p.name).count == 1 {
 set movable += [p.name]
 }
 }
-let g = start with { function_name: f.name, tmp: 0, take_var: "", movable_params: movable }
+let g = start with { function_name: f.name, tmp: 0, take_var: "", movable_params: movable, moving: [], top_block: true }
 var out = ""
 for n in f.notes {
 set out = "\(out)// note: \(replace_newlines(n.text))\n"
@@ -295,8 +297,8 @@ let ret = rust_type(resolve_simple(f.return_type, g.type_defs))
 let body = match f.body.kind {
 .BlockExpr(block) => gen_block(g, block, 0)
 _ => {
-let inner = gen_expr(g, f.body, 1)
-code(inner.gen, "{\n    \(inner.text)\n}")
+let inner = gen_expr(g with { top_block: false, moving: last_uses(f.body) }, f.body, 1)
+code(inner.gen with { moving: [] }, "{\n    \(inner.text)\n}")
 }
 }
 let entered = with_first_line(body.text, "t_enter(\(location(g, f.name_span)));", 1)
@@ -310,7 +312,8 @@ let codes = code_points(block)
 }
 
 fn gen_block(start: Gen, block: ast.Block, indent: Int) -> Code {
-var g = start
+let is_top = start.top_block
+var g = start with { top_block: false }
 var out = "{\n"
 for statement in block.statements {
 let line = gen_statement(g, statement, indent + 1)
@@ -319,8 +322,9 @@ set out = "\(out)\(pad(indent + 1))\(line.text)\n"
 }
 match block.tail {
 .Some(tail) => {
-let result = gen_expr(g, tail, indent + 1)
-set g = result.gen
+// The last expression of a function body is the last use of the variables in it.
+let result = gen_expr(if is_top { g with { moving: last_uses(tail) } } else { g }, tail, indent + 1)
+set g = if is_top { result.gen with { moving: [] } } else { result.gen }
 set out = "\(out)\(pad(indent + 1))\(result.text)\n"
 }
 .None => {}
@@ -452,6 +456,109 @@ Usage { count: a.count + b.count, has_jump_or_loop: a.has_jump_or_loop or b.has_
 
 fn with_jump(u: Usage) -> Usage = u with { has_jump_or_loop: true }
 
+note "Usage of two alternatives (branches of an `if` or `match`): the larger count, and any jump or loop."
+fn either_usage(a: Usage, b: Usage) -> Usage = Usage { count: if a.count > b.count { a.count } else { b.count }, has_jump_or_loop: a.has_jump_or_loop or b.has_jump_or_loop }
+
+fn without(names: List[Text], name: Text) -> List[Text] {
+var out: List[Text] = []
+for n in names {
+if n != name {
+set out = append(out, n)
+}
+}
+out
+}
+
+note "After branches: `tmp` from the last one; a variable to take or move stays pending only if no branch used it."
+fn merge_branches(before: Gen, ends: List[Gen], last: Gen) -> Gen {
+var take = before.take_var
+var moving = before.moving
+for e in ends {
+if e.take_var != before.take_var {
+set take = ""
+}
+for n in before.moving {
+if not contains(e.moving, n) {
+set moving = without(moving, n)
+}
+}
+}
+last with { take_var: take, moving: moving }
+}
+
+fn collect_list(exprs: List[ast.Expr], found: List[Text]) -> List[Text] {
+var out = found
+for e in exprs {
+set out = collect_names(e, out)
+}
+out
+}
+
+fn collect_tail(block: ast.Block, found: List[Text]) -> List[Text] {
+match block.tail {
+.Some(t) => collect_names(t, found)
+.None => found
+}
+}
+
+note "The variable names an expression reads, without looking into the statements of nested blocks."
+fn collect_names(e: ast.Expr, found: List[Text]) -> List[Text] {
+match e.kind {
+.Name(n) => if contains(found, n) { found } else { append(found, n) }
+.ListLiteral(items) => collect_list(items, found)
+.Call(_, _, args) => collect_list(args, found)
+.VariantLiteral(_, _, _, args) => collect_list(args, found)
+.Index(target, index) => collect_names(index, collect_names(target, found))
+.FieldAccess(target, _, _) => collect_names(target, found)
+.Unary(_, operand) => collect_names(operand, found)
+.Binary(_, _, left, right) => collect_names(right, collect_names(left, found))
+.RecordUpdate(target, fields) => {
+var out = collect_names(target, found)
+for f in fields {
+set out = collect_names(f.value, out)
+}
+out
+}
+.RecordLiteral(_, _, fields) => {
+var out = found
+for f in fields {
+set out = collect_names(f.value, out)
+}
+out
+}
+.If(condition, then_block, else_branch) => {
+let out = collect_tail(then_block, collect_names(condition, found))
+match else_branch {
+.Some(el) => collect_names(el, out)
+.None => out
+}
+}
+.BlockExpr(block) => collect_tail(block, found)
+.Match(scrutinee, arms) => {
+var out = collect_names(scrutinee, found)
+for arm in arms {
+set out = collect_names(arm.body, out)
+}
+out
+}
+.MapLiteral(keys, values) => collect_list(values, collect_list(keys, found))
+.CallValue(callee, args) => collect_list(args, collect_names(callee, found))
+_ => found
+}
+}
+
+note "Variables an expression uses exactly once, not in a loop or behind a jump: where the expression is the last thing a function does, they are moved instead of copied (spec 6.2)."
+fn last_uses(e: ast.Expr) -> List[Text] {
+var out: List[Text] = []
+for n in collect_names(e, []) {
+let u = scan_expr(e, n)
+if u.count == 1 and not u.has_jump_or_loop {
+set out = append(out, n)
+}
+}
+out
+}
+
 fn scan_list(exprs: List[ast.Expr], name: Text) -> Usage {
 var total = no_usage()
 for e in exprs {
@@ -497,19 +604,21 @@ match e.kind {
 .Unary(_, operand) => scan_expr(operand, name)
 .Binary(_, _, left, right) => add_usage(scan_expr(left, name), scan_expr(right, name))
 .If(condition, then_block, else_branch) => {
-let both = add_usage(scan_expr(condition, name), scan_block(then_block, name))
-match else_branch {
-.Some(else_expr) => add_usage(both, scan_expr(else_expr, name))
-.None => both
+// Only one branch runs, so a variable used once in each is used once.
+let then_usage = scan_block(then_block, name)
+let branches = match else_branch {
+.Some(else_expr) => either_usage(then_usage, scan_expr(else_expr, name))
+.None => then_usage
 }
+add_usage(scan_expr(condition, name), branches)
 }
 .BlockExpr(block) => scan_block(block, name)
 .Match(scrutinee, arms) => {
-var total = scan_expr(scrutinee, name)
+var branches = no_usage()
 for arm in arms {
-set total = add_usage(total, scan_expr(arm.body, name))
+set branches = either_usage(branches, scan_expr(arm.body, name))
 }
-total
+add_usage(scan_expr(scrutinee, name), branches)
 }
 .RecordUpdate(target, fields) => {
 var total = scan_expr(target, name)
@@ -575,6 +684,9 @@ match e.kind {
 .TextLiteral(value) => code(g, "t_text(\(source.rust_string(value)))")
 .UnitLiteral => code(g, "()")
 .Name(name) => {
+if contains(g.moving, name) {
+return code(g with { moving: without(g.moving, name) }, "v_\(name)")
+}
 if g.take_var == name {
 // Records and enums have no default value to leave behind, so they are moved; `v_x = f(v_x)` is
 // valid Rust because `x` is used once and assigned right after (rustc checks the move).
@@ -649,10 +761,11 @@ code(r.gen, text)
 let c = gen_expr(g, condition, indent)
 let t = gen_block(c.gen, then_block, indent)
 match else_branch {
-.None => code(t.gen, "if \(c.text) \(t.text)")
+.None => code(merge_branches(c.gen, [t.gen], t.gen), "if \(c.text) \(t.text)")
 .Some(else_expr) => {
-let el = gen_expr(t.gen, else_expr, indent)
-code(el.gen, "if \(c.text) \(t.text) else \(el.text)")
+// Each branch starts with the same variables to move: only one of them runs.
+let el = gen_expr(t.gen with { take_var: c.gen.take_var, moving: c.gen.moving }, else_expr, indent)
+code(merge_branches(c.gen, [t.gen, el.gen], el.gen), "if \(c.text) \(t.text) else \(el.text)")
 }
 }
 }
@@ -702,8 +815,9 @@ _ => code(value.gen, "match \(value.text) { Ok(ok_value) => ok_value, Err(error_
 }
 .Return(value) => match value {
 .Some(v) => {
-let result = gen_expr(g, v, indent)
-code(result.gen, "return \(result.text)")
+// Returning is the last use of every variable: one used once in the value is moved, not copied.
+let result = gen_expr(g with { moving: last_uses(v) }, v, indent)
+code(result.gen with { moving: g.moving }, "return \(result.text)")
 }
 .None => code(g, "return ()")
 }
@@ -784,6 +898,7 @@ false
 fn gen_match(start: Gen, scrutinee: ast.Expr, arms: List[ast.Arm], indent: Int) -> Code {
 let s = gen_expr(start, scrutinee, indent)
 var g = s.gen
+var ends: List[Gen] = []
 let head = match scrutinee.ty {
 .Named(_) => "match &*(" + s.text + ")"
 .Option(_) => "match &(" + s.text + ")"
@@ -827,11 +942,12 @@ set pattern = if is_option { variant } else { "T_\(type_name)::V_\(variant)" }
 }
 }
 }
-let body = gen_expr(g, arm.body, indent + 1)
+let body = gen_expr(g with { take_var: s.gen.take_var, moving: s.gen.moving }, arm.body, indent + 1)
 set g = body.gen
+set ends = append(ends, body.gen)
 set out = "\(out)\(pad(indent + 1))\(pattern) => { \(prefix)\(body.text) }\n"
 }
-code(g, "\(out)\(pad(indent))}")
+code(merge_branches(s.gen, ends, g), "\(out)\(pad(indent))}")
 }
 
 fn call_with_location(name: Text, args: List[Text], loc: Text) -> Text = "\(name)(\(join(append(args, loc), ", ")))"
@@ -1037,6 +1153,7 @@ _ => call_with_location("t_repeat", a, loc)
 "present" => call_with_location("t_present", a, loc)
 "next_event" => call_with_location("t_next_event", a, loc)
 "poll_event" => call_with_location("t_poll_event", a, loc)
+"play_sound" => "t_play_sound(&\(a[0]), \(a[1]), \(a[2]), \(a[3]), \(location(g, span)))"
 "draw_pixels" => "t_draw_pixels(\(a[0]), \(a[1]), \(a[2]), &\(a[3]), \(a[4]), \(location(g, span)))"
 _ => call_plain("f_\(name)", a)
 }

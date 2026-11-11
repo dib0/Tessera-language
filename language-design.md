@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.18. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.18: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16 and `Float` (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
+**Status:** Draft 0.20. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -209,6 +209,33 @@ From draft 0.17 to 0.18, the `ui` extension of DOOM decision D1 ([`docs/doom-dec
 | `draw_pixels(x, y, width, colors, scale)` | A rendered frame is 64,000 pixels; one X11 request per pixel is far too slow. `scale` enlarges it in the runtime instead of in the program. |
 | `poll_event()` | A game loop must not wait for input. |
 | `WindowEvent.KeyUp(name)`, and the key names `Shift`, `Control`, `Alt` | Games act on keys that are held down. Existing `match`es on `WindowEvent` need a `KeyUp` arm (or `_`). |
+
+From draft 0.18 to 0.19, sound for games:
+
+| Added | Why |
+|---|---|
+| Effect `audio` with `play_sound(samples, rate, volume, pan)` (section 10) | Games and alerts need sound effects. The runtime mixes up to 16 sounds and streams them to the system's audio player (`aplay` or `pw-cat`) through a pipe, so it needs no libraries and no `unsafe`. |
+| Key names `F1` to `F12`, `Delete`, `Home`, `End`, `PageUp`, `PageDown` (section 9.4) | Menus and games use function keys (save, load, quit). |
+
+Decided against, for now: music. Playing MIDI-like music needs a synthesizer in the runtime; it can be added later as a separate decision.
+
+From draft 0.19 to 0.20, general modules taken out of Tesseradoom (`examples/tesseradoom/`), which now uses them:
+
+| Added | Why |
+|---|---|
+| `std/raster`: software images, fill, lines, blitting with transparency, remapping, bitmap fonts | Any program that draws its own pixels (games, plots, image tools) needs the same handful of operations. |
+| `std/sound`: WAV files, tones, positional volume and pan, `play` | The built-in `play_sound` takes raw samples; these turn files and positions into them. |
+| `std/keys`: held keys and recently typed text from window events | Every interactive program tracks held keys the same way; typed text gives shortcuts and codes. |
+| `std/plane`: 2D fixed-point geometry (ray/segment, crossing, circle collision, nearest direction) | Collision, picking and sight lines in games and simulations, without overflow (section 7.6). |
+| `std/rng`: a seeded, repeatable random number generator | Games, simulations and tests need the same numbers on every run and platform; `random_int` is secure and therefore not repeatable. |
+
+Changed in draft 0.20, from the Tesseradoom findings (end of section 19):
+
+| Changed | Why |
+|---|---|
+| `range(a, b)` is empty when `a >= b`, instead of R004 for `a > b` | Three crashes in Tesseradoom came from spans clipped to the screen that were empty; every other language with ranges treats them as empty. Stage 0 shares the runtime and changes with it. |
+| The last use of a variable in a `return` or a function's final expression is moved, and `if`/`match` branches count as alternatives (section 6.2) | The forms that still copied (`return f(c)`, `set c = if a { f(c) } else { g(c) }`) cost Tesseradoom a factor of 20 until rewritten by hand. Rust checks every move in the generated code. |
+| A rejected redefinition (E0204) still declares the new name | Later uses no longer produce follow-up errors that refer to the old variable. |
 
 ## 4. Source files and lexical structure
 
@@ -529,7 +556,7 @@ set world.things[3].angle = 90
   set a[0] = 9      // a is [9, 2, 3], b is still [1, 2, 3]
   ```
 
-**Performance guarantee.** `set x = f(x, ...)` where `x` is `Text`, a list, map, `Bytes`, record or enum (records and enums since draft 0.18), and `x` appears exactly once on the right side, updates `x` in place. Building a list or text with `append`, `concat`, `replace_at` or `+` in a loop is therefore linear, not quadratic. Setting a place (`set xs[i] = v`, `set r.field = v`) takes constant time, plus one copy of the list or record on the first change after a copy of it was made elsewhere (copy on write). A function that changes a list it receives, `fn plot(cells: List[Int], i: Int) -> List[Int] { var out = cells ... out }`, works in place too when `var out = cells` is a statement of the function body itself (not inside a loop or branch) and the parameter is used nowhere else; called as `set grid = plot(grid, i)`, no copy is made. These are implementation strategies that do not change the meaning of the program: no other code can observe the old value.
+**Performance guarantee.** `set x = f(x, ...)` where `x` is `Text`, a list, map, `Bytes`, record or enum (records and enums since draft 0.18), and `x` appears exactly once on the right side, updates `x` in place. Building a list or text with `append`, `concat`, `replace_at` or `+` in a loop is therefore linear, not quadratic. Setting a place (`set xs[i] = v`, `set r.field = v`) takes constant time, plus one copy of the list or record on the first change after a copy of it was made elsewhere (copy on write). Since draft 0.20 the last use of a variable is moved in three more places: a variable used once in a `return` value, or in the expression a function ends with (`return draw(c, x)`, `fn f(c: Canvas) -> Canvas = draw(c, 1)`); and a variable used once in each branch of an `if` or `match` counts as used once, so `set c = if a { f(c) } else { g(c) }` updates in place like `set c = f(c)`. A function that changes a list it receives, `fn plot(cells: List[Int], i: Int) -> List[Int] { var out = cells ... out }`, works in place too when `var out = cells` is a statement of the function body itself (not inside a loop or branch) and the parameter is used nowhere else; called as `set grid = plot(grid, i)`, no copy is made. These are implementation strategies that do not change the meaning of the program: no other code can observe the old value.
 
 ### 6.3 No shadowing
 
@@ -724,6 +751,7 @@ An **effect** is a capability to act on the world outside the program:
 | `env` | Reading command-line arguments and environment variables, and choosing the exit code. |
 | `process` | Starting other programs. |
 | `ui` | Opening a window, drawing in it, and receiving mouse and keyboard events (section 9.4). |
+| `audio` | Playing sounds (section 10, draft 0.19). |
 
 A function declares the effects it needs after the return type:
 
@@ -779,7 +807,7 @@ WindowEvent.Close => { set running = false }
 ```tessera
 enum WindowEvent {
 Click(x: Int, y: Int, button: Int)   // button 1 left, 2 middle, 3 right, 4/5 scroll
-Key(name: Text)                      // "a", "A", "7", " ", "Escape", "Enter", "Backspace", "Tab", "Left", "Up", "Right", "Down", "Shift", "Control", "Alt"
+Key(name: Text)                      // "a", "A", "7", " ", "Escape", "Enter", "Backspace", "Tab", "Left", "Up", "Right", "Down", "Shift", "Control", "Alt", "F1" to "F12", "Delete", "Home", "End", "PageUp", "PageDown"
 KeyUp(name: Text)                    // a key was released (draft 0.18); same names as `Key`
 Close                                // the user asked to close the window
 }
@@ -918,7 +946,7 @@ The standard library is a fixed set of built-in functions. `T` stands for any el
 | `concat` | `(first: List[T], second: List[T]) -> List[T]` | New list with all items of both. |
 | `slice` | `(list: List[T], start: Int, end: Int) -> List[T]` | Items `start` up to, not including, `end`. R004 if out of range. |
 | `replace_at` | `(list: List[T], index: Int, item: T) -> List[T]` | New list with one item replaced. R001 if out of bounds. |
-| `range` | `(start: Int, end: Int) -> List[Int]` | `start` up to, not including, `end`. R004 if `start > end`. |
+| `range` | `(start: Int, end: Int) -> List[Int]` | `start` up to, not including, `end`; empty when `start >= end` (draft 0.20; before, `start > end` was R004). |
 | `code_points` | `(text: Text) -> List[Int]` | The Unicode scalar values of the text. |
 | `from_code_point` | `(code: Int) -> Text` | One-character text. R005 if not a valid scalar value. |
 | `from_code_points` | `(codes: List[Int]) -> Text` | Text from scalar values. R005 if any is invalid. |
@@ -1012,11 +1040,16 @@ The runtime has no external dependencies, so SQLite is reached through the `sqli
 | `std/math` | `min`, `max`, `abs` (R002 for the smallest `Int`), `clamp(value, low, high)` (R010 if `low > high`), `isqrt(value)` (largest `r` with `r * r <= value`; R010 for a negative value). |
 | `std/fixed` | 16.16 fixed point (section 7.6): `one`, `from_int`, `floor_int` (the integer part, rounded toward negative infinity; `to_int` is the built-in for `Decimal`), `mul`, `div` (rounds toward zero; R003 for 0), `abs`; `sine(index, count)` and `cosine(index, count)`, the value at angle `2π · index / count` rounded to the nearest unit (computed with 28 fraction bits, so within 0.0003 of a unit from exact; only values that are almost exactly halfway can round the other way), and `sine_table(count)`, `cosine_table(count)` for indexes `0` to `count - 1`. Integer arithmetic only, so every platform computes the same tables. |
 | `std/palette` | `read(data: Bytes, at: Int) -> List[Int]`: the 256 colors of a 768-byte RGB palette, packed like `rgb(red, green, blue)`; `red`, `green`, `blue` take them apart. |
+| `std/raster` | `type Image { width, height, pixels }` (row by row; colors or palette indexes), `blank`, `from_pixels`, `pixel`, `fill`, `line` (Bresenham), `blit(image, source, x, y, transparent)`, `remap(image, table)` (palette indexes to colors, or a light table); `type Font { glyphs: Map[Int, Image], space, transparent }`, `measure`, `text`. Each function returns the changed image and works in place as `set image = raster.f(image, ...)`. |
+| `std/sound` | `type Sound { samples: Bytes, rate }`, `from_wav(Bytes) -> Result[Sound, Text]` (PCM, 8 or 16 bits, mono or stereo), `tone(frequency, milliseconds, loudness)`, `position(dx, dy, right_x, right_y, range) -> [volume, pan]`, `play(sound, volume, pan)` (effect `audio`). |
+| `std/keys` | `type Keys { held, typed }`, `none`, `update(keys, WindowEvent)`, `held`, `any_held`, `typed(keys, word)`, `forget_typed`, `release_all`. Names compare in lower case. |
+| `std/plane` | 16.16 fixed point: `type Hit { hit, distance, along }`, `intersect` (ray against a segment in whole units), `ratio`, `orient`, `crosses`, `circle_touches`, `direction(dx, dy, cosines, sines, count)`. |
+| `std/rng` | `next(seed)`, `byte(seed) -> [value, seed]`, `roll(seed, low, high) -> [value, seed]`: a repeatable linear congruential generator (not for secrets). |
 | `std/ppm` | `encode(width, height, pixels: List[Int], palette: List[Int]) -> Bytes`: a binary PPM (P6) image of palette indexes, row by row from the top left. R010 if the number of pixels is not `width * height` or a side is not positive; R001 for an index outside the palette. Write it with `write_bytes`. |
 
-The modules added in draft 0.16 use no effects; their tests are in `tests/std/`.
+The modules added in drafts 0.16 and 0.20 use no effects except `std/sound.play` (`audio`); their tests are in `tests/std/`.
 
-Graphics (effect `ui`, section 9.4):
+Graphics (effect `ui`, section 9.4) and sound (effect `audio`):
 
 | Function | Signature | Notes |
 |---|---|---|
@@ -1030,6 +1063,7 @@ Graphics (effect `ui`, section 9.4):
 | `present` | `() -> Unit` | Shows everything drawn since the last `present`. |
 | `next_event` | `() -> WindowEvent` | Waits for the next click, key press, key release or close request. |
 | `poll_event` | `() -> Option[WindowEvent]` | The next event if one is waiting, otherwise `.None` at once (draft 0.18). |
+| `play_sound` | `(samples: Bytes, rate: Int, volume: Int, pan: Int) -> Unit uses audio` | Starts playing a sound and returns at once (draft 0.19): 8-bit unsigned mono samples (128 is silence) at `rate` samples per second (1,000 to 96,000), `volume` 0 to 100, `pan` from -100 (left) to 100 (right). Up to 16 sounds play at the same time; a 17th replaces the oldest. R004 for arguments out of range. Without a working audio player (`aplay` or `pw-cat` on `PATH`, or the program named in `TESSERA_AUDIO_PLAYER`, which reads 16-bit stereo samples at 22,050 per second from standard input) nothing is heard and the program continues. |
 | `draw_pixels` | `(x: Int, y: Int, width: Int, colors: List[Int], scale: Int) -> Unit` | Draws rows of `width` colors with their top-left corner at `(x, y)`, each pixel as a `scale` x `scale` square (draft 0.18). R004 if `width` or `scale` (1 to 16) is out of range or `length(colors)` is not a multiple of `width`; R011 for a value that is not a color (0 to 16777215). |
 
 Drawing calls without an open window, and losing the connection to the display, are runtime error R012.
@@ -1080,7 +1114,7 @@ Some errors can only be detected while running. A program cannot catch them; the
 | R001 | List or `Bytes` index out of bounds (indexing, `set xs[i] = v`, `replace_at`) |
 | R002 | Overflow: `Int` out of range, or a `Float` result too large to represent |
 | R003 | Division or remainder by zero |
-| R004 | Invalid `range` or `slice` bounds, or another argument outside its allowed range |
+| R004 | Invalid `slice` bounds, or another argument outside its allowed range |
 | R005 | Invalid Unicode code point |
 | R006 | File cannot be read |
 | R007 | File cannot be written |
@@ -1442,3 +1476,11 @@ Findings from writing Tesseradoom (`examples/tesseradoom/`, about 3,000 lines in
 - **`range(a, b)` with `a > b` stops the program (R004).** That caught real bugs, but also made empty loops crash in three places (spans clipped to the screen). A `range` that is empty for `a >= b` would be the more common expectation; this is a candidate change, to be decided by measurement.
 - **No nested patterns** showed up twice (`.Error(.NotFound)`, `.Function(_, .Float, _)`); both were easy to rewrite with `==` or an `if`.
 - **Fixed point worked.** All game geometry is 16.16 `Int` with `shift_left`/`shift_right`; the bounds stated in section 7.6 were enough to avoid overflow everywhere except one quotient (a ray almost parallel to a wall), which now checks its magnitude first.
+
+Review of the language after Tesseradoom's sound, weapons, menus and saving (draft 0.20). Done: the empty `range` and the moves listed in section 3. Open candidates, to be decided by measurement or by the maintainer:
+
+- **Import aliases** (`import std/keys as input`). Module names took local names away twice (`screen`, `keys`); renaming the local each time worked but read worse.
+- **Built-in names in modules.** `fixed.to_int`, `automap.draw_line` and `overlay.text_width` had to be renamed although modules are always used qualified. Allowing it needs a rule for unqualified use inside the module itself.
+- **Nested patterns** (`.Error(.NotFound)`). Rewritten with `==` each time; cheap to work around, but the most common pattern request.
+- **Tuples or small anonymous records.** `std/rng.roll` returns `[value, seed]` as a `List[Int]`, as do several Tesseradoom helpers; a pair type would say what each element is.
+- **Last use everywhere.** Draft 0.20 moves values at returns and in branches; a full liveness analysis would also cover `let y = f(x)` when `x` is not used again.

@@ -5,22 +5,25 @@
 pub enum Role {
 Decoration
 Obstacle
+Barrel
 Item(effect: Pickup)
 Monster(species: Species)
 Hidden
 }
 
+note "Ammunition kinds are 0 bullets, 1 shells, 2 rockets, 3 cells. Weapon slots are 0 fist, 1 pistol, 2 shotgun, 3 chaingun, 4 rocket launcher, 5 plasma gun, 6 BFG, 7 chainsaw. Power-ups last `tics` (0 for the rest of the level)."
 pub enum Pickup {
 Health(amount: Int, limit: Int)
 Armor(amount: Int, limit: Int)
 SetArmor(amount: Int)
-Ammo(amount: Int)
+Ammo(kind: Int, amount: Int)
+Backpack
 Key(color: Text)
-Weapon(name: Text, ammo: Int)
-Other(name: Text)
+Weapon(slot: Int, kind: Int, amount: Int)
+Power(name: Text, tics: Int)
 }
 
-note "How a monster looks and fights: animation frames per state, and its attack."
+note "How a monster looks, sounds and fights. `missile` is the sprite of its projectile, or empty for an instant (hitscan) attack; `drop` is the thing it leaves when it dies (0 for none)."
 pub type Species {
 name: Text
 walk: Text
@@ -30,6 +33,11 @@ death: Text
 melee: Bool
 damage_min: Int
 damage_max: Int
+missile: Text
+sight: Text
+hurt: Text
+dies: Text
+drop: Int
 }
 
 pub type Info {
@@ -50,40 +58,41 @@ fn item(sprite: Text, frames: Text, effect: Pickup) -> Info = Info { sprite: spr
 
 fn monster(sprite: Text, radius: Int, height: Int, health: Int, speed: Int, species: Species) -> Info = Info { sprite: sprite, frames: species.walk, radius: radius, height: height, health: health, speed: speed, role: .Monster(species) }
 
-fn species(name: Text, attack: Text, pain: Text, death: Text, melee: Bool, low: Int, high: Int) -> Species = Species { name: name, walk: "ABCD", attack: attack, pain: pain, death: death, melee: melee, damage_min: low, damage_max: high }
+fn species(name: Text, attack: Text, pain: Text, death: Text, melee: Bool, low: Int, high: Int) -> Species = Species { name: name, walk: "ABCD", attack: attack, pain: pain, death: death, melee: melee, damage_min: low, damage_max: high, missile: "", sight: "DSPOSIT1", hurt: "DSPOPAIN", dies: "DSPODTH1", drop: 0 }
 
 pub fn hidden() -> Info = Info { sprite: "", frames: "A", radius: 0, height: 0, health: 0, speed: 0, role: .Hidden }
 
 pub fn info(kind: Int) -> Info {
 match kind {
 // Monsters
-3004 => monster("POSS", 20, 56, 20, 8, species("zombieman", "EF", "G", "HIJKL", false, 3, 15))
-9 => monster("SPOS", 20, 56, 30, 8, species("shotgun guy", "EF", "G", "HIJKL", false, 9, 30))
-3001 => monster("TROO", 20, 56, 60, 8, species("imp", "EFG", "H", "IJKLM", false, 3, 24))
-3002 => monster("SARG", 30, 56, 150, 10, species("demon", "EFG", "H", "IJKLMN", true, 4, 40))
-58 => monster("SARG", 30, 56, 150, 10, species("spectre", "EFG", "H", "IJKLMN", true, 4, 40))
-65 => monster("CPOS", 20, 56, 70, 8, species("chaingunner", "EF", "G", "HIJKLMN", false, 3, 15))
-3006 => monster("SKUL", 16, 56, 100, 8, species("lost soul", "CD", "E", "FGHIJK", true, 3, 24))
-3005 => monster("HEAD", 31, 56, 400, 8, species("cacodemon", "BCD", "E", "GHIJKL", false, 5, 40))
-3003 => monster("BOSS", 24, 64, 1000, 8, species("baron", "EFG", "H", "IJKLMNO", false, 8, 64))
+3004 => monster("POSS", 20, 56, 20, 8, species("zombieman", "EF", "G", "HIJKL", false, 3, 15) with { drop: 2007 })
+9 => monster("SPOS", 20, 56, 30, 8, species("shotgun guy", "EF", "G", "HIJKL", false, 9, 30) with { sight: "DSPOSIT2", dies: "DSPODTH2", drop: 2001 })
+3001 => monster("TROO", 20, 56, 60, 8, species("imp", "EFG", "H", "IJKLM", false, 3, 24) with { missile: "BAL1", sight: "DSBGSIT1", hurt: "DSPOPAIN", dies: "DSBGDTH1" })
+3002 => monster("SARG", 30, 56, 150, 10, species("demon", "EFG", "H", "IJKLMN", true, 4, 40) with { sight: "DSSGTSIT", hurt: "DSDMPAIN", dies: "DSSGTDTH" })
+58 => monster("SARG", 30, 56, 150, 10, species("spectre", "EFG", "H", "IJKLMN", true, 4, 40) with { sight: "DSSGTSIT", hurt: "DSDMPAIN", dies: "DSSGTDTH" })
+65 => monster("CPOS", 20, 56, 70, 8, species("chaingunner", "EF", "G", "HIJKLMN", false, 3, 15) with { sight: "DSPOSIT2", dies: "DSPODTH2", drop: 2002 })
+3006 => monster("SKUL", 16, 56, 100, 8, species("lost soul", "CD", "E", "FGHIJK", true, 3, 24) with { sight: "DSSKLATK", hurt: "DSDMPAIN", dies: "DSFIRXPL" })
+3005 => monster("HEAD", 31, 56, 400, 8, species("cacodemon", "BCD", "E", "GHIJKL", false, 5, 40) with { missile: "BAL2", sight: "DSCACSIT", hurt: "DSDMPAIN", dies: "DSCACDTH" })
+3003 => monster("BOSS", 24, 64, 1000, 8, species("baron", "EFG", "H", "IJKLMNO", false, 8, 64) with { missile: "BAL7", sight: "DSBRSSIT", hurt: "DSDMPAIN", dies: "DSBRSDTH" })
 // Health and armor
 2011 => item("STIM", "A", .Health(10, 100))
 2012 => item("MEDI", "A", .Health(25, 100))
 2014 => item("BON1", "ABCDCB", .Health(1, 200))
 2013 => item("SOUL", "ABCDCB", .Health(100, 200))
+83 => item("MEGA", "ABCD", .Health(200, 200))
 2015 => item("BON2", "ABCDCB", .Armor(1, 200))
 2018 => item("ARM1", "AB", .SetArmor(100))
 2019 => item("ARM2", "AB", .SetArmor(200))
 // Ammunition (bullets, shells, rockets and cells all count as one pool here)
-2007 => item("CLIP", "A", .Ammo(10))
-2048 => item("AMMO", "A", .Ammo(50))
-2008 => item("SHEL", "A", .Ammo(4))
-2049 => item("SBOX", "A", .Ammo(20))
-2010 => item("ROCK", "A", .Ammo(1))
-2046 => item("BROK", "A", .Ammo(5))
-2047 => item("CELL", "A", .Ammo(20))
-17 => item("CELP", "A", .Ammo(100))
-8 => item("BPAK", "A", .Ammo(20))
+2007 => item("CLIP", "A", .Ammo(0, 10))
+2048 => item("AMMO", "A", .Ammo(0, 50))
+2008 => item("SHEL", "A", .Ammo(1, 4))
+2049 => item("SBOX", "A", .Ammo(1, 20))
+2010 => item("ROCK", "A", .Ammo(2, 1))
+2046 => item("BROK", "A", .Ammo(2, 5))
+2047 => item("CELL", "A", .Ammo(3, 20))
+17 => item("CELP", "A", .Ammo(3, 100))
+8 => item("BPAK", "A", .Backpack)
 // Keys
 5 => item("BKEY", "AB", .Key("blue"))
 6 => item("YKEY", "AB", .Key("yellow"))
@@ -92,21 +101,21 @@ match kind {
 39 => item("YSKU", "AB", .Key("yellow"))
 38 => item("RSKU", "AB", .Key("red"))
 // Weapons
-2001 => item("SHOT", "A", .Weapon("shotgun", 8))
-2002 => item("MGUN", "A", .Weapon("chaingun", 20))
-2003 => item("LAUN", "A", .Weapon("rocket launcher", 2))
-2004 => item("PLAS", "A", .Weapon("plasma gun", 40))
-2005 => item("CSAW", "A", .Weapon("chainsaw", 0))
-2006 => item("BFUG", "A", .Weapon("BFG", 40))
+2001 => item("SHOT", "A", .Weapon(2, 1, 8))
+2002 => item("MGUN", "A", .Weapon(3, 0, 20))
+2003 => item("LAUN", "A", .Weapon(4, 2, 2))
+2004 => item("PLAS", "A", .Weapon(5, 3, 40))
+2005 => item("CSAW", "A", .Weapon(7, 0, 0))
+2006 => item("BFUG", "A", .Weapon(6, 3, 40))
 // Power-ups
-2022 => item("PINV", "ABCD", .Other("invulnerability"))
-2023 => item("PSTR", "A", .Other("berserk"))
-2024 => item("PINS", "ABCD", .Other("partial invisibility"))
-2025 => item("SUIT", "A", .Other("radiation suit"))
-2026 => item("PMAP", "ABCDCB", .Other("computer map"))
-2045 => item("PVIS", "AB", .Other("light amplification"))
+2022 => item("PINV", "ABCD", .Power("invulnerability", 1050))
+2023 => item("PSTR", "A", .Power("berserk", 0))
+2024 => item("PINS", "ABCD", .Power("partial invisibility", 2100))
+2025 => item("SUIT", "A", .Power("radiation suit", 2100))
+2026 => item("PMAP", "ABCDCB", .Power("computer map", 0))
+2045 => item("PVIS", "AB", .Power("light amplification", 4200))
 // Obstacles
-2035 => obstacle("BAR1", "AB", 10, 42)
+2035 => Info { sprite: "BAR1", frames: "AB", radius: 10, height: 42, health: 20, speed: 0, role: .Barrel }
 2028 => obstacle("COLU", "A", 16, 48)
 43 => obstacle("TRE1", "A", 16, 56)
 47 => obstacle("SMIT", "A", 16, 56)
@@ -164,6 +173,22 @@ _ => hidden()
 }
 
 note "Whether a THINGS entry appears at a skill level (0 to 4) in single player: flag 1 for the two easiest, 2 for the middle and 4 for the two hardest; not flag 16 (multiplayer only), and not a player start."
+note "The weapon slot names, in slot order."
+pub fn weapon_name(slot: Int) -> Text = ["fist", "pistol", "shotgun", "chaingun", "rocket launcher", "plasma gun", "BFG 9000", "chainsaw"][slot]
+
+note "Weapon sprites (on screen) and their flashes, by slot."
+pub fn weapon_sprite(slot: Int) -> Text = ["PUNG", "PISG", "SHTG", "CHGG", "MISG", "PLSG", "BFGG", "SAWG"][slot]
+
+pub fn weapon_flash(slot: Int) -> Text = ["", "PISF", "SHTF", "CHGF", "MISF", "PLSF", "BFGF", ""][slot]
+
+note "The sprite frames a weapon shows while firing, over its whole cooldown."
+pub fn weapon_frames(slot: Int) -> Text = ["BCDCB", "ABCB", "ABCDCB", "AB", "AB", "AB", "ABC", "AB"][slot]
+
+note "Ammunition kind used by a weapon slot, or -1 (fist, chainsaw)."
+pub fn ammo_kind(slot: Int) -> Int = [-1, 0, 1, 0, 2, 3, 3, -1][slot]
+
+pub fn ammo_name(kind: Int) -> Text = ["bullets", "shells", "rockets", "cells"][kind]
+
 pub fn spawns_at(kind: Int, flags: Int, skill: Int) -> Bool {
 let wanted = if skill <= 1 { 1 } else if skill == 2 { 2 } else { 4 }
 bit_and(flags, wanted) != 0 and bit_and(flags, 16) == 0 and kind != 1 and kind != 2 and kind != 3 and kind != 4 and kind != 11

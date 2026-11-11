@@ -1,0 +1,94 @@
+// std/plane: 2D geometry in 16.16 fixed point (std/fixed) for games and simulations: where a ray
+// meets a segment, whether segments cross, whether a circle touches a segment, and the nearest
+// of a set of directions. Points are fixed values; segment end points are whole units (so the
+// products stay below 2^51). Effects: none.
+
+import std/fixed
+import std/math
+
+note "Where a ray meets a segment: `distance` is the ray parameter (fixed; with a ray direction of length 1.0 it is the distance), `along` the position on the segment from 0 to 65536 (0.0 to 1.0). `hit` is false when they do not meet in front of the ray."
+pub type Hit {
+hit: Bool
+distance: Int
+along: Int
+}
+
+note "Exact quotient of a by b as a fixed value, without overflowing a * 65536: magnitudes up to 2^50 for `a` and 2^47 for `b` are safe."
+pub fn ratio(a: Int, b: Int) -> Int {
+let whole = a / b
+let rest = a - whole * b
+whole * fixed.one() + rest * fixed.one() / b
+}
+
+note "The ray from (px, py) along (dx, dy), all fixed, against the segment (ax, ay)-(bx, by) in whole units. Hits farther than 65536 times the ray direction are ignored."
+pub fn intersect(px: Int, py: Int, dx: Int, dy: Int, ax: Int, ay: Int, bx: Int, by: Int) -> Hit {
+let none = Hit { hit: false, distance: 0, along: 0 }
+let lx = bx - ax
+let ly = by - ay
+let den = dx * ly - dy * lx
+if den == 0 {
+return none
+}
+let ex = fixed.from_int(ax) - px
+let ey = fixed.from_int(ay) - py
+let t_num = ex * ly - ey * lx
+let u_num = fixed.mul(ex, dy) - fixed.mul(ey, dx)
+if den > 0 {
+if t_num <= 0 or u_num < 0 or u_num > den {
+return none
+}
+} else if t_num >= 0 or u_num > 0 or u_num < den {
+return none
+}
+if t_num / den > 65536 {
+return none
+}
+Hit { hit: true, distance: ratio(t_num, den), along: ratio(u_num, den) }
+}
+
+note "Which side of the line a-b the point p is on (all fixed): 1 left, -1 right, 0 on it. Computed with 8 fraction bits so it cannot overflow."
+pub fn orient(ax: Int, ay: Int, bx: Int, by: Int, px: Int, py: Int) -> Int {
+let cross = shift_right(bx - ax, 8) * shift_right(py - ay, 8) - shift_right(by - ay, 8) * shift_right(px - ax, 8)
+if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
+}
+
+note "Whether segment p-q properly crosses segment a-b (all fixed)."
+pub fn crosses(px: Int, py: Int, qx: Int, qy: Int, ax: Int, ay: Int, bx: Int, by: Int) -> Bool {
+orient(px, py, qx, qy, ax, ay) * orient(px, py, qx, qy, bx, by) < 0 and orient(ax, ay, bx, by, px, py) * orient(ax, ay, bx, by, qx, qy) < 0
+}
+
+note "Whether a circle of `radius` units at (x, y) (fixed) touches the segment (ax, ay)-(bx, by) in whole units. Distances are compared with 8 fraction bits, so squares stay below 2^52."
+pub fn circle_touches(x: Int, y: Int, radius: Int, ax: Int, ay: Int, bx: Int, by: Int) -> Bool {
+let r = fixed.from_int(radius)
+if x + r <= fixed.from_int(math.min(ax, bx)) or x - r >= fixed.from_int(math.max(ax, bx)) or y + r <= fixed.from_int(math.min(ay, by)) or y - r >= fixed.from_int(math.max(ay, by)) {
+return false
+}
+let lx = bx - ax
+let ly = by - ay
+let ex = x - fixed.from_int(ax)
+let ey = y - fixed.from_int(ay)
+let length_squared = lx * lx + ly * ly
+let t = if length_squared == 0 { 0 } else { math.clamp((ex * lx + ey * ly) / length_squared, 0, fixed.one()) }
+let nx = shift_right(ex - lx * t, 8)
+let ny = shift_right(ey - ly * t, 8)
+let limit = shift_right(r, 8)
+nx * nx + ny * ny < limit * limit
+}
+
+note "The index of the direction, among `count` evenly spaced ones from tables of cosines and sines (as made by std/fixed `cosine_table` and `sine_table`), that points most nearly along (dx, dy) (fixed). The result is an index into the tables."
+pub fn direction(dx: Int, dy: Int, cosines: List[Int], sines: List[Int], count: Int) -> Int {
+let x = shift_right(dx, 8)
+let y = shift_right(dy, 8)
+let step = length(cosines) / count
+var best = 0
+var best_dot = 0
+for k in range(0, count) {
+let a = k * step
+let dot = x * shift_right(cosines[a], 8) + y * shift_right(sines[a], 8)
+if k == 0 or dot > best_dot {
+set best = a
+set best_dot = dot
+}
+}
+best
+}

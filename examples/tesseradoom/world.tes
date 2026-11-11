@@ -1,288 +1,116 @@
-// M8: the game world, advanced one tic (1/35 second) at a time: the player, things and items,
-// monsters with states, doors, lifts and lowering floors, switches and walk-over lines, damaging
-// floors and secrets. Written from the public description of the WAD format and of how the game
-// plays (line and sector special numbers, speeds and wait times); the logic is this engine's own.
-// All positions are 16.16 fixed point, heights whole units. Effects: none.
+// The game world, advanced one tic (1/35 second) at a time: the player (movement with momentum,
+// using lines, picking up items), then sectors, lights, projectiles, monsters and effects. The
+// data lives in state.tes; specials in sectors.tes, weapons and monsters in combat.tes.
+// Effects: none.
 
 import std/fixed
 import std/math
+import std/plane
+import combat
 import geometry
 import level
 import movement
 import render
+import sectors
+import state
 import things
-
-note "A monster's state; the `match` in `think` decides what happens in each."
-pub enum State {
-Idle
-Chase(stuck: Int)
-Attack(time: Int)
-Pain(time: Int)
-Dead(time: Int)
-}
-
-pub type Mobj {
-kind: Int
-info: things.Info
-x: Int
-y: Int
-angle: Int
-sector: Int
-health: Int
-present: Bool
-state: State
-}
-
-note "What a moving sector is doing. Door heights are ceilings, lift and floor heights floors; `wait` is in tics, -1 for a door that stays open."
-pub enum Motion {
-DoorOpening(top: Int, speed: Int, wait: Int)
-DoorWaiting(top: Int, speed: Int, time: Int, wait: Int)
-DoorClosing(top: Int, speed: Int, wait: Int)
-LiftLowering(low: Int, high: Int, speed: Int)
-LiftWaiting(low: Int, high: Int, speed: Int, time: Int)
-LiftRising(low: Int, high: Int, speed: Int)
-FloorLowering(target: Int, speed: Int)
-Finished
-}
-
-pub type Mover {
-sector: Int
-motion: Motion
-}
-
-pub type Stats {
-health: Int
-armor: Int
-ammo: Int
-keys: List[Text]
-weapons: List[Text]
-kills: Int
-items: Int
-secrets: Int
-}
-
-note "One tic of input. `forward_move` and `side_move` are the original game's input values (walking 25 and 24, running 50 and 40; positive is forward and right): they push the player, who keeps momentum. `forward` and `sideways` move the player directly by that many units, for scripted tests."
-pub type Input {
-forward: Int
-sideways: Int
-forward_move: Int
-side_move: Int
-turn: Int
-use: Bool
-fire: Bool
-}
-
-pub type World {
-level: level.Level
-neighbors: List[List[Int]]
-player: movement.Player
-stats: Stats
-mobjs: List[Mobj]
-movers: List[Mover]
-tic: Int
-seed: Int
-message: Text
-message_time: Int
-cooldown: Int
-use_held: Bool
-exited: Bool
-momentum_x: Int
-momentum_y: Int
-}
-
-pub fn no_input() -> Input = Input { forward: 0, sideways: 0, forward_move: 0, side_move: 0, turn: 0, use: false, fire: false }
 
 // ---------- creating the world ----------
 
-pub fn create(l: level.Level) -> World = create_at_skill(l, 2)
+pub fn create(l: level.Level) -> state.World = create_at_skill(l, 2)
 
-note "The world at a skill level from 0 to 4 (2 is the middle one)."
-pub fn create_at_skill(l: level.Level, skill: Int) -> World {
-var mobjs: List[Mobj] = []
+note "The world of a level at a skill level from 0 to 4 (2 is the middle one), with a fresh player."
+pub fn create_at_skill(l: level.Level, skill: Int) -> state.World = enter(l, skill, state.start_stats())
+
+note "The world of a level for a player who keeps health, armor, weapons and ammunition from the previous level (keys and power-ups do not carry over)."
+pub fn enter(l: level.Level, skill: Int, carried: state.Stats) -> state.World {
+var mobjs: List[state.Mobj] = []
 for t in l.things {
 let info = things.info(t.kind)
 if things.spawns_at(t.kind, t.flags, skill) and info.sprite != "" {
 let x = fixed.from_int(t.x)
 let y = fixed.from_int(t.y)
-set mobjs += [Mobj { kind: t.kind, info: info, x: x, y: y, angle: geometry.degrees_to_fine(t.angle), sector: geometry.sector_at(l, x, y), health: info.health, present: true, state: .Idle }]
+set mobjs += [state.Mobj { kind: t.kind, info: info, x: x, y: y, angle: geometry.degrees_to_fine(t.angle), sector: geometry.sector_at(l, x, y), health: info.health, present: true, state: .Idle }]
 }
 }
-let stats = Stats { health: 100, armor: 0, ammo: 50, keys: [], weapons: ["pistol"], kills: 0, items: 0, secrets: 0 }
-World { level: l, neighbors: find_neighbors(l), player: movement.start(l), stats: stats, mobjs: mobjs, movers: [], tic: 0, seed: 1, message: "", message_time: 0, cooldown: 0, use_held: false, exited: false, momentum_x: 0, momentum_y: 0 }
+let stats = carried with { keys: [], kills: 0, items: 0, secrets: 0, berserk: false, invulnerable: 0, radiation_suit: 0 }
+var w = state.World { level: l, skill: skill, neighbors: sectors.find_neighbors(l), centers: sectors.find_centers(l), player: movement.start(l), stats: stats, mobjs: mobjs, movers: [], lights: [], missiles: [], effects: [], switched: repeat([0], length(l.sidedefs)), sounds: [], tic: 0, seed: 1, message: "", message_time: 0, cooldown: 0, firing: -1, fire_held: false, use_held: false, exited: 0, momentum_x: 0, momentum_y: 0, damage_flash: 0, bonus_flash: 0 }
+set w.lights = sectors.find_lights(w)
+w
 }
 
 note "The world without monsters, like the original game's -nomonsters option."
-pub fn without_monsters(world: World) -> World {
+pub fn without_monsters(world: state.World) -> state.World {
 var w = world
 for i in range(0, length(w.mobjs)) {
-if is_monster(w.mobjs[i]) {
+if state.is_monster(w.mobjs[i]) {
 set w.mobjs[i].present = false
 }
 }
 w
 }
 
-note "For every sector, the sectors that share a two-sided line with it."
-fn find_neighbors(l: level.Level) -> List[List[Int]] {
-var found = repeat([[0]], length(l.sectors))
-for i in range(0, length(found)) {
-set found[i] = []
-}
-for line in l.linedefs {
-if line.back >= 0 {
-let a = l.sidedefs[line.front].sector
-let b = l.sidedefs[line.back].sector
-if a != b {
-if not contains(found[a], b) {
-set found[a] += [b]
-}
-if not contains(found[b], a) {
-set found[b] += [a]
-}
-}
-}
-}
-found
-}
-
-// ---------- helpers ----------
-
-note "A pseudo-random number from 0 to 255 and the next seed (a linear congruential generator; the products stay below 2^62)."
-fn random(seed: Int) -> List[Int] {
-let next = (seed * 1103515245 + 12345) % 2147483648
-[shift_right(next, 16) % 256, next]
-}
-
-fn say(w: World, text: Text) -> World = w with { message: text, message_time: 105 }
-
-fn sector_floor(w: World, sector: Int) -> Int = w.level.sectors[sector].floor
-
-fn lowest_neighbor_ceiling(w: World, sector: Int) -> Int {
-var lowest = 32767
-for n in w.neighbors[sector] {
-set lowest = math.min(lowest, w.level.sectors[n].ceiling)
-}
-if lowest == 32767 { w.level.sectors[sector].ceiling } else { lowest }
-}
-
-fn lowest_neighbor_floor(w: World, sector: Int) -> Int {
-var lowest = w.level.sectors[sector].floor
-for n in w.neighbors[sector] {
-set lowest = math.min(lowest, w.level.sectors[n].floor)
-}
-lowest
-}
-
-fn highest_neighbor_floor(w: World, sector: Int) -> Int {
-var highest = -32768
-for n in w.neighbors[sector] {
-set highest = math.max(highest, w.level.sectors[n].floor)
-}
-if highest == -32768 { w.level.sectors[sector].floor } else { highest }
-}
-
-fn is_monster(m: Mobj) -> Bool {
-match m.info.role {
-.Monster(_) => true
-_ => false
-}
-}
-
-fn is_dead(m: Mobj) -> Bool {
-match m.state {
-.Dead(_) => true
-_ => false
-}
-}
-
-note "Whether a thing stops others from walking through it: obstacles and living monsters."
-fn is_solid(m: Mobj) -> Bool {
-if not m.present {
-return false
-}
-match m.info.role {
-.Obstacle => true
-.Monster(_) => not is_dead(m)
-_ => false
-}
-}
-
-note "Whether a circle of `size` units at (x, y) overlaps a solid thing other than `self` (-1 for the player)."
-fn hits_thing(w: World, x: Int, y: Int, size: Int, self: Int) -> Bool {
-for i in range(0, length(w.mobjs)) {
-let m = w.mobjs[i]
-if i != self and is_solid(m) {
-let reach = fixed.from_int(size + m.info.radius)
-if math.abs(m.x - x) < reach and math.abs(m.y - y) < reach {
-return true
-}
-}
-}
-false
-}
-
-note "Whether the line between two points crosses a wall or a closed door, for monster sight and shots."
-fn blocked(w: World, x0: Int, y0: Int, x1: Int, y1: Int) -> Bool {
-let l = w.level
-for line in l.linedefs {
-var solid = line.back < 0
-if not solid {
-let front = l.sectors[l.sidedefs[line.front].sector]
-let back = l.sectors[l.sidedefs[line.back].sector]
-set solid = math.min(front.ceiling, back.ceiling) <= math.max(front.floor, back.floor)
-}
-if solid {
-let a = l.vertexes[line.start]
-let b = l.vertexes[line.end]
-if crosses(x0, y0, x1, y1, fixed.from_int(a.x), fixed.from_int(a.y), fixed.from_int(b.x), fixed.from_int(b.y)) {
-return true
-}
-}
-}
-false
-}
-
-note "Which side of the line a-b the point p is on: the sign of the cross product, computed with 8 fraction bits so it cannot overflow."
-fn orient(ax: Int, ay: Int, bx: Int, by: Int, px: Int, py: Int) -> Int {
-let cross = shift_right(bx - ax, 8) * shift_right(py - ay, 8) - shift_right(by - ay, 8) * shift_right(px - ax, 8)
-if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
-}
-
-note "Whether segment p-q properly crosses segment a-b (fixed coordinates)."
-fn crosses(px: Int, py: Int, qx: Int, qy: Int, ax: Int, ay: Int, bx: Int, by: Int) -> Bool {
-orient(px, py, qx, qy, ax, ay) * orient(px, py, qx, qy, bx, by) < 0 and orient(ax, ay, bx, by, px, py) * orient(ax, ay, bx, by, qx, qy) < 0
-}
+pub fn no_input() -> state.Input = state.no_input()
 
 // ---------- one tic ----------
 
-pub fn tic(world: World, input: Input, trig: geometry.Trig) -> World {
+pub fn tic(world: state.World, input: state.Input, trig: geometry.Trig) -> state.World {
 var w = world
+set w.sounds = []
 set w.tic += 1
-if w.stats.health > 0 and not w.exited {
+if w.stats.health > 0 and w.exited == 0 {
+if input.weapon >= 0 {
+set w = combat.select_weapon(w, input.weapon)
+}
 set w = move_player(w, input, trig)
 if input.use and not w.use_held {
 set w = use_line(w, trig)
 }
 if input.fire and w.cooldown == 0 {
-set w = fire(w, trig)
+set w = combat.fire(w, trig)
 }
 set w = pick_up(w)
-set w = floor_effects(w)
+set w = sectors.floor_effects(w)
 }
 set w.use_held = input.use
+set w.fire_held = input.fire
 if w.cooldown > 0 {
 set w.cooldown -= 1
 }
-set w = run_movers(w)
-set w = run_monsters(w, trig)
+if w.firing >= 0 {
+set w.firing = if w.firing + 1 >= combat.weapon_cooldown(w.stats.weapon) { -1 } else { w.firing + 1 }
+}
+set w.stats.invulnerable = math.max(w.stats.invulnerable - 1, 0)
+set w.stats.radiation_suit = math.max(w.stats.radiation_suit - 1, 0)
+set w.damage_flash = math.max(w.damage_flash - 1, 0)
+set w.bonus_flash = math.max(w.bonus_flash - 1, 0)
+set w = sectors.run_switches(w)
+set w = sectors.run_movers(w)
+set w = sectors.run_lights(w)
+set w = combat.run_missiles(w)
+set w = combat.run_monsters(w, trig)
+set w = run_effects(w)
 if w.message_time > 0 {
 set w.message_time -= 1
 }
 w
 }
 
+fn run_effects(world: state.World) -> state.World {
+var w = world
+var kept: List[state.Effect] = []
+for e in w.effects {
+let next = e with { time: e.time + 1 }
+if next.time / next.speed < length(next.frames) {
+set kept += [next]
+}
+}
+set w.effects = kept
+w
+}
+
 note "Turns the player, moves it directly by `forward`/`sideways` units if given, then by its momentum: input pushes (thrust `move * 2048` per tic along the view), the speed is at most 30 units per tic in each direction, and friction keeps 0xE800/0x10000 of it every tic; below 0x1000 without input it stops. These are the original game's published movement constants."
-fn move_player(world: World, input: Input, trig: geometry.Trig) -> World {
+fn move_player(world: state.World, input: state.Input, trig: geometry.Trig) -> state.World {
 var w = world
 set w.player = movement.turn(w.player, input.turn)
 if input.forward != 0 or input.sideways != 0 {
@@ -319,7 +147,7 @@ w
 }
 
 note "Moves the player by (dx, dy) fixed in steps of at most 8 units."
-fn slide(world: World, dx: Int, dy: Int) -> World {
+fn slide(world: state.World, dx: Int, dy: Int) -> state.World {
 var w = world
 let steps = math.max(1, (math.max(math.abs(dx), math.abs(dy)) + fixed.from_int(8) - 1) / fixed.from_int(8))
 for i in range(0, steps) {
@@ -330,7 +158,7 @@ set w = player_step(w, step_x, step_y)
 w
 }
 
-fn displace(world: World, forward_units: Int, sideways_units: Int, trig: geometry.Trig) -> World {
+fn displace(world: state.World, forward_units: Int, sideways_units: Int, trig: geometry.Trig) -> state.World {
 var w = world
 let p = w.player
 let c = trig.cosine[p.angle]
@@ -343,14 +171,14 @@ set w = slide(w, dx, dy)
 w
 }
 
-fn player_step(world: World, dx: Int, dy: Int) -> World {
+fn player_step(world: state.World, dx: Int, dy: Int) -> state.World {
 var w = world
 let p = w.player
-let floor = sector_floor(w, p.sector)
+let floor = state.sector_floor(w, p.sector)
 for attempt in [[dx, dy], [dx, 0], [0, dy]] {
 let x = p.x + attempt[0]
 let y = p.y + attempt[1]
-if (attempt[0] != 0 or attempt[1] != 0) and movement.fits(w.level, x, y, floor) and not hits_thing(w, x, y, movement.radius(), -1) {
+if (attempt[0] != 0 or attempt[1] != 0) and movement.fits(w.level, x, y, floor) and not state.hits_thing(w, x, y, movement.radius(), -1) {
 set w.player = p with { x: x, y: y, sector: geometry.sector_at(w.level, x, y) }
 set w = walk_over(w, p.x, p.y, x, y)
 return w
@@ -359,27 +187,34 @@ return w
 w
 }
 
-note "Triggers the walk-over specials of lines the player's centre crossed going from (x0, y0) to (x1, y1)."
-fn walk_over(world: World, x0: Int, y0: Int, x1: Int, y1: Int) -> World {
+note "Triggers the walk-over specials of lines the player's centre crossed going from (x0, y0) to (x1, y1). Teleporters work only when crossed from their front (right) side."
+fn walk_over(world: state.World, x0: Int, y0: Int, x1: Int, y1: Int) -> state.World {
 var w = world
 for index in range(0, length(w.level.linedefs)) {
 let line = w.level.linedefs[index]
-if line.special != 0 and is_walk_special(line.special) {
+if line.special != 0 and sectors.is_walk_special(line.special) {
 let a = w.level.vertexes[line.start]
 let b = w.level.vertexes[line.end]
-if crosses(x0, y0, x1, y1, fixed.from_int(a.x), fixed.from_int(a.y), fixed.from_int(b.x), fixed.from_int(b.y)) {
-set w = trigger(w, index)
+let ax = fixed.from_int(a.x)
+let ay = fixed.from_int(a.y)
+let bx = fixed.from_int(b.x)
+let by = fixed.from_int(b.y)
+if plane.crosses(x0, y0, x1, y1, ax, ay, bx, by) {
+if sectors.is_teleport(line.special) {
+if plane.orient(ax, ay, bx, by, x0, y0) < 0 {
+return sectors.teleport(w, index)
+}
+} else {
+set w = sectors.trigger(w, index, false)
+}
 }
 }
 }
 w
 }
 
-fn is_walk_special(special: Int) -> Bool = contains([2, 3, 4, 10, 19, 38, 52, 75, 82, 83, 86, 88, 90, 105, 108, 109, 120, 121, 124], special)
-
-note "The player pressed `use`: the nearest line within 64 units straight ahead is used, if it has a special. Two-sided lines without a special are looked through."
-fn use_line(world: World, trig: geometry.Trig) -> World {
-var w = world
+note "The player pressed `use`: the nearest line within 64 units straight ahead is used, if it has a special; otherwise the player grunts. Two-sided lines without a special are looked through."
+fn use_line(w: state.World, trig: geometry.Trig) -> state.World {
 let p = w.player
 let dx = trig.cosine[p.angle]
 let dy = trig.sine[p.angle]
@@ -390,194 +225,39 @@ let line = w.level.linedefs[index]
 if line.back < 0 or line.special != 0 {
 let a = w.level.vertexes[line.start]
 let b = w.level.vertexes[line.end]
-let hit = geometry.intersect(p.x, p.y, dx, dy, a.x, a.y, b.x, b.y)
+let hit = plane.intersect(p.x, p.y, dx, dy, a.x, a.y, b.x, b.y)
 if hit.hit and hit.distance < best_distance {
 set best = index
 set best_distance = hit.distance
 }
 }
 }
-if best >= 0 and w.level.linedefs[best].special != 0 {
-set w = trigger(w, best)
-}
-w
-}
-
-note "Carries out a line's special. Door specials 1, 26-28, 31-34, 117 and 118 work on the sector behind the line; the others on every sector with the line's tag. One-time specials are cleared after use."
-fn trigger(world: World, index: Int) -> World {
-var w = world
-let line = w.level.linedefs[index]
-let special = line.special
-let key = match special {
-26 => "blue"
-32 => "blue"
-27 => "yellow"
-34 => "yellow"
-28 => "red"
-33 => "red"
-_ => ""
-}
-if key != "" and not contains(w.stats.keys, key) {
-return say(w, "You need a \(key) key to open this door")
-}
-if contains([1, 26, 27, 28, 31, 32, 33, 34, 117, 118], special) {
-if line.back < 0 {
+if best < 0 {
 return w
 }
-let sector = w.level.sidedefs[line.back].sector
-let stays = contains([31, 32, 33, 34, 118], special)
-let speed = if special == 117 or special == 118 { 8 } else { 2 }
-set w = start_door(w, sector, speed, if stays { -1 } else { 150 })
-if stays {
-set w.level.linedefs[index].special = 0
+let special = w.level.linedefs[best].special
+if special != 0 and not sectors.is_walk_special(special) {
+return sectors.trigger(w, best, true)
 }
-return w
-}
-let once = contains([2, 3, 4, 10, 11, 19, 21, 23, 29, 38, 50, 51, 52, 102, 103, 108, 109, 112, 121, 122, 124], special)
-for sector in range(0, length(w.level.sectors)) {
-if line.tag != 0 and w.level.sectors[sector].tag == line.tag {
-set w = tagged_action(w, special, sector)
-}
-}
-if contains([11, 51, 52, 124], special) {
-set w.exited = true
-set w = say(w, "Level complete")
-}
-if once {
-set w.level.linedefs[index].special = 0
-}
-w
+state.sound_here(w, "DSNOWAY")
 }
 
-fn tagged_action(w: World, special: Int, sector: Int) -> World {
-if contains([2, 86, 103, 61, 109, 112, 114], special) {
-return start_door(w, sector, if special >= 109 { 8 } else { 2 }, -1)
-}
-if contains([4, 90, 29, 63, 105, 108, 111], special) {
-return start_door(w, sector, if special >= 105 { 8 } else { 2 }, 150)
-}
-if contains([3, 75, 50, 42], special) {
-return add_mover(w, Mover { sector: sector, motion: .DoorClosing(w.level.sectors[sector].ceiling, 2, -1) })
-}
-if contains([10, 88, 21, 62, 120, 121, 122, 123], special) {
-let speed = if special >= 120 { 8 } else { 4 }
-return add_mover(w, Mover { sector: sector, motion: .LiftLowering(lowest_neighbor_floor(w, sector), w.level.sectors[sector].floor, speed) })
-}
-if contains([23, 38, 82, 60], special) {
-return add_mover(w, Mover { sector: sector, motion: .FloorLowering(lowest_neighbor_floor(w, sector), 1) })
-}
-if contains([19, 102, 83, 45], special) {
-return add_mover(w, Mover { sector: sector, motion: .FloorLowering(highest_neighbor_floor(w, sector), 1) })
-}
-w
-}
+// ---------- items ----------
 
-note "Opens a door sector up to 4 units below its lowest neighboring ceiling. A door that is already moving reverses instead (as pressing `use` on an open door closes it)."
-fn start_door(world: World, sector: Int, speed: Int, wait: Int) -> World {
-var w = world
-let top = lowest_neighbor_ceiling(w, sector) - 4
-for i in range(0, length(w.movers)) {
-if w.movers[i].sector == sector {
-match w.movers[i].motion {
-.DoorClosing(t, s, wt) => set w.movers[i].motion = .DoorOpening(t, s, wt)
-.DoorWaiting(t, s, _, wt) => set w.movers[i].motion = .DoorClosing(t, s, wt)
-_ => {}
-}
-return w
-}
-}
-add_mover(w, Mover { sector: sector, motion: .DoorOpening(top, speed, wait) })
-}
-
-fn add_mover(world: World, mover: Mover) -> World {
-var w = world
-for m in w.movers {
-if m.sector == mover.sector {
-return w
-}
-}
-set w.movers += [mover]
-w
-}
-
-// ---------- moving sectors ----------
-
-note "Whether the player or a living monster stands in a sector, so a closing door must not come down on it."
-fn occupied(w: World, sector: Int) -> Bool {
-if w.player.sector == sector {
-return true
-}
-for m in w.mobjs {
-if m.sector == sector and is_monster(m) and not is_dead(m) and m.present {
-return true
-}
-}
-false
-}
-
-fn run_movers(world: World) -> World {
-var w = world
-var still: List[Mover] = []
-for mover in w.movers {
-let s = mover.sector
-let sector = w.level.sectors[s]
-let next = match mover.motion {
-.DoorOpening(top, speed, wait) => {
-let ceiling = math.min(sector.ceiling + speed, top)
-set w.level.sectors[s].ceiling = ceiling
-if ceiling < top { mover.motion } else if wait < 0 { Motion.Finished } else { Motion.DoorWaiting(top, speed, wait, wait) }
-}
-.DoorWaiting(top, speed, time, wait) => if time > 1 { Motion.DoorWaiting(top, speed, time - 1, wait) } else { Motion.DoorClosing(top, speed, wait) }
-.DoorClosing(top, speed, wait) => {
-if occupied(w, s) and sector.ceiling - speed - sector.floor < movement.player_height() {
-Motion.DoorOpening(top, speed, wait)
-} else {
-let ceiling = math.max(sector.ceiling - speed, sector.floor)
-set w.level.sectors[s].ceiling = ceiling
-if ceiling > sector.floor { mover.motion } else { Motion.Finished }
-}
-}
-.LiftLowering(low, high, speed) => {
-let floor = math.max(sector.floor - speed, low)
-set w.level.sectors[s].floor = floor
-if floor > low { mover.motion } else { Motion.LiftWaiting(low, high, speed, 105) }
-}
-.LiftWaiting(low, high, speed, time) => if time > 1 { Motion.LiftWaiting(low, high, speed, time - 1) } else { Motion.LiftRising(low, high, speed) }
-.LiftRising(low, high, speed) => {
-let floor = math.min(sector.floor + speed, high)
-set w.level.sectors[s].floor = floor
-if floor < high { mover.motion } else { Motion.Finished }
-}
-.FloorLowering(target, speed) => {
-let floor = math.max(sector.floor - speed, target)
-set w.level.sectors[s].floor = floor
-if floor > target { mover.motion } else { Motion.Finished }
-}
-.Finished => Motion.Finished
-}
-if next != .Finished {
-set still += [mover with { motion: next }]
-}
-}
-set w.movers = still
-w
-}
-
-// ---------- items, damage, secrets ----------
-
-fn pickup_name(effect: things.Pickup, sprite: Text) -> Text {
+fn pickup_name(effect: things.Pickup) -> Text {
 match effect {
-.Health(amount, _) => if amount == 1 { "a health bonus" } else if amount == 100 { "a soul sphere" } else if amount == 10 { "a stimpack" } else { "a medikit" }
+.Health(amount, _) => if amount == 1 { "a health bonus" } else if amount == 100 { "a soul sphere" } else if amount == 200 { "a mega sphere" } else if amount == 10 { "a stimpack" } else { "a medikit" }
 .Armor(_, _) => "an armor bonus"
 .SetArmor(amount) => if amount == 100 { "the armor" } else { "the mega armor" }
-.Ammo(_) => "ammunition (\(to_lower(sprite)))"
+.Ammo(kind, amount) => "\(amount) \(things.ammo_name(kind))"
+.Backpack => "a backpack full of ammo"
 .Key(color) => "a \(color) key"
-.Weapon(name, _) => "a \(name)"
-.Other(name) => name
+.Weapon(slot, _, _) => "the \(things.weapon_name(slot))"
+.Power(name, _) => name
 }
 }
 
-fn pick_up(world: World) -> World {
+fn pick_up(world: state.World) -> state.World {
 var w = world
 let p = w.player
 for i in range(0, length(w.mobjs)) {
@@ -589,10 +269,22 @@ let reach = fixed.from_int(movement.radius() + m.info.radius)
 if math.abs(m.x - p.x) < reach and math.abs(m.y - p.y) < reach {
 let before = w.stats
 set w.stats = apply_pickup(w.stats, effect)
-if w.stats != before or is_other(effect) {
+if w.stats != before or is_power(effect) {
 set w.mobjs[i].present = false
 set w.stats.items += 1
-set w = say(w, "Picked up \(pickup_name(effect, m.info.sprite))")
+set w.bonus_flash = 6
+set w = state.say(w, "Picked up \(pickup_name(effect))")
+set w = state.sound_here(w, match effect {
+.Weapon(_, _, _) => "DSWPNUP"
+.Power(_, _) => "DSGETPOW"
+_ => "DSITEMUP"
+})
+match effect {
+.Weapon(slot, _, _) => if not before.weapons[slot] {
+set w.stats.weapon = slot
+}
+_ => {}
+}
 }
 }
 }
@@ -603,279 +295,55 @@ _ => {}
 w
 }
 
-fn is_other(effect: things.Pickup) -> Bool {
+fn is_power(effect: things.Pickup) -> Bool {
 match effect {
-.Other(_) => true
+.Power(_, _) => true
 _ => false
 }
 }
 
-note "The stats after taking an item; unchanged when the item is of no use (full health, full armor)."
-fn apply_pickup(stats: Stats, effect: things.Pickup) -> Stats {
+fn add_ammo(stats: state.Stats, kind: Int, amount: Int) -> state.Stats {
+var s = stats
+set s.ammo[kind] = math.min(s.ammo[kind] + amount, s.max_ammo[kind])
+s
+}
+
+note "The stats after taking an item; unchanged when the item is of no use (full health, full armor, full ammunition)."
+fn apply_pickup(stats: state.Stats, effect: things.Pickup) -> state.Stats {
 match effect {
 .Health(amount, limit) => if stats.health >= limit { stats } else { stats with { health: math.min(stats.health + amount, limit) } }
-.Armor(amount, limit) => if stats.armor >= limit { stats } else { stats with { armor: math.min(stats.armor + amount, limit) } }
-.SetArmor(amount) => if stats.armor >= amount { stats } else { stats with { armor: amount } }
-.Ammo(amount) => if stats.ammo >= 200 { stats } else { stats with { ammo: math.min(stats.ammo + amount, 200) } }
+.Armor(amount, limit) => if stats.armor >= limit { stats } else { stats with { armor: math.min(stats.armor + amount, limit), armor_class: math.max(stats.armor_class, 1) } }
+.SetArmor(amount) => if stats.armor >= amount { stats } else { stats with { armor: amount, armor_class: if amount >= 200 { 2 } else { 1 } } }
+.Ammo(kind, amount) => if stats.ammo[kind] >= stats.max_ammo[kind] { stats } else { add_ammo(stats, kind, amount) }
+.Backpack => {
+var s = stats with { max_ammo: [400, 100, 100, 600] }
+for kind in range(0, 4) {
+set s = add_ammo(s, kind, [10, 4, 1, 20][kind])
+}
+s
+}
 .Key(color) => if contains(stats.keys, color) { stats } else { stats with { keys: stats.keys + [color] } }
-.Weapon(name, ammo) => stats with { weapons: if contains(stats.weapons, name) { stats.weapons } else { stats.weapons + [name] }, ammo: math.min(stats.ammo + ammo, 200) }
-.Other(_) => stats
+.Weapon(slot, kind, amount) => {
+var s = stats
+set s.weapons[slot] = true
+if amount > 0 {
+set s = add_ammo(s, kind, amount)
+}
+s
+}
+.Power(name, tics) => match name {
+"berserk" => stats with { berserk: true, health: math.max(stats.health, 100) }
+"invulnerability" => stats with { invulnerable: tics }
+"radiation suit" => stats with { radiation_suit: tics }
+_ => stats
 }
 }
-
-fn hurt_player(world: World, damage: Int) -> World {
-var w = world
-let absorbed = math.min(w.stats.armor, damage / 3)
-set w.stats.armor -= absorbed
-set w.stats.health = math.max(w.stats.health - (damage - absorbed), 0)
-if w.stats.health == 0 {
-set w = say(w, "You died")
-}
-w
-}
-
-note "Damaging floors (sector specials 4, 5, 7 and 16) hurt every 32 tics; entering a secret sector (9) counts it once."
-fn floor_effects(world: World) -> World {
-var w = world
-let s = w.player.sector
-let special = w.level.sectors[s].special
-if special == 9 {
-set w.stats.secrets += 1
-set w.level.sectors[s].special = 0
-return say(w, "You found a secret area")
-}
-if w.tic % 32 == 0 {
-let damage = match special {
-5 => 10
-7 => 5
-4 => 20
-16 => 20
-_ => 0
-}
-if damage > 0 {
-set w = hurt_player(w, damage)
-}
-}
-w
-}
-
-// ---------- shooting ----------
-
-note "Fires the pistol (5 to 15 damage, 14 tics between shots) or, once picked up, the shotgun (7 pellets): each shot hits the nearest living monster in the line of fire, unless a wall is nearer."
-fn fire(world: World, trig: geometry.Trig) -> World {
-var w = world
-if w.stats.ammo <= 0 {
-return say(w, "Out of ammunition")
-}
-let shotgun = contains(w.stats.weapons, "shotgun")
-set w.stats.ammo -= 1
-set w.cooldown = if shotgun { 37 } else { 14 }
-set w = alert(w)
-let pellets = if shotgun { 7 } else { 1 }
-for _ in range(0, pellets) {
-let r = random(w.seed)
-set w.seed = r[1]
-// Up to about 5.6 degrees to either side for shotgun pellets, 0.7 for the pistol.
-let spread = if shotgun { (r[0] - 128) } else { (r[0] - 128) / 8 }
-let angle = geometry.wrap_angle(w.player.angle + spread)
-set w = shoot(w, trig, angle)
-}
-w
-}
-
-fn shoot(world: World, trig: geometry.Trig, angle: Int) -> World {
-var w = world
-let p = w.player
-let dx = trig.cosine[angle]
-let dy = trig.sine[angle]
-var target = -1
-var target_distance = fixed.from_int(4096)
-for i in range(0, length(w.mobjs)) {
-let m = w.mobjs[i]
-if m.present and is_monster(m) and not is_dead(m) {
-// Distance along the shot, and how far the monster's centre is beside it.
-let along = fixed.mul(m.x - p.x, dx) + fixed.mul(m.y - p.y, dy)
-let beside = math.abs(fixed.mul(m.x - p.x, dy) - fixed.mul(m.y - p.y, dx))
-if along > 0 and along < target_distance and beside < fixed.from_int(m.info.radius) {
-set target = i
-set target_distance = along
-}
-}
-}
-if target < 0 {
-return w
-}
-let m = w.mobjs[target]
-if blocked(w, p.x, p.y, m.x, m.y) {
-return w
-}
-let r = random(w.seed)
-set w.seed = r[1]
-set w = damage_monster(w, target, 5 + r[0] * 11 / 256)
-w
-}
-
-fn damage_monster(world: World, index: Int, damage: Int) -> World {
-var w = world
-let m = w.mobjs[index]
-let health = m.health - damage
-set w.mobjs[index].health = health
-if health <= 0 {
-set w.mobjs[index].state = .Dead(0)
-set w.stats.kills += 1
-return w
-}
-let r = random(w.seed)
-set w.seed = r[1]
-set w.mobjs[index].state = if r[0] < 128 { State.Pain(8) } else { State.Chase(0) }
-w
-}
-
-// ---------- monsters ----------
-
-fn run_monsters(world: World, trig: geometry.Trig) -> World {
-var w = world
-for i in range(0, length(w.mobjs)) {
-let m = w.mobjs[i]
-if m.present and is_monster(m) {
-set w = think(w, i, trig)
-}
-}
-w
-}
-
-fn distance_units(ax: Int, ay: Int, bx: Int, by: Int) -> Int {
-let dx = fixed.floor_int(ax - bx)
-let dy = fixed.floor_int(ay - by)
-math.isqrt(dx * dx + dy * dy)
-}
-
-note "One tic of a monster. Idle monsters look for the player every 4 tics; chasing monsters walk towards the player and sometimes attack; an attack hits after 8 tics if the player is still in sight."
-fn think(world: World, index: Int, trig: geometry.Trig) -> World {
-var w = world
-let m = w.mobjs[index]
-let species = match m.info.role {
-.Monster(s) => s
-_ => return w
-}
-let p = w.player
-let distance = distance_units(m.x, m.y, p.x, p.y)
-match m.state {
-.Idle => {
-if (w.tic + index) % 4 == 0 and distance < 2048 and w.stats.health > 0 and (distance < 64 or in_front(m, p.x, p.y, trig)) and not blocked(w, m.x, m.y, p.x, p.y) {
-set w.mobjs[index].state = .Chase(0)
-}
-}
-.Chase(stuck) => {
-if w.stats.health <= 0 {
-set w.mobjs[index].state = .Idle
-return w
-}
-set w = chase_step(w, index, stuck, trig)
-let r = random(w.seed)
-set w.seed = r[1]
-let reach = m.info.radius + movement.radius() + 20
-let wants = if species.melee { distance < reach and r[0] < 64 } else { distance < 1024 and r[0] < 4 }
-if wants and not blocked(w, m.x, m.y, p.x, p.y) {
-set w.mobjs[index].state = .Attack(0)
-}
-}
-.Attack(time) => {
-set w.mobjs[index].angle = face(m, p.x, p.y, trig)
-if time == 8 and not blocked(w, m.x, m.y, p.x, p.y) {
-let r = random(w.seed)
-set w.seed = r[1]
-// Ranged attacks hit less often the farther away the player is: from 3 in 4 up close to 1 in 6.
-let close_enough = if species.melee { distance < m.info.radius + movement.radius() + 24 } else { r[0] < math.clamp(192 - distance / 4, 40, 192) }
-if close_enough {
-let r2 = random(w.seed)
-set w.seed = r2[1]
-set w = hurt_player(w, species.damage_min + r2[0] * (species.damage_max - species.damage_min + 1) / 256)
-}
-}
-set w.mobjs[index].state = if time >= 16 { State.Chase(0) } else { State.Attack(time + 1) }
-}
-.Pain(time) => set w.mobjs[index].state = if time <= 1 { State.Chase(0) } else { State.Pain(time - 1) }
-.Dead(time) => set w.mobjs[index].state = .Dead(math.min(time + 1, 1000))
-}
-w
-}
-
-note "Whether a point is in the half of the map a monster faces (it sees 180 degrees)."
-fn in_front(m: Mobj, x: Int, y: Int, trig: geometry.Trig) -> Bool {
-shift_right(x - m.x, 8) * shift_right(trig.cosine[m.angle], 8) + shift_right(y - m.y, 8) * shift_right(trig.sine[m.angle], 8) > 0
-}
-
-note "Gunfire wakes idle monsters within 1200 units that have a line of sight to the player, whichever way they face."
-fn alert(world: World) -> World {
-var w = world
-let p = w.player
-for i in range(0, length(w.mobjs)) {
-let m = w.mobjs[i]
-if m.present and is_monster(m) and m.state == .Idle and distance_units(m.x, m.y, p.x, p.y) < 1200 and not blocked(w, m.x, m.y, p.x, p.y) {
-set w.mobjs[i].state = .Chase(0)
-}
-}
-w
-}
-
-note "The fine angle from a monster towards a point: the closest of 32 directions, chosen with dot products."
-fn face(m: Mobj, x: Int, y: Int, trig: geometry.Trig) -> Int {
-let dx = shift_right(x - m.x, 8)
-let dy = shift_right(y - m.y, 8)
-var best = 0
-var best_dot = 0
-for k in range(0, 32) {
-let a = k * geometry.fine_angles() / 32
-let dot = dx * shift_right(trig.cosine[a], 8) + dy * shift_right(trig.sine[a], 8)
-if k == 0 or dot > best_dot {
-set best = a
-set best_dot = dot
-}
-}
-best
-}
-
-note "Moves a chasing monster towards the player at its speed. When walls or things block the way it tries each axis alone, then, for a while, a sideways direction."
-fn chase_step(world: World, index: Int, stuck: Int, trig: geometry.Trig) -> World {
-var w = world
-let m = w.mobjs[index]
-let p = w.player
-let dx = p.x - m.x
-let dy = p.y - m.y
-let length = math.max(1, distance_units(m.x, m.y, p.x, p.y))
-let speed = fixed.from_int(m.info.speed)
-var step_x = dx / length * m.info.speed
-var step_y = dy / length * m.info.speed
-if stuck > 0 {
-// Walk sideways (a quarter turn) while stuck.
-let old_x = step_x
-set step_x = -step_y
-set step_y = old_x
-}
-let floor = sector_floor(w, m.sector)
-let reach = fixed.from_int(m.info.radius + movement.radius())
-for attempt in [[step_x, step_y], [step_x, 0], [0, step_y], [math.clamp(step_x, -speed, speed), 0]] {
-let x = m.x + attempt[0]
-let y = m.y + attempt[1]
-let near_player = math.abs(x - p.x) < reach and math.abs(y - p.y) < reach
-if (attempt[0] != 0 or attempt[1] != 0) and not near_player and movement.fits_radius(w.level, x, y, floor, m.info.radius) and not hits_thing(w, x, y, m.info.radius, index) {
-set w.mobjs[index].x = x
-set w.mobjs[index].y = y
-set w.mobjs[index].sector = geometry.sector_at(w.level, x, y)
-set w.mobjs[index].angle = face(m, p.x, p.y, trig)
-set w.mobjs[index].state = .Chase(math.max(stuck - 1, 0))
-return w
-}
-}
-set w.mobjs[index].state = .Chase(if stuck > 0 { stuck - 1 } else { 16 })
-w
 }
 
 // ---------- drawing ----------
 
 note "The sprite frame letter of a thing for the current tic."
-fn frame_of(m: Mobj, tic: Int) -> Text {
+fn frame_of(m: state.Mobj, tic: Int) -> Text {
 let frames = match m.info.role {
 .Monster(s) => match m.state {
 .Idle => slice_text(s.walk, 0, 2)
@@ -894,7 +362,8 @@ let count = length(frames)
 slice_text(frames, (tic / speed) % count, (tic / speed) % count + 1)
 }
 
-pub fn sprites(w: World) -> List[render.SpriteDraw] {
+note "Everything in the world to draw as sprites: things, projectiles (seen from the direction they fly) and effects."
+pub fn sprites(w: state.World) -> List[render.SpriteDraw] {
 var out: List[render.SpriteDraw] = []
 for m in w.mobjs {
 if m.present and m.info.sprite != "" {
@@ -902,7 +371,67 @@ let sector = w.level.sectors[m.sector]
 set out += [render.SpriteDraw { x: m.x, y: m.y, z: fixed.from_int(sector.floor), sprite: m.info.sprite, frame: frame_of(m, w.tic), angle: m.angle, light: sector.light }]
 }
 }
+for m in w.missiles {
+let frame = if (w.tic / 4) % 2 == 0 { "A" } else { "B" }
+let angle = if math.abs(m.dx) >= math.abs(m.dy) { if m.dx > 0 { 0 } else { 4096 } } else if m.dy > 0 { 2048 } else { 6144 }
+set out += [render.SpriteDraw { x: m.x, y: m.y, z: m.z - fixed.from_int(8), sprite: m.sprite, frame: frame, angle: angle, light: 255 }]
+}
+for e in w.effects {
+let index = math.min(e.time / e.speed, length(e.frames) - 1)
+set out += [render.SpriteDraw { x: e.x, y: e.y, z: e.z, sprite: e.sprite, frame: slice_text(e.frames, index, index + 1), angle: 0, light: 255 }]
+}
 out
 }
 
-pub fn camera(w: World) -> geometry.Camera = movement.camera(w.level, w.player)
+note "The weapon on screen: its sprite and frame, and the muzzle flash (empty when none), e.g. [\"PISGA0\", \"PISFA0\"]."
+pub fn weapon_view(w: state.World) -> List[Text] {
+let slot = w.stats.weapon
+let sprite = things.weapon_sprite(slot)
+let frames = things.weapon_frames(slot)
+var frame = if slot == 7 { if (w.tic / 4) % 2 == 0 { "C" } else { "D" } } else { "A" }
+var flash = ""
+if w.firing >= 0 {
+let index = math.min(w.firing * length(frames) / combat.weapon_cooldown(slot), length(frames) - 1)
+set frame = slice_text(frames, index, index + 1)
+if w.firing < 4 and things.weapon_flash(slot) != "" {
+set flash = "\(things.weapon_flash(slot))A0"
+}
+}
+["\(sprite)\(frame)0", flash]
+}
+
+note "Which of PLAYPAL's 14 palettes to show: red after damage (1 to 8), yellow after a pickup (9 to 12), green with the radiation suit (13), else 0."
+pub fn palette_index(w: state.World) -> Int {
+if w.damage_flash > 0 {
+return math.min((w.damage_flash + 7) / 8, 8)
+}
+if w.bonus_flash > 0 {
+return 9 + math.min((w.bonus_flash + 7) / 8, 3) - 1
+}
+if w.stats.radiation_suit > 0 and (w.stats.radiation_suit > 128 or w.stats.radiation_suit % 16 < 8) {
+return 13
+}
+0
+}
+
+pub fn camera(w: state.World) -> geometry.Camera = movement.camera(w.level, w.player)
+
+note "The map after this one: the next on a normal exit, the secret map (9) on a secret exit, and back from the secret map to where the episode continues. Empty after the last map of an episode."
+pub fn next_map(name: Text, secret: Bool) -> Text {
+let codes = code_points(name)
+if length(codes) != 4 {
+return ""
+}
+let episode = codes[1] - 48
+let map = codes[3] - 48
+if secret {
+return "E\(episode)M9"
+}
+if map == 9 {
+return "E\(episode)M\([4, 6, 7, 3][math.clamp(episode - 1, 0, 3)])"
+}
+if map >= 8 {
+return ""
+}
+"E\(episode)M\(map + 1)"
+}

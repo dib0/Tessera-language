@@ -1,0 +1,22 @@
+// Tests of std/rng. Expected values follow from the formula (seed * 1103515245 + 12345) mod 2^31.
+import std/rng
+
+test "the sequence is fixed" {
+assert(rng.next(1) == 1103527590)
+assert(rng.next(1103527590) == 377401575)
+assert(rng.byte(1) == [16838 % 256, 1103527590])
+}
+
+test "rolls stay in range and are spread" {
+var seed = 42
+var seen = repeat([0], 6)
+for _ in range(0, 6000) {
+let r = rng.roll(seed, 1, 6)
+assert(r[0] >= 1 and r[0] <= 6)
+set seen[r[0] - 1] += 1
+set seed = r[1]
+}
+for count in seen {
+assert(count > 800 and count < 1200)
+}
+}

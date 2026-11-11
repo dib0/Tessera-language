@@ -1,0 +1,527 @@
+// Weapons, shots, projectiles, explosions and monsters. Damage ranges, fire rates and speeds
+// follow the public description of the game; aiming and monster behaviour are this engine's own.
+// Effects: none.
+
+import std/fixed
+import std/math
+import std/plane
+import std/rng
+import geometry
+import movement
+import state
+import things
+
+// ---------- weapons ----------
+
+note "Tics between shots, by weapon slot."
+pub fn weapon_cooldown(slot: Int) -> Int = [14, 14, 37, 4, 20, 3, 60, 4][slot]
+
+fn ammo_per_shot(slot: Int) -> Int = if slot == 6 { 40 } else { 1 }
+
+pub fn has_ammo(s: state.Stats, slot: Int) -> Bool {
+let kind = things.ammo_kind(slot)
+kind < 0 or s.ammo[kind] >= ammo_per_shot(slot)
+}
+
+note "The best weapon that still has ammunition, in the original game's order of preference."
+pub fn best_weapon(s: state.Stats) -> Int {
+for slot in [5, 3, 2, 1, 7, 4, 6] {
+if s.weapons[slot] and has_ammo(s, slot) {
+return slot
+}
+}
+0
+}
+
+note "Selects a weapon: slot 0 is the fist, or the chainsaw when the player has it and the fist is already selected."
+pub fn select_weapon(world: state.World, slot: Int) -> state.World {
+var w = world
+var wanted = slot
+if slot == 0 and w.stats.weapons[7] and w.stats.weapon != 7 {
+set wanted = 7
+}
+if w.stats.weapons[wanted] and wanted != w.stats.weapon {
+set w.stats.weapon = wanted
+set w.firing = -1
+if wanted == 7 {
+set w = state.sound_here(w, "DSSAWUP")
+}
+}
+w
+}
+
+note "Fires the current weapon: fist and chainsaw hit what is right in front, pistol, shotgun and chaingun fire instant shots, the rocket launcher, plasma gun and BFG fire projectiles. Gunfire wakes monsters that can see the player."
+pub fn fire(world: state.World, trig: geometry.Trig) -> state.World {
+var w = world
+let slot = w.stats.weapon
+if not has_ammo(w.stats, slot) {
+set w.stats.weapon = best_weapon(w.stats)
+return w
+}
+let kind = things.ammo_kind(slot)
+if kind >= 0 {
+set w.stats.ammo[kind] -= ammo_per_shot(slot)
+}
+set w.cooldown = weapon_cooldown(slot)
+set w.firing = 0
+let angle = w.player.angle
+match slot {
+0 => {
+let r = state.roll(w, 1, 10)
+set w.seed = r[1]
+set w = melee(w, trig, r[0] * 2 * (if w.stats.berserk { 10 } else { 1 }), "DSPUNCH")
+}
+7 => {
+let r = state.roll(w, 1, 10)
+set w.seed = r[1]
+set w = melee(w, trig, r[0] * 2, "DSSAWFUL")
+}
+1 => {
+set w = state.sound_here(w, "DSPISTOL")
+set w = spread_shot(w, trig, angle, 16)
+}
+3 => {
+set w = state.sound_here(w, "DSPISTOL")
+set w = spread_shot(w, trig, angle, 32)
+}
+2 => {
+set w = state.sound_here(w, "DSSHOTGN")
+for _ in range(0, 7) {
+set w = spread_shot(w, trig, angle, 128)
+}
+}
+4 => {
+set w = state.sound_here(w, "DSRLAUNC")
+set w = launch(w, trig, "MISL", w.player.x, w.player.y, player_z(w) + fixed.from_int(32), angle, 20, 20, 160, 11, true, -1)
+}
+5 => {
+set w = state.sound_here(w, "DSPLASMA")
+set w = launch(w, trig, "PLSS", w.player.x, w.player.y, player_z(w) + fixed.from_int(32), angle, 25, 5, 40, 13, false, -1)
+}
+_ => {
+set w = state.sound_here(w, "DSBFG")
+set w = launch(w, trig, "BFS1", w.player.x, w.player.y, player_z(w) + fixed.from_int(32), angle, 25, 100, 800, 13, true, -1)
+}
+}
+if slot != 0 and slot != 7 {
+set w = alert(w)
+}
+if not has_ammo(w.stats, slot) {
+set w.stats.weapon = best_weapon(w.stats)
+}
+w
+}
+
+fn player_z(w: state.World) -> Int = fixed.from_int(state.sector_floor(w, w.player.sector))
+
+note "A bullet or pellet up to `spread` fine angles to either side of `angle`, 5 to 15 damage."
+fn spread_shot(world: state.World, trig: geometry.Trig, angle: Int, spread: Int) -> state.World {
+var w = world
+let r = rng.byte(w.seed)
+set w.seed = r[1]
+let d = state.roll(w, 5, 15)
+set w.seed = d[1]
+hitscan(w, trig, geometry.wrap_angle(angle + (r[0] - 128) * spread / 128), d[0], -1)
+}
+
+note "Hits the nearest monster or barrel within 64 units straight ahead."
+fn melee(world: state.World, trig: geometry.Trig, damage: Int, noise: Text) -> state.World {
+var w = world
+let target = aim(w, trig, w.player.x, w.player.y, w.player.angle, fixed.from_int(80), -1)
+if target < 0 {
+return w
+}
+set w = state.sound_here(w, noise)
+damage_mobj(w, target, damage)
+}
+
+note "The nearest target (monster or barrel, not `self`) on the line from (x, y) at `angle` within `reach` (fixed) and not behind a wall, or -1."
+fn aim(w: state.World, trig: geometry.Trig, x: Int, y: Int, angle: Int, reach: Int, self: Int) -> Int {
+let dx = trig.cosine[angle]
+let dy = trig.sine[angle]
+var target = -1
+var target_distance = reach
+for i in range(0, length(w.mobjs)) {
+let m = w.mobjs[i]
+if i != self and state.is_target(m) {
+let along = fixed.mul(m.x - x, dx) + fixed.mul(m.y - y, dy)
+let beside = math.abs(fixed.mul(m.x - x, dy) - fixed.mul(m.y - y, dx))
+if along > 0 and along < target_distance and beside < fixed.from_int(m.info.radius) {
+set target = i
+set target_distance = along
+}
+}
+}
+if target >= 0 and state.blocked(w, x, y, w.mobjs[target].x, w.mobjs[target].y) {
+return -1
+}
+target
+}
+
+note "Where a shot from (x, y) at `angle` hits the nearest wall: the fixed distance, or 8192 units when nothing is near."
+fn wall_distance(w: state.World, trig: geometry.Trig, x: Int, y: Int, angle: Int) -> Int {
+let dx = trig.cosine[angle]
+let dy = trig.sine[angle]
+var best = fixed.from_int(8192)
+for line in w.level.linedefs {
+if state.solid_line(w.level, line) {
+let a = w.level.vertexes[line.start]
+let b = w.level.vertexes[line.end]
+let hit = plane.intersect(x, y, dx, dy, a.x, a.y, b.x, b.y)
+if hit.hit and hit.distance < best {
+set best = hit.distance
+}
+}
+}
+best
+}
+
+note "An instant shot from the player (`shooter` -1) or a monster. It hits the first target or wall; a puff of smoke shows where it hit a wall, blood where it hit a monster."
+fn hitscan(world: state.World, trig: geometry.Trig, angle: Int, damage: Int, shooter: Int) -> state.World {
+var w = world
+let x = if shooter < 0 { w.player.x } else { w.mobjs[shooter].x }
+let y = if shooter < 0 { w.player.y } else { w.mobjs[shooter].y }
+let target = aim(w, trig, x, y, angle, fixed.from_int(2048), shooter)
+if target >= 0 {
+let m = w.mobjs[target]
+set w = state.add_effect(w, if state.is_monster(m) { "BLUD" } else { "PUFF" }, if state.is_monster(m) { "CBA" } else { "ABCD" }, m.x, m.y, fixed.from_int(state.sector_floor(w, m.sector) + 32), 4)
+return damage_mobj(w, target, damage)
+}
+let distance = wall_distance(w, trig, x, y, angle)
+if distance < fixed.from_int(2048) {
+let back = distance - fixed.from_int(4)
+let px = x + fixed.mul(back, trig.cosine[angle])
+let py = y + fixed.mul(back, trig.sine[angle])
+set w = state.add_effect(w, "PUFF", "ABCD", px, py, fixed.from_int(state.sector_floor(w, w.player.sector) + 32), 4)
+}
+w
+}
+
+// ---------- projectiles ----------
+
+note "Starts a projectile flying `speed` units per tic in the direction `angle`, starting a little in front of the shooter."
+pub fn launch(world: state.World, trig: geometry.Trig, sprite: Text, x: Int, y: Int, z: Int, angle: Int, speed: Int, low: Int, high: Int, size: Int, splash: Bool, owner: Int) -> state.World {
+var w = world
+let dx = trig.cosine[angle] * speed
+let dy = trig.sine[angle] * speed
+let start_x = x + fixed.mul(fixed.from_int(16), trig.cosine[angle])
+let start_y = y + fixed.mul(fixed.from_int(16), trig.sine[angle])
+set w.missiles += [state.Missile { sprite: sprite, x: start_x, y: start_y, z: z, dx: dx, dy: dy, damage_min: low, damage_max: high, radius: size, splash: splash, owner: owner }]
+w
+}
+
+fn explosion_frames(sprite: Text) -> List[Text] {
+match sprite {
+"MISL" => ["MISL", "BCD", "DSBAREXP"]
+"PLSS" => ["PLSE", "ABCDE", "DSFIRXPL"]
+"BFS1" => ["BFE1", "ABCDEF", "DSRXPLOD"]
+_ => [sprite, "CDE", "DSFIRXPL"]
+}
+}
+
+note "Whether a projectile at (x, y), flying at height `z`, touches a wall: one-sided lines, and two-sided lines whose opening it does not fit through."
+fn missile_hits_wall(w: state.World, x: Int, y: Int, z: Int, size: Int) -> Bool {
+let l = w.level
+let bottom = fixed.floor_int(z)
+for line in l.linedefs {
+if movement.touches_radius(x, y, l.vertexes[line.start], l.vertexes[line.end], size) {
+if line.back < 0 {
+return true
+}
+let front = l.sectors[l.sidedefs[line.front].sector]
+let back = l.sectors[l.sidedefs[line.back].sector]
+if math.min(front.ceiling, back.ceiling) < bottom + 8 or math.max(front.floor, back.floor) > bottom {
+return true
+}
+}
+}
+false
+}
+
+note "Moves every projectile in steps of at most 8 units; one that touches a wall, a target or the player explodes."
+pub fn run_missiles(world: state.World) -> state.World {
+var w = world
+var flying: List[state.Missile] = []
+for start in w.missiles {
+var m = start
+let steps = math.max(1, (math.max(math.abs(m.dx), math.abs(m.dy)) + fixed.from_int(8) - 1) / fixed.from_int(8))
+var hit = false
+var victim = -2
+var i = 0
+while i < steps and not hit {
+let x = m.x + m.dx / steps
+let y = m.y + m.dy / steps
+let reach_player = fixed.from_int(movement.radius() + m.radius)
+if m.owner >= 0 and math.abs(x - w.player.x) < reach_player and math.abs(y - w.player.y) < reach_player and w.stats.health > 0 {
+set hit = true
+set victim = -1
+}
+if not hit {
+for j in range(0, length(w.mobjs)) {
+let t = w.mobjs[j]
+if not hit and j != m.owner and state.is_target(t) {
+let reach = fixed.from_int(t.info.radius + m.radius)
+if math.abs(x - t.x) < reach and math.abs(y - t.y) < reach {
+set hit = true
+set victim = j
+}
+}
+}
+}
+if not hit and missile_hits_wall(w, x, y, m.z, m.radius) {
+set hit = true
+}
+if not hit {
+set m = m with { x: x, y: y }
+}
+set i += 1
+}
+if hit {
+set w = explode(w, m, victim)
+} else {
+set flying += [m]
+}
+}
+set w.missiles = flying
+w
+}
+
+fn explode(world: state.World, m: state.Missile, victim: Int) -> state.World {
+var w = world
+let look = explosion_frames(m.sprite)
+set w = state.add_effect(w, look[0], look[1], m.x, m.y, m.z - fixed.from_int(16), 5)
+set w = state.sound_at(w, look[2], m.x, m.y)
+let r = state.roll(w, m.damage_min, m.damage_max)
+set w.seed = r[1]
+if victim == -1 {
+set w = state.hurt_player(w, r[0])
+} else if victim >= 0 {
+set w = damage_mobj(w, victim, r[0])
+}
+if m.splash {
+set w = splash(w, m.x, m.y, 128, m.owner)
+}
+w
+}
+
+note "Blast damage around a point: 128 minus the distance (in units) to everything within reach that is not behind a wall, the shooter included, as in the original."
+fn splash(world: state.World, x: Int, y: Int, power: Int, source: Int) -> state.World {
+var w = world
+let d = state.distance_units(x, y, w.player.x, w.player.y) - movement.radius()
+if d < power and not state.blocked(w, x, y, w.player.x, w.player.y) {
+set w = state.hurt_player(w, power - math.max(d, 0))
+}
+for i in range(0, length(w.mobjs)) {
+let t = w.mobjs[i]
+if state.is_target(t) {
+let td = state.distance_units(x, y, t.x, t.y) - t.info.radius
+if td < power and not state.blocked(w, x, y, t.x, t.y) {
+set w = damage_mobj(w, i, power - math.max(td, 0))
+}
+}
+}
+let _ = source
+w
+}
+
+// ---------- damage ----------
+
+note "Damage to a monster or barrel. A monster may flinch (pain) and turns on the player; at 0 health it dies and may drop an item. A barrel explodes, hurting what is around it."
+pub fn damage_mobj(world: state.World, index: Int, damage: Int) -> state.World {
+var w = world
+let m = w.mobjs[index]
+if not state.is_target(m) {
+return w
+}
+let health = m.health - damage
+set w.mobjs[index].health = health
+if state.is_barrel(m) {
+if health <= 0 {
+set w.mobjs[index].present = false
+set w = state.add_effect(w, "BEXP", "ABCDE", m.x, m.y, fixed.from_int(state.sector_floor(w, m.sector)), 5)
+set w = state.sound_at(w, "DSBAREXP", m.x, m.y)
+set w = splash(w, m.x, m.y, 128, index)
+}
+return w
+}
+let species = match m.info.role {
+.Monster(s) => s
+_ => return w
+}
+if health <= 0 {
+set w.mobjs[index].state = .Dead(0)
+set w.stats.kills += 1
+set w = state.sound_at(w, species.dies, m.x, m.y)
+if species.drop != 0 {
+let info = things.info(species.drop)
+set w.mobjs += [state.Mobj { kind: species.drop, info: info, x: m.x, y: m.y, angle: 0, sector: m.sector, health: 0, present: true, state: .Idle }]
+}
+return w
+}
+let r = rng.byte(w.seed)
+set w.seed = r[1]
+if r[0] < 128 {
+set w.mobjs[index].state = .Pain(8)
+set w = state.sound_at(w, species.hurt, m.x, m.y)
+} else if m.state == .Idle {
+set w.mobjs[index].state = .Chase(0)
+}
+w
+}
+
+// ---------- monsters ----------
+
+note "Whether a point is in the half of the map a monster faces (it sees 180 degrees)."
+fn in_front(m: state.Mobj, x: Int, y: Int, trig: geometry.Trig) -> Bool {
+shift_right(x - m.x, 8) * shift_right(trig.cosine[m.angle], 8) + shift_right(y - m.y, 8) * shift_right(trig.sine[m.angle], 8) > 0
+}
+
+fn wake(world: state.World, index: Int) -> state.World {
+var w = world
+let m = w.mobjs[index]
+set w.mobjs[index].state = .Chase(0)
+match m.info.role {
+.Monster(s) => set w = state.sound_at(w, s.sight, m.x, m.y)
+_ => {}
+}
+w
+}
+
+note "Gunfire wakes idle monsters within 1200 units that have a line of sight to the player, whichever way they face."
+pub fn alert(world: state.World) -> state.World {
+var w = world
+let p = w.player
+for i in range(0, length(w.mobjs)) {
+let m = w.mobjs[i]
+if m.present and state.is_monster(m) and m.state == .Idle and state.distance_units(m.x, m.y, p.x, p.y) < 1200 and not state.blocked(w, m.x, m.y, p.x, p.y) {
+set w = wake(w, i)
+}
+}
+w
+}
+
+note "The fine angle from a point towards another: the nearest of 64 directions (std/plane)."
+pub fn direction(x: Int, y: Int, to_x: Int, to_y: Int, trig: geometry.Trig) -> Int = plane.direction(to_x - x, to_y - y, trig.cosine, trig.sine, 64)
+
+pub fn run_monsters(world: state.World, trig: geometry.Trig) -> state.World {
+var w = world
+for i in range(0, length(w.mobjs)) {
+let m = w.mobjs[i]
+if m.present and state.is_monster(m) {
+set w = think(w, i, trig)
+}
+}
+w
+}
+
+note "One tic of a monster. Idle monsters look for the player every 4 tics; chasing monsters walk towards the player and sometimes attack. An attack lands after 8 tics: a bite, an instant shot, or a projectile that has to fly."
+fn think(world: state.World, index: Int, trig: geometry.Trig) -> state.World {
+var w = world
+let m = w.mobjs[index]
+let species = match m.info.role {
+.Monster(s) => s
+_ => return w
+}
+let p = w.player
+let distance = state.distance_units(m.x, m.y, p.x, p.y)
+match m.state {
+.Idle => {
+if (w.tic + index) % 4 == 0 and distance < 2048 and w.stats.health > 0 and (distance < 64 or in_front(m, p.x, p.y, trig)) and not state.blocked(w, m.x, m.y, p.x, p.y) {
+set w = wake(w, index)
+}
+}
+.Chase(stuck) => {
+if w.stats.health <= 0 {
+set w.mobjs[index].state = .Idle
+return w
+}
+set w = chase_step(w, index, stuck, trig)
+let r = rng.byte(w.seed)
+set w.seed = r[1]
+let reach = m.info.radius + movement.radius() + 20
+let wants = if species.melee { distance < reach and r[0] < 64 } else { distance < 1024 and r[0] < 4 }
+if wants and not state.blocked(w, m.x, m.y, p.x, p.y) {
+set w.mobjs[index].state = .Attack(0)
+}
+}
+.Attack(time) => {
+set w.mobjs[index].angle = direction(m.x, m.y, p.x, p.y, trig)
+if time == 8 {
+set w = attack(w, index, species, distance, trig)
+}
+set w.mobjs[index].state = if time >= 16 { state.State.Chase(0) } else { state.State.Attack(time + 1) }
+}
+.Pain(time) => set w.mobjs[index].state = if time <= 1 { state.State.Chase(0) } else { state.State.Pain(time - 1) }
+.Dead(time) => set w.mobjs[index].state = .Dead(math.min(time + 1, 1000))
+}
+w
+}
+
+fn attack(world: state.World, index: Int, species: things.Species, distance: Int, trig: geometry.Trig) -> state.World {
+var w = world
+let m = w.mobjs[index]
+let p = w.player
+if state.blocked(w, m.x, m.y, p.x, p.y) {
+return w
+}
+let angle = direction(m.x, m.y, p.x, p.y, trig)
+if species.melee {
+if distance < m.info.radius + movement.radius() + 24 {
+let r = state.roll(w, species.damage_min, species.damage_max)
+set w.seed = r[1]
+set w = state.sound_at(w, "DSSGTATK", m.x, m.y)
+set w = state.hurt_player(w, r[0])
+}
+return w
+}
+if species.missile != "" {
+set w = state.sound_at(w, "DSFIRSHT", m.x, m.y)
+let speed = if species.missile == "BAL7" { 15 } else { 10 }
+return launch(w, trig, species.missile, m.x, m.y, fixed.from_int(state.sector_floor(w, m.sector) + 32), angle, speed, species.damage_min, species.damage_max, 6, false, index)
+}
+// Instant shots: the farther away, the more often they miss (from 3 in 4 up close to 1 in 6).
+set w = state.sound_at(w, if species.name == "shotgun guy" { "DSSHOTGN" } else { "DSPISTOL" }, m.x, m.y)
+let r = rng.byte(w.seed)
+set w.seed = r[1]
+if r[0] < math.clamp(192 - distance / 4, 40, 192) {
+let d = state.roll(w, species.damage_min, species.damage_max)
+set w.seed = d[1]
+set w = state.hurt_player(w, d[0])
+}
+w
+}
+
+note "Moves a chasing monster towards the player at its speed. When walls or things block the way it tries each axis alone, then, for a while, a sideways direction."
+fn chase_step(world: state.World, index: Int, stuck: Int, trig: geometry.Trig) -> state.World {
+var w = world
+let m = w.mobjs[index]
+let p = w.player
+let dx = p.x - m.x
+let dy = p.y - m.y
+let length = math.max(1, state.distance_units(m.x, m.y, p.x, p.y))
+let speed = fixed.from_int(m.info.speed)
+var step_x = dx / length * m.info.speed
+var step_y = dy / length * m.info.speed
+if stuck > 0 {
+let old_x = step_x
+set step_x = -step_y
+set step_y = old_x
+}
+let floor = state.sector_floor(w, m.sector)
+let reach = fixed.from_int(m.info.radius + movement.radius())
+for attempt in [[step_x, step_y], [step_x, 0], [0, step_y], [math.clamp(step_x, -speed, speed), 0]] {
+let x = m.x + attempt[0]
+let y = m.y + attempt[1]
+let near_player = math.abs(x - p.x) < reach and math.abs(y - p.y) < reach
+if (attempt[0] != 0 or attempt[1] != 0) and not near_player and movement.fits_radius(w.level, x, y, floor, m.info.radius) and not state.hits_thing(w, x, y, m.info.radius, index) {
+set w.mobjs[index].x = x
+set w.mobjs[index].y = y
+set w.mobjs[index].sector = geometry.sector_at(w.level, x, y)
+set w.mobjs[index].angle = direction(m.x, m.y, p.x, p.y, trig)
+set w.mobjs[index].state = .Chase(math.max(stuck - 1, 0))
+return w
+}
+}
+set w.mobjs[index].state = .Chase(if stuck > 0 { stuck - 1 } else { 16 })
+w
+}

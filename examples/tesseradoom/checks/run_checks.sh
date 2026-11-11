@@ -58,4 +58,31 @@ for demo in DEMO1 DEMO4; do
 done
 check "M9 demo playback (without monsters) stays clear of walls; parity not checked (no reference)" $ok
 
+# Features beyond the roadmap (sound events, projectiles, teleporters, crushers, lights, switches, saving).
+printf 'give\nweapon 5\nfire\nwait 80\n' | "$td" game E1M1 --no-monsters > "$build/f1"
+grep -q "ammo 200/50/49/300 weapon 4.*missiles 1 .*sounds: DSRLAUNC" "$build/f1" && tail -1 "$build/f1" | grep -q "missiles 0"
+check "rocket fired (sound, rocket in flight, one rocket used) and exploded on a wall" $?
+
+(printf 'place 848 760 90\n'; for i in $(seq 1 40); do printf 'wait 5\n'; done) | "$td" game E1M1 > "$build/f2"
+grep -q "missiles [1-9]" "$build/f2" && grep -q "DSFIRSHT" "$build/f2" && grep -q "DSFIRXPL" "$build/f2"
+check "imps throw fireballs that fly and explode" $?
+
+printf 'place -32 210 90\nforward 64\n' | "$td" game E4M6 --no-monsters | tail -1 | grep -q "at 1888 1808 angle 270"
+check "teleporter (E4M6) moves the player to its destination" $?
+
+printf 'place 100 32 180\nforward 50\nsector 639\nwait 20\nsector 639\nwait 40\nsector 639\n' | "$td" game E2M9 --no-monsters | grep "^sector 639" | awk '{print $6}' | tr '\n' ' ' | grep -q "^-14 -54 -42 $"
+check "crusher (E2M9) moves its ceiling down and back up" $?
+
+(for i in $(seq 1 16); do printf 'sector 32\nwait 5\n'; done) | "$td" game E1M1 --no-monsters | grep "^sector 32" | awk '{print $8}' | sort -u | wc -l | grep -q "^2$"
+check "blinking light (E1M1 sector 32) changes between two levels" $?
+
+printf 'place -360 1296 180\nuse\nswitch 615\n' | "$td" game E1M1 --no-monsters > "$build/f3"
+grep -q "^switch 615 -1" "$build/f3" && grep -q "exited 1 next E1M2" "$build/f3"
+check "exit switch changes texture for good and ends the level (next E1M2)" $?
+
+printf 'give\nweapon 5\nfire\nwait 100\nwait 300\nsave %s\nwait 400\n' "$build/s1.sav" | "$td" game E1M2 | tail -1 | sed 's/ sounds:.*//' > "$build/a"
+printf 'load %s\nsave %s\nwait 400\n' "$build/s1.sav" "$build/s2.sav" | "$td" game E1M2 | tail -1 | sed 's/ sounds:.*//' > "$build/b"
+cmp -s "$build/s1.sav" "$build/s2.sav" && cmp -s "$build/a" "$build/b"
+check "saved games load back identically and continue the same way (400 tics with monsters)" $?
+
 exit $failed

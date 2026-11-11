@@ -8,6 +8,7 @@
 
 import std/fixed
 import std/math
+import std/plane
 import art
 import geometry
 import level
@@ -19,6 +20,9 @@ art: art.Art
 upper: List[Int]
 lower: List[Int]
 middle: List[Int]
+switched_upper: List[Int]
+switched_lower: List[Int]
+switched_middle: List[Int]
 floor_flat: List[Int]
 ceiling_flat: List[Int]
 sky_flat: Int
@@ -38,6 +42,7 @@ note "The parts of a frame that change while playing: sector heights (doors, lif
 type View {
 scene: Scene
 sectors: List[level.Sector]
+switched: List[Int]
 camera: geometry.Camera
 rays: geometry.Rays
 }
@@ -67,10 +72,16 @@ pub fn prepare(l: level.Level, a: art.Art) -> Scene {
 var upper: List[Int] = []
 var lower: List[Int] = []
 var middle: List[Int] = []
+var switched_upper: List[Int] = []
+var switched_lower: List[Int] = []
+var switched_middle: List[Int] = []
 for side in l.sidedefs {
 set upper += [art.texture(a, side.upper)]
 set lower += [art.texture(a, side.lower)]
 set middle += [art.texture(a, side.middle)]
+set switched_upper += [art.texture(a, switch_partner(side.upper))]
+set switched_lower += [art.texture(a, switch_partner(side.lower))]
+set switched_middle += [art.texture(a, switch_partner(side.middle))]
 }
 var floors: List[Int] = []
 var ceilings: List[Int] = []
@@ -87,27 +98,40 @@ set lengths += [math.isqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)
 // The sky texture follows the episode: E2M1 shows SKY2, and so on.
 let codes = code_points(l.name)
 let sky_name = if length(codes) == 4 and codes[0] == 69 { "SKY\(from_code_point(codes[1]))" } else { "SKY1" }
-Scene { level: l, art: a, upper: upper, lower: lower, middle: middle, floor_flat: floors, ceiling_flat: ceilings, sky_flat: art.flat(a, "F_SKY1"), sky: art.texture(a, sky_name), seg_length: lengths }
+Scene { level: l, art: a, upper: upper, lower: lower, middle: middle, switched_upper: switched_upper, switched_lower: switched_lower, switched_middle: switched_middle, floor_flat: floors, ceiling_flat: ceilings, sky_flat: art.flat(a, "F_SKY1"), sky: art.texture(a, sky_name), seg_length: lengths }
 }
 
-note "Every texture a level's sidedefs name, plus the skies; textures are composed only when used."
+note "The other texture of a switch: SW1... and SW2... are its two positions. Other names stay."
+pub fn switch_partner(name: Text) -> Text {
+if starts_with(name, "SW1") {
+return "SW2" + slice_text(name, 3, length(name))
+}
+if starts_with(name, "SW2") {
+return "SW1" + slice_text(name, 3, length(name))
+}
+name
+}
+
+note "Every texture a level's sidedefs name, their switch partners, and the skies; textures are composed only when used."
 pub fn wanted_textures(l: level.Level) -> List[Text] {
 var names: Map[Text, Bool] = ["SKY1": true, "SKY2": true, "SKY3": true, "SKY4": true]
 for side in l.sidedefs {
-set names = put(put(put(names, side.upper, true), side.lower, true), side.middle, true)
+for name in [side.upper, side.lower, side.middle] {
+set names = put(put(names, name, true), switch_partner(name), true)
+}
 }
 keys(names)
 }
 
 note "Renders the level as it was loaded, without things."
-pub fn render(scene: Scene, camera: geometry.Camera, trig: geometry.Trig) -> List[Int] = render_world(scene, scene.level.sectors, camera, trig, [], art.Sprites { pictures: [], frames: [:] })
+pub fn render(scene: Scene, camera: geometry.Camera, trig: geometry.Trig) -> List[Int] = render_world(scene, scene.level.sectors, repeat([0], length(scene.level.sidedefs)), camera, trig, [], art.Sprites { pictures: [], frames: [:] })
 
 note "Renders a frame with the current sector heights and the given things."
-pub fn render_world(scene: Scene, sectors: List[level.Sector], camera: geometry.Camera, trig: geometry.Trig, things: List[SpriteDraw], sprites: art.Sprites) -> List[Int] {
+pub fn render_world(scene: Scene, sectors: List[level.Sector], switched: List[Int], camera: geometry.Camera, trig: geometry.Trig, things: List[SpriteDraw], sprites: art.Sprites) -> List[Int] {
 let width = geometry.screen_width()
 let height = geometry.screen_height()
 var canvas = Canvas { pixels: repeat([0], width * height), depth: repeat([far()], width * height), top: repeat([0], width), bottom: repeat([height - 1], width), open: width }
-let view = View { scene: scene, sectors: sectors, camera: camera, rays: geometry.column_rays(trig, camera.angle) }
+let view = View { scene: scene, sectors: sectors, switched: switched, camera: camera, rays: geometry.column_rays(trig, camera.angle) }
 let nodes = length(scene.level.nodes)
 // Only `set canvas = f(canvas, ...)` changes the canvas in place (spec 6.2); other forms would copy it.
 if nodes == 0 {
@@ -209,6 +233,10 @@ let two_sided = back_index >= 0
 let back = if two_sided { view.sectors[l.sidedefs[back_index].sector] } else { front }
 let front_sky = scene.ceiling_flat[side.sector] == scene.sky_flat
 let back_sky = two_sided and scene.ceiling_flat[l.sidedefs[back_index].sector] == scene.sky_flat
+let flipped = view.switched[side_index] != 0
+let middle_texture = if flipped { scene.switched_middle[side_index] } else { scene.middle[side_index] }
+let upper_texture = if flipped { scene.switched_upper[side_index] } else { scene.upper[side_index] }
+let lower_texture = if flipped { scene.switched_lower[side_index] } else { scene.lower[side_index] }
 let lower_unpegged = bit_and(line.flags, 16) != 0
 let upper_unpegged = bit_and(line.flags, 8) != 0
 let seg_length = scene.seg_length[index]
@@ -220,7 +248,7 @@ for x in range(range[0], range[1]) {
 let top = c.top[x]
 let bottom = c.bottom[x]
 if top <= bottom {
-let hit = geometry.intersect(cam.x, cam.y, view.rays.dx[x], view.rays.dy[x], a.x, a.y, b.x, b.y)
+let hit = plane.intersect(cam.x, cam.y, view.rays.dx[x], view.rays.dy[x], a.x, a.y, b.x, b.y)
 if hit.hit and hit.distance > 1024 {
 let distance = hit.distance
 let u = seg.offset + side.x_offset + fixed.floor_int(hit.along * seg_length)
@@ -237,8 +265,8 @@ if floor < cam.z {
 set c = draw_flat(view, c, x, math.max(wall_bottom + 1, top), bottom, floor, scene.floor_flat[side.sector], front.light)
 }
 if not two_sided {
-let texture_top = if lower_unpegged { floor + fixed.from_int(texture_height(scene, scene.middle[side_index])) } else { ceiling }
-set c = draw_wall(view, c, x, wall_top, wall_bottom, scene.middle[side_index], u, texture_top + fixed.from_int(side.y_offset), distance, light)
+let texture_top = if lower_unpegged { floor + fixed.from_int(texture_height(scene, middle_texture)) } else { ceiling }
+set c = draw_wall(view, c, x, wall_top, wall_bottom, middle_texture, u, texture_top + fixed.from_int(side.y_offset), distance, light)
 set c = mark_depth(c, x, wall_top, wall_bottom, distance)
 set c.top[x] = bottom + 1
 set c.bottom[x] = top - 1
@@ -248,15 +276,15 @@ var new_top = wall_top
 var new_bottom = wall_bottom
 if back_ceiling < ceiling and not (front_sky and back_sky) {
 let upper_end = math.min(row_of(back_ceiling, cam.z, distance) - 1, wall_bottom)
-let texture_top = if upper_unpegged { ceiling } else { back_ceiling + fixed.from_int(texture_height(scene, scene.upper[side_index])) }
-set c = draw_wall(view, c, x, wall_top, upper_end, scene.upper[side_index], u, texture_top + fixed.from_int(side.y_offset), distance, light)
+let texture_top = if upper_unpegged { ceiling } else { back_ceiling + fixed.from_int(texture_height(scene, upper_texture)) }
+set c = draw_wall(view, c, x, wall_top, upper_end, upper_texture, u, texture_top + fixed.from_int(side.y_offset), distance, light)
 set c = mark_depth(c, x, wall_top, upper_end, distance)
 set new_top = math.max(new_top, upper_end + 1)
 }
 if back_floor > floor {
 let lower_start = math.max(row_of(back_floor, cam.z, distance), new_top)
 let texture_top = if lower_unpegged { ceiling } else { back_floor }
-set c = draw_wall(view, c, x, lower_start, wall_bottom, scene.lower[side_index], u, texture_top + fixed.from_int(side.y_offset), distance, light)
+set c = draw_wall(view, c, x, lower_start, wall_bottom, lower_texture, u, texture_top + fixed.from_int(side.y_offset), distance, light)
 set c = mark_depth(c, x, lower_start, wall_bottom, distance)
 set new_bottom = math.min(new_bottom, lower_start - 1)
 }

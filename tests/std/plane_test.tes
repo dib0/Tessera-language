@@ -1,0 +1,38 @@
+// Tests of std/plane (16.16 fixed point).
+import std/fixed
+import std/plane
+
+fn f(n: Int) -> Int = fixed.from_int(n)
+
+test "a ray meets a segment" {
+// From (0, 0) east towards the segment x = 10, y from -5 to 5.
+let hit = plane.intersect(0, 0, f(1), 0, 10, -5, 10, 5)
+assert(hit.hit and hit.distance == f(10) and hit.along == f(1) / 2)
+assert(not plane.intersect(0, 0, -f(1), 0, 10, -5, 10, 5).hit)
+assert(not plane.intersect(0, f(6), f(1), 0, 10, -5, 10, 5).hit)
+assert(not plane.intersect(0, 0, 0, f(1), 10, -5, 10, 5).hit)
+}
+
+test "segments crossing and orientation" {
+assert(plane.crosses(f(0), f(0), f(10), f(10), f(0), f(10), f(10), f(0)))
+assert(not plane.crosses(f(0), f(0), f(4), f(4), f(0), f(10), f(10), f(0)))
+assert(plane.orient(0, 0, f(10), 0, f(5), f(1)) == 1)
+assert(plane.orient(0, 0, f(10), 0, f(5), -f(1)) == -1)
+assert(plane.orient(0, 0, f(10), 0, f(5), 0) == 0)
+}
+
+test "circles touching segments" {
+assert(plane.circle_touches(f(5), f(3), 4, 0, 0, 10, 0))
+assert(not plane.circle_touches(f(5), f(4), 4, 0, 0, 10, 0))
+assert(plane.circle_touches(f(13), f(0), 4, 0, 0, 10, 0))
+assert(not plane.circle_touches(f(15), f(0), 4, 0, 0, 10, 0))
+}
+
+test "nearest direction" {
+let c = fixed.cosine_table(360)
+let s = fixed.sine_table(360)
+assert(plane.direction(f(1), 0, c, s, 8) == 0)
+assert(plane.direction(0, f(1), c, s, 8) == 90)
+assert(plane.direction(-f(5), -f(4), c, s, 8) == 225)
+assert(plane.direction(f(1), f(1), c, s, 360) == 45)
+}

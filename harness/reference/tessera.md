@@ -312,6 +312,11 @@ Error messages belong on standard error: `exit_with(1, "error: \(reason)")` repo
 - `std/fixed`: 16.16 fixed point: `one()`, `from_int`, `floor_int`, `mul`, `div`, `abs`, `sine(index, count)`, `cosine(index, count)` (angle `2π · index / count`), `sine_table(count)`, `cosine_table(count)`.
 - `std/palette`: `read(data: Bytes, at: Int) -> List[Int]` (256 colors from 768 RGB bytes, packed like `rgb`), `red`, `green`, `blue`.
 - `std/ppm`: `encode(width, height, pixels: List[Int], palette: List[Int]) -> Bytes` (P6 image of palette indexes; write it with `write_bytes`).
+- `std/raster`: `Image { width, height, pixels }` with `blank`, `from_pixels`, `fill`, `line`, `blit(image, source, x, y, transparent)`, `remap(image, table)`, `Font` with `text` and `measure` (use as `set image = raster.fill(image, ...)`).
+- `std/sound`: `Sound { samples, rate }`, `from_wav(bytes)`, `tone(hz, ms, loudness)`, `position(dx, dy, right_x, right_y, range) -> [volume, pan]`, `play(sound, volume, pan)` (`uses audio`; the built-in is `play_sound(samples, rate, volume, pan)`).
+- `std/keys`: `Keys`, `none()`, `update(keys, event)`, `held(keys, name)`, `any_held`, `typed(keys, word)`.
+- `std/plane`: fixed-point 2D geometry: `intersect`, `crosses`, `orient`, `circle_touches`, `direction`.
+- `std/rng`: repeatable random numbers: `roll(seed, low, high) -> [value, next seed]`.
 - `std/http`: a web application has `fn handle(request: http.Request) -> http.Response` instead of `main` (no `io`). `Request` has `method` (`"GET"`), `path` (decoded), `query: Map[Text, Text]`, `headers: Map[Text, Text]` (lowercase names), `body: Bytes`. Responses: `http.text(status, body)`, `http.html(status, body)`, `http.json(status, body)`, `http.redirect(location)`, `http.not_found()`; `http.match_path("/items/:id", request.path) -> Option[Map[Text, Text]]`, `http.form(request)`, `http.cookie(request, name)`, `http.with_header(response, name, value)`, `http.with_cookie(response, name, value, max_age)`.
 
 Tests: `test "name" { assert(condition) }` at the top level of a file, run with `tessera1 test file.tes`.

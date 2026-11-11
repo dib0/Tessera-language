@@ -1,0 +1,88 @@
+// std/sound: sounds for the built-in `play_sound` (effect `audio`): reading WAV files,
+// making tones, and the volume and stereo position of a sound heard from somewhere in a 2D world.
+
+import std/fixed
+import std/math
+
+note "A sound ready for `play_sound`: 8-bit unsigned mono samples (128 is silence) and their rate."
+pub type Sound {
+samples: Bytes
+rate: Int
+}
+
+fn u16(b: Bytes, at: Int) -> Int = bit_or(b[at], shift_left(b[at + 1], 8))
+
+fn u32(b: Bytes, at: Int) -> Int = bit_or(u16(b, at), shift_left(u16(b, at + 2), 16))
+
+note "Reads a WAV file (RIFF, uncompressed PCM, 8 or 16 bits, mono or stereo) as a mono 8-bit sound. Stereo is mixed down; 16-bit samples keep their top 8 bits."
+pub fn from_wav(data: Bytes) -> Result[Sound, Text] {
+if length(data) < 12 or from_bytes(slice(data, 0, 4)) != .Some("RIFF") or from_bytes(slice(data, 8, 12)) != .Some("WAVE") {
+return .Error("not a WAV file")
+}
+var at = 12
+var channels = 0
+var rate = 0
+var bits = 0
+while at + 8 <= length(data) {
+let id = value_or(from_bytes(slice(data, at, at + 4)), "")
+let size = u32(data, at + 4)
+let body = at + 8
+if body + size > length(data) {
+return .Error("the WAV file is cut off")
+}
+if id == "fmt " {
+if size < 16 or u16(data, body) != 1 {
+return .Error("only uncompressed (PCM) WAV files are supported")
+}
+set channels = u16(data, body + 2)
+set rate = u32(data, body + 4)
+set bits = u16(data, body + 14)
+}
+if id == "data" {
+if channels < 1 or channels > 2 or (bits != 8 and bits != 16) {
+return .Error("unsupported WAV format: \(channels) channels, \(bits) bits")
+}
+let frame = channels * bits / 8
+let count = size / frame
+var out = repeat([128], count)
+for i in range(0, count) {
+var total = 0
+for c in range(0, channels) {
+let p = body + i * frame + c * bits / 8
+// 16-bit samples are signed; their high byte plus 128 is the unsigned 8-bit value.
+set total += if bits == 8 { data[p] } else { (data[p + 1] + 128) % 256 }
+}
+set out[i] = total / channels
+}
+return .Ok(Sound { samples: bytes(out), rate: math.clamp(rate, 1000, 96000) })
+}
+set at = body + size + size % 2
+}
+.Error("the WAV file has no data")
+}
+
+note "A sine tone of `frequency` hertz lasting `milliseconds`, at 22,050 samples per second, made with integer arithmetic (std/fixed)."
+pub fn tone(frequency: Int, milliseconds: Int, loudness: Int) -> Sound {
+let rate = 22050
+let count = math.max(rate * milliseconds / 1000, 1)
+let amplitude = math.clamp(loudness, 0, 100) * 127 / 100
+var out = repeat([128], count)
+for i in range(0, count) {
+set out[i] = 128 + shift_right(fixed.sine(i * frequency, rate) * amplitude, 16)
+}
+Sound { samples: bytes(out), rate: rate }
+}
+
+note "How loud a sound is and where it sits left to right, for a listener facing some direction: `dx`, `dy` is the offset from listener to sound in whole units, (`right_x`, `right_y`) the listener's right-hand direction as fixed values (65536 is 1.0). Volume falls from 100 to 0 at distance `range`; pan is -100 (left) to 100 (right), at most 75 so both ears still hear it. Returns [volume, pan]."
+pub fn position(dx: Int, dy: Int, right_x: Int, right_y: Int, range: Int) -> List[Int] {
+let distance = math.isqrt(dx * dx + dy * dy)
+if distance >= range {
+return [0, 0]
+}
+let side = fixed.floor_int(dx * right_x + dy * right_y)
+let pan = if distance < 32 { 0 } else { side * 75 / distance }
+[100 - distance * 100 / range, math.clamp(pan, -75, 75)]
+}
+
+note "Plays a sound at a volume (0 to 100) and pan (-100 to 100)."
+pub fn play(s: Sound, volume: Int, pan: Int) -> Unit uses audio = play_sound(s.samples, s.rate, math.clamp(volume, 0, 100), math.clamp(pan, -100, 100))

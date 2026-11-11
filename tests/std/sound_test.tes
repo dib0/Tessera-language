@@ -1,0 +1,45 @@
+// Tests of std/sound. The WAV files are built byte by byte here.
+import std/sound
+
+fn le16(n: Int) -> List[Int] = [n % 256, n / 256 % 256]
+
+fn le32(n: Int) -> List[Int] = le16(n % 65536) + le16(n / 65536)
+
+fn wav(channels: Int, bits: Int, samples: List[Int]) -> Bytes {
+let rate = 11025
+let format = [1, 0] + le16(channels) + le32(rate) + le32(rate * channels * bits / 8) + le16(channels * bits / 8) + le16(bits)
+let body = code_points("WAVE") + code_points("fmt ") + le32(16) + format + code_points("data") + le32(length(samples)) + samples
+bytes(code_points("RIFF") + le32(length(body)) + body)
+}
+
+test "8-bit mono WAV" {
+let s = sound.from_wav(wav(1, 8, [128, 255, 0])) else fail("not read")
+assert(s.rate == 11025)
+assert(byte_values(s.samples) == [128, 255, 0])
+}
+
+test "16-bit stereo WAV is mixed to 8-bit mono" {
+// Frames (left, right): (0, 0), (32767, 32767), (-32768, 32767).
+let s = sound.from_wav(wav(2, 16, [0, 0, 0, 0, 255, 127, 255, 127, 0, 128, 255, 127])) else fail("not read")
+assert(byte_values(s.samples) == [128, 255, 127])
+}
+
+test "not a WAV file" {
+assert(sound.from_wav(to_bytes("hello world!")) == .Error("not a WAV file"))
+}
+
+test "tones have the right length and stay around silence" {
+let t = sound.tone(441, 100, 50)
+assert(length(t.samples) == 2205)
+assert(t.samples[0] == 128)
+// A quarter of a 441 Hz period at 22,050 samples per second is 12.5 samples: near the peak.
+assert(t.samples[12] > 185 and t.samples[12] < 192)
+}
+
+test "volume falls with distance, pan follows the side" {
+// Listener facing north: right is east (1.0, 0).
+assert(sound.position(0, 0, 65536, 0, 1000) == [100, 0])
+assert(sound.position(500, 0, 65536, 0, 1000) == [50, 75])
+assert(sound.position(-300, 400, 65536, 0, 1000) == [50, -45])
+assert(sound.position(0, 2000, 65536, 0, 1000) == [0, 0])
+}

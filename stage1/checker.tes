@@ -103,7 +103,7 @@ uses_ui: Bool
 entry: Text
 }
 
-fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui", "time", "random", "log", "db", "net"]
+fn effect_names() -> List[Text] = ["io", "fs", "env", "process", "ui", "time", "random", "log", "db", "net", "audio"]
 
 fn generic_builtin_names() -> List[Text] = ["to_text", "length", "append", "concat", "slice", "replace_at", "value_or", "sort", "index_of", "contains", "get", "put", "remove", "keys", "values", "map", "filter", "sort_by"]
 
@@ -213,6 +213,7 @@ builtin("text_width", [.Text], .Int, "ui"),
 builtin("present", [], .Unit, "ui"),
 builtin("next_event", [], .Named("WindowEvent"), "ui"),
 builtin("poll_event", [], .Option(.Named("WindowEvent")), "ui"),
+builtin("play_sound", [.Bytes, .Int, .Int, .Int], .Unit, "audio"),
 builtin("draw_pixels", [.Int, .Int, .Int, list_of(.Int), .Int], .Unit, "ui"),
 ]
 }
@@ -514,7 +515,11 @@ if find_import(c, name) != .None {
 return report(c, source.error_help("E0204", span, "`\(name)` is the name of an imported module", "choose a different name, so `\(name).` always means the module"))
 }
 match find_local(c, name) {
-.Some(existing) => report(c, source.error_help("E0204", span, "`\(name)` is already defined on line \(existing.span.line)", "Tessera does not allow shadowing; choose a different name"))
+.Some(existing) => {
+// The new name is still declared, so later uses do not report follow-up errors against the old one.
+let reported = report(c, source.error_help("E0204", span, "`\(name)` is already defined on line \(existing.span.line)", "Tessera does not allow shadowing; choose a different name"))
+reported with { locals: append(reported.locals, Local { name: name, ty: ty, mutable: mutable, was_set: true, span: span, kind: what }) }
+}
 .None => c with { locals: append(c.locals, Local { name: name, ty: ty, mutable: mutable, was_set: false, span: span, kind: what }) }
 }
 }

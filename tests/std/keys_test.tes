@@ -1,0 +1,35 @@
+// Tests of std/keys.
+import std/keys
+
+test "keys are held until released, without regard to case" {
+var k = keys.none()
+set k = keys.update(k, WindowEvent.Key("Up"))
+set k = keys.update(k, WindowEvent.Key("A"))
+assert(keys.held(k, "up") and keys.held(k, "a") and keys.held(k, "A"))
+set k = keys.update(k, WindowEvent.KeyUp("a"))
+assert(keys.held(k, "Up") and not keys.held(k, "a"))
+assert(keys.any_held(k, ["w", "up"]))
+set k = keys.update(k, WindowEvent.Key("Up"))
+assert(k.held == ["up"])
+set k = keys.release_all(k)
+assert(not keys.held(k, "up"))
+}
+
+test "typed text keeps single characters, for codes" {
+var k = keys.none()
+for name in ["X", "Shift", "i", "d", "k", "f", "a"] {
+set k = keys.update(k, WindowEvent.Key(name))
+}
+assert(k.typed == "xidkfa")
+assert(keys.typed(k, "IDKFA"))
+assert(not keys.typed(keys.forget_typed(k), "idkfa"))
+for _ in range(0, 40) {
+set k = keys.update(k, WindowEvent.Key("z"))
+}
+assert(length(k.typed) == 32)
+}
+
+test "other events change nothing" {
+let k = keys.update(keys.none(), WindowEvent.Click(1, 2, 1))
+assert(k == keys.none())
+}

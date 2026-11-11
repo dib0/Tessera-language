@@ -1,0 +1,513 @@
+// Line and sector specials: doors, lifts, lowering floors, crushing ceilings, teleporters,
+// switches (whose textures change), exits, light effects, damaging floors and secrets.
+// Special numbers, speeds and wait times follow the public description of the WAD format; the
+// logic is this engine's own. Effects: none.
+
+import std/fixed
+import std/math
+import std/rng
+import geometry
+import level
+import movement
+import state
+
+note "Manual doors, opened from the side facing the player; they act on the sector behind the line."
+fn is_manual_door(special: Int) -> Bool = contains([1, 26, 27, 28, 31, 32, 33, 34, 117, 118], special)
+
+pub fn is_walk_special(special: Int) -> Bool = contains([2, 3, 4, 6, 10, 19, 25, 38, 39, 52, 57, 73, 74, 75, 77, 82, 83, 86, 88, 90, 97, 105, 108, 109, 120, 121, 124, 141], special)
+
+note "Specials that work once; the others repeat."
+fn is_once(special: Int) -> Bool = contains([2, 3, 4, 6, 10, 11, 19, 21, 23, 25, 29, 38, 39, 49, 50, 51, 52, 57, 102, 103, 108, 109, 112, 121, 122, 124, 141], special)
+
+pub fn is_teleport(special: Int) -> Bool = special == 39 or special == 97
+
+fn lowest_neighbor_ceiling(w: state.World, sector: Int) -> Int {
+var lowest = 32767
+for n in w.neighbors[sector] {
+set lowest = math.min(lowest, w.level.sectors[n].ceiling)
+}
+if lowest == 32767 { w.level.sectors[sector].ceiling } else { lowest }
+}
+
+fn lowest_neighbor_floor(w: state.World, sector: Int) -> Int {
+var lowest = w.level.sectors[sector].floor
+for n in w.neighbors[sector] {
+set lowest = math.min(lowest, w.level.sectors[n].floor)
+}
+lowest
+}
+
+fn highest_neighbor_floor(w: state.World, sector: Int) -> Int {
+var highest = -32768
+for n in w.neighbors[sector] {
+set highest = math.max(highest, w.level.sectors[n].floor)
+}
+if highest == -32768 { w.level.sectors[sector].floor } else { highest }
+}
+
+fn lowest_neighbor_light(w: state.World, sector: Int) -> Int {
+var lowest = w.level.sectors[sector].light
+for n in w.neighbors[sector] {
+set lowest = math.min(lowest, w.level.sectors[n].light)
+}
+lowest
+}
+
+// ---------- creating ----------
+
+note "For every sector, the sectors that share a two-sided line with it."
+pub fn find_neighbors(l: level.Level) -> List[List[Int]] {
+var found = repeat([[0]], length(l.sectors))
+for i in range(0, length(found)) {
+set found[i] = []
+}
+for line in l.linedefs {
+if line.back >= 0 {
+let a = l.sidedefs[line.front].sector
+let b = l.sidedefs[line.back].sector
+if a != b {
+if not contains(found[a], b) {
+set found[a] += [b]
+}
+if not contains(found[b], a) {
+set found[b] += [a]
+}
+}
+}
+}
+found
+}
+
+note "The middle of every sector's bounding box (fixed), where its sounds come from."
+pub fn find_centers(l: level.Level) -> List[List[Int]] {
+var low_x = repeat([32767], length(l.sectors))
+var low_y = repeat([32767], length(l.sectors))
+var high_x = repeat([-32768], length(l.sectors))
+var high_y = repeat([-32768], length(l.sectors))
+for line in l.linedefs {
+for side in [line.front, line.back] {
+if side >= 0 {
+let s = l.sidedefs[side].sector
+for v in [l.vertexes[line.start], l.vertexes[line.end]] {
+set low_x[s] = math.min(low_x[s], v.x)
+set low_y[s] = math.min(low_y[s], v.y)
+set high_x[s] = math.max(high_x[s], v.x)
+set high_y[s] = math.max(high_y[s], v.y)
+}
+}
+}
+}
+var centers: List[List[Int]] = []
+for s in range(0, length(l.sectors)) {
+set centers += [[fixed.from_int((low_x[s] + high_x[s]) / 2), fixed.from_int((low_y[s] + high_y[s]) / 2)]]
+}
+centers
+}
+
+note "Light effects for the sectors whose special asks for one. Strobes alternate with the lowest neighboring light (or darkness when that is as bright); synchronized strobes (12, 13) start together."
+pub fn find_lights(w: state.World) -> List[state.Light] {
+var lights: List[state.Light] = []
+for s in range(0, length(w.level.sectors)) {
+let sector = w.level.sectors[s]
+let k = sector.special
+if contains([1, 2, 3, 4, 8, 12, 13, 17], k) {
+var dark = lowest_neighbor_light(w, s)
+if dark >= sector.light and k != 8 and k != 17 {
+set dark = 0
+}
+if k == 17 {
+set dark = math.min(dark + 16, sector.light)
+}
+let start = if k == 12 or k == 13 { 1 } else if k == 8 { -1 } else { 1 + (s * 7) % 8 }
+set lights += [state.Light { sector: s, kind: k, bright: sector.light, dark: dark, timer: start }]
+}
+}
+lights
+}
+
+// ---------- triggering specials ----------
+
+note "Carries out a line's special. `by_use` is true when the player pressed `use` on it, which also flips switch textures. Door specials work on the sector behind the line; the others on every sector with the line's tag."
+pub fn trigger(world: state.World, index: Int, by_use: Bool) -> state.World {
+var w = world
+let line = w.level.linedefs[index]
+let special = line.special
+let key = match special {
+26 => "blue"
+32 => "blue"
+27 => "yellow"
+34 => "yellow"
+28 => "red"
+33 => "red"
+_ => ""
+}
+if key != "" and not contains(w.stats.keys, key) {
+set w = state.sound_here(w, "DSNOWAY")
+return state.say(w, "You need a \(key) key to open this door")
+}
+if is_manual_door(special) {
+if line.back < 0 {
+return w
+}
+let sector = w.level.sidedefs[line.back].sector
+let stays = contains([31, 32, 33, 34, 118], special)
+let speed = if special == 117 or special == 118 { 8 } else { 2 }
+set w = start_door(w, sector, speed, if stays { -1 } else { 150 })
+if stays {
+set w.level.linedefs[index].special = 0
+}
+return w
+}
+for sector in range(0, length(w.level.sectors)) {
+if line.tag != 0 and w.level.sectors[sector].tag == line.tag {
+set w = tagged_action(w, special, sector)
+}
+}
+if contains([11, 51, 52, 124], special) {
+set w.exited = if special == 51 or special == 124 { 2 } else { 1 }
+set w = state.say(w, "Level complete")
+}
+if by_use {
+let once = is_once(special)
+set w = flip_switch(w, line.front, if once { -1 } else { 35 })
+set w = state.sound_here(w, if special == 11 or special == 51 { "DSSWTCHX" } else { "DSSWTCHN" })
+}
+if is_once(special) {
+set w.level.linedefs[index].special = 0
+}
+w
+}
+
+note "Switch textures (SW1... and SW2...) of a sidedef swap; `time` tics later they swap back, or never for -1. The renderer reads `switched`."
+fn flip_switch(world: state.World, side: Int, time: Int) -> state.World {
+var w = world
+if side >= 0 {
+set w.switched[side] = time
+}
+w
+}
+
+note "Counts down switches that swap back (repeatable switches, after one second)."
+pub fn run_switches(world: state.World) -> state.World {
+var w = world
+for side in range(0, length(w.switched)) {
+let t = w.switched[side]
+if t > 0 {
+set w.switched[side] = t - 1
+}
+}
+w
+}
+
+fn tagged_action(w: state.World, special: Int, sector: Int) -> state.World {
+if contains([2, 86, 103, 61, 109, 112, 114], special) {
+return start_door(w, sector, if special >= 109 { 8 } else { 2 }, -1)
+}
+if contains([4, 90, 29, 63, 105, 108, 111], special) {
+return start_door(w, sector, if special >= 105 { 8 } else { 2 }, 150)
+}
+if contains([3, 75, 50, 42], special) {
+let started = add_mover(w, state.Mover { sector: sector, motion: .DoorClosing(w.level.sectors[sector].ceiling, 2, -1) })
+return state.sector_sound(started, "DSDORCLS", sector)
+}
+if contains([10, 88, 21, 62, 120, 121, 122, 123], special) {
+let speed = if special >= 120 { 8 } else { 4 }
+let started = add_mover(w, state.Mover { sector: sector, motion: .LiftLowering(lowest_neighbor_floor(w, sector), w.level.sectors[sector].floor, speed) })
+return state.sector_sound(started, "DSPSTART", sector)
+}
+if contains([23, 38, 82, 60], special) {
+return add_mover(w, state.Mover { sector: sector, motion: .FloorLowering(lowest_neighbor_floor(w, sector), 1) })
+}
+if contains([19, 102, 83, 45], special) {
+return add_mover(w, state.Mover { sector: sector, motion: .FloorLowering(highest_neighbor_floor(w, sector), 1) })
+}
+if contains([6, 25, 73, 77, 49, 141], special) {
+let speed = if special == 6 or special == 77 { 2 } else { 1 }
+return add_mover(w, state.Mover { sector: sector, motion: .Crushing(w.level.sectors[sector].ceiling, speed, true, special == 141) })
+}
+if special == 57 or special == 74 {
+return stop_crushers(w, sector)
+}
+w
+}
+
+fn stop_crushers(world: state.World, sector: Int) -> state.World {
+var w = world
+var kept: List[state.Mover] = []
+for m in w.movers {
+let crusher = match m.motion {
+.Crushing(_, _, _, _) => true
+_ => false
+}
+if not (crusher and m.sector == sector) {
+set kept += [m]
+}
+}
+set w.movers = kept
+w
+}
+
+note "Opens a door sector up to 4 units below its lowest neighboring ceiling. A door that is already moving reverses instead (as pressing `use` on an open door closes it)."
+fn start_door(world: state.World, sector: Int, speed: Int, wait: Int) -> state.World {
+var w = world
+let top = lowest_neighbor_ceiling(w, sector) - 4
+for i in range(0, length(w.movers)) {
+if w.movers[i].sector == sector {
+match w.movers[i].motion {
+.DoorClosing(t, s, wt) => set w.movers[i].motion = .DoorOpening(t, s, wt)
+.DoorWaiting(t, s, _, wt) => {
+set w.movers[i].motion = .DoorClosing(t, s, wt)
+set w = state.sector_sound(w, if s > 2 { "DSBDCLS" } else { "DSDORCLS" }, sector)
+}
+_ => {}
+}
+return w
+}
+}
+set w = add_mover(w, state.Mover { sector: sector, motion: .DoorOpening(top, speed, wait) })
+state.sector_sound(w, if speed > 2 { "DSBDOPN" } else { "DSDOROPN" }, sector)
+}
+
+fn add_mover(world: state.World, mover: state.Mover) -> state.World {
+var w = world
+for m in w.movers {
+if m.sector == mover.sector {
+return w
+}
+}
+set w.movers += [mover]
+w
+}
+
+note "Teleports the player to the teleport destination (thing 14) in a sector with the line's tag, facing the destination's direction; momentum stops. Teleport fog appears at both ends."
+pub fn teleport(world: state.World, index: Int) -> state.World {
+var w = world
+let line = w.level.linedefs[index]
+for t in w.level.things {
+if t.kind == 14 {
+let x = fixed.from_int(t.x)
+let y = fixed.from_int(t.y)
+let sector = geometry.sector_at(w.level, x, y)
+if line.tag != 0 and w.level.sectors[sector].tag == line.tag {
+let from_floor = fixed.from_int(state.sector_floor(w, w.player.sector))
+set w = state.add_effect(w, "TFOG", "ABCDEFGHIJ", w.player.x, w.player.y, from_floor, 3)
+set w.player = w.player with { x: x, y: y, sector: sector, angle: geometry.degrees_to_fine(t.angle) }
+set w.momentum_x = 0
+set w.momentum_y = 0
+set w = state.add_effect(w, "TFOG", "ABCDEFGHIJ", x, y, fixed.from_int(state.sector_floor(w, sector)), 3)
+set w = state.sound_here(w, "DSTELEPT")
+if line.special == 39 {
+set w.level.linedefs[index].special = 0
+}
+return w
+}
+}
+}
+w
+}
+
+// ---------- moving sectors ----------
+
+note "Whether the player or a living monster stands in a sector."
+fn occupied(w: state.World, sector: Int) -> Bool {
+if w.player.sector == sector and w.stats.health > 0 {
+return true
+}
+for m in w.mobjs {
+if m.sector == sector and state.is_monster(m) and not state.is_dead(m) and m.present {
+return true
+}
+}
+false
+}
+
+note "A crusher hurts what is under it every 4 tics while the gap is lower than the thing: 10 health."
+fn crush(world: state.World, sector: Int) -> state.World {
+var w = world
+if w.tic % 4 != 0 {
+return w
+}
+let s = w.level.sectors[sector]
+let gap = s.ceiling - s.floor
+if w.player.sector == sector and gap < movement.player_height() {
+set w = state.hurt_player(w, 10)
+}
+for i in range(0, length(w.mobjs)) {
+let m = w.mobjs[i]
+if m.present and m.sector == sector and state.is_monster(m) and not state.is_dead(m) and gap < m.info.height {
+let health = m.health - 10
+set w.mobjs[i].health = health
+if health <= 0 {
+set w.mobjs[i].state = .Dead(0)
+set w.stats.kills += 1
+}
+}
+}
+w
+}
+
+pub fn run_movers(world: state.World) -> state.World {
+var w = world
+var still: List[state.Mover] = []
+for mover in w.movers {
+let s = mover.sector
+let sector = w.level.sectors[s]
+let next = match mover.motion {
+.DoorOpening(top, speed, wait) => {
+let ceiling = math.min(sector.ceiling + speed, top)
+set w.level.sectors[s].ceiling = ceiling
+if ceiling < top { mover.motion } else if wait < 0 { state.Motion.Finished } else { state.Motion.DoorWaiting(top, speed, wait, wait) }
+}
+.DoorWaiting(top, speed, time, wait) => {
+if time > 1 {
+state.Motion.DoorWaiting(top, speed, time - 1, wait)
+} else {
+set w = state.sector_sound(w, if speed > 2 { "DSBDCLS" } else { "DSDORCLS" }, s)
+state.Motion.DoorClosing(top, speed, wait)
+}
+}
+.DoorClosing(top, speed, wait) => {
+if occupied(w, s) and sector.ceiling - speed - sector.floor < movement.player_height() {
+set w = state.sector_sound(w, if speed > 2 { "DSBDOPN" } else { "DSDOROPN" }, s)
+state.Motion.DoorOpening(top, speed, wait)
+} else {
+let ceiling = math.max(sector.ceiling - speed, sector.floor)
+set w.level.sectors[s].ceiling = ceiling
+if ceiling > sector.floor { mover.motion } else { state.Motion.Finished }
+}
+}
+.LiftLowering(low, high, speed) => {
+let floor = math.max(sector.floor - speed, low)
+set w.level.sectors[s].floor = floor
+if floor > low {
+mover.motion
+} else {
+set w = state.sector_sound(w, "DSPSTOP", s)
+state.Motion.LiftWaiting(low, high, speed, 105)
+}
+}
+.LiftWaiting(low, high, speed, time) => {
+if time > 1 {
+state.Motion.LiftWaiting(low, high, speed, time - 1)
+} else {
+set w = state.sector_sound(w, "DSPSTART", s)
+state.Motion.LiftRising(low, high, speed)
+}
+}
+.LiftRising(low, high, speed) => {
+let floor = math.min(sector.floor + speed, high)
+set w.level.sectors[s].floor = floor
+if floor < high {
+mover.motion
+} else {
+set w = state.sector_sound(w, "DSPSTOP", s)
+state.Motion.Finished
+}
+}
+.FloorLowering(target, speed) => {
+let floor = math.max(sector.floor - speed, target)
+set w.level.sectors[s].floor = floor
+if w.tic % 8 == 0 {
+set w = state.sector_sound(w, "DSSTNMOV", s)
+}
+if floor > target { mover.motion } else { state.Motion.Finished }
+}
+.Crushing(top, speed, down, silent) => {
+if not silent and w.tic % 8 == 0 {
+set w = state.sector_sound(w, "DSSTNMOV", s)
+}
+if down {
+let ceiling = math.max(sector.ceiling - speed, sector.floor + 8)
+set w.level.sectors[s].ceiling = ceiling
+set w = crush(w, s)
+state.Motion.Crushing(top, speed, ceiling > sector.floor + 8, silent)
+} else {
+let ceiling = math.min(sector.ceiling + speed, top)
+set w.level.sectors[s].ceiling = ceiling
+state.Motion.Crushing(top, speed, ceiling >= top, silent)
+}
+}
+.Finished => state.Motion.Finished
+}
+if next != .Finished {
+set still += [mover with { motion: next }]
+}
+}
+set w.movers = still
+w
+}
+
+// ---------- lights ----------
+
+pub fn run_lights(world: state.World) -> state.World {
+var w = world
+for i in range(0, length(w.lights)) {
+let light = w.lights[i]
+let s = light.sector
+let current = w.level.sectors[s].light
+match light.kind {
+8 => {
+// Glow: 8 light levels per tic towards the other end, then back.
+let step = if light.timer < 0 { -8 } else { 8 }
+let next = math.clamp(current + step, light.dark, light.bright)
+set w.level.sectors[s].light = next
+if next == light.dark or next == light.bright {
+set w.lights[i].timer = if next == light.dark { 1 } else { -1 }
+}
+}
+17 => {
+if light.timer <= 1 {
+let r = rng.byte(w.seed)
+set w.seed = r[1]
+set w.level.sectors[s].light = math.max(light.bright - (r[0] % 4) * 16, light.dark)
+set w.lights[i].timer = 4
+} else {
+set w.lights[i].timer = light.timer - 1
+}
+}
+_ => {
+if light.timer <= 1 {
+let r = rng.byte(w.seed)
+set w.seed = r[1]
+let to_dark = current != light.dark
+set w.level.sectors[s].light = if to_dark { light.dark } else { light.bright }
+// Strobes stay dark 15 (fast) or 35 (slow) tics and bright 5; blinking lights are random.
+set w.lights[i].timer = match light.kind {
+1 => if to_dark { 1 + r[0] % 8 } else { 1 + r[0] % 64 }
+3 => if to_dark { 35 } else { 5 }
+12 => if to_dark { 35 } else { 5 }
+_ => if to_dark { 15 } else { 5 }
+}
+} else {
+set w.lights[i].timer = light.timer - 1
+}
+}
+}
+}
+w
+}
+
+// ---------- floors that hurt, secrets ----------
+
+note "Damaging floors (sector specials 4, 5, 7 and 16) hurt every 32 tics unless the player wears a radiation suit; entering a secret sector (9) counts it once."
+pub fn floor_effects(world: state.World) -> state.World {
+var w = world
+let s = w.player.sector
+let special = w.level.sectors[s].special
+if special == 9 {
+set w.stats.secrets += 1
+set w.level.sectors[s].special = 0
+return state.say(w, "You found a secret area")
+}
+if w.tic % 32 == 0 and w.stats.radiation_suit == 0 {
+let damage = match special {
+5 => 10
+7 => 5
+4 => 20
+16 => 20
+_ => 0
+}
+set w = state.hurt_player(w, damage)
+}
+w
+}
