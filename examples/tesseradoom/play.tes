@@ -45,6 +45,7 @@ pictures: Map[Text, art.Graphic]
 palettes: List[List[Int]]
 shades: List[List[Int]]
 trig: geometry.Trig
+maps: List[Text]
 }
 
 fn menu_pictures() -> List[Text] = ["TITLEPIC", "HELP1", "M_DOOM", "M_NGAME", "M_LOADG", "M_SAVEG", "M_RDTHIS", "M_QUITG", "M_SKULL1", "M_SKULL2", "M_EPISOD", "M_EPI1", "M_EPI2", "M_EPI3", "M_EPI4", "M_NEWG", "M_SKILL", "M_JKILL", "M_ROUGH", "M_HURT", "M_ULTRA", "M_NMARE", "M_LSLEFT", "M_LSCNTR", "M_LSRGHT", "WIMAP0", "WIMAP1", "WIMAP2"]
@@ -76,7 +77,7 @@ var palettes: List[List[Int]] = []
 for index in range(0, 14) {
 set palettes += [if length(playpal) >= (index + 1) * 768 { palette.read(playpal, index * 768) } else { palette.read(playpal, 0) }]
 }
-Assets { wad: w, sprites: art.load_sprites(w), sounds: art.load_sounds(w), font: raster.Font { glyphs: glyphs, space: 4, transparent: -1 }, pictures: pictures, palettes: palettes, shades: shades, trig: geometry.make_trig() }
+Assets { wad: w, sprites: art.load_sprites(w), sounds: art.load_sounds(w), font: raster.Font { glyphs: glyphs, space: 4, transparent: -1 }, pictures: pictures, palettes: palettes, shades: shades, trig: geometry.make_trig(), maps: wad.map_names(w) }
 }
 
 // ---------- sound ----------
@@ -101,11 +102,12 @@ play(a, s.name, heard[0] * 9 / 10, heard[1])
 
 // ---------- the application ----------
 
-note "Where the program is: `title`, `main`, `episode`, `skill`, `load`, `save`, `help` (menus), `game`, or `intermission` (between levels). `in_game` tells whether a game runs behind the menus."
+note "Where the program is: `title`, `main`, `episode`, `skill`, `level`, `load`, `save`, `help` (menus), `game`, or `intermission` (between levels). `in_game` tells whether a game runs behind the menus."
 type App {
 screen: Text
 item: Int
 episode: Int
+skill: Int
 in_game: Bool
 game: state.World
 scene: render.Scene
@@ -131,7 +133,7 @@ var game = world.enter(scene.level, skill, stats)
 if not app.monsters {
 set game = world.without_monsters(game)
 }
-set next = next with { scene: scene, game: game, start_stats: game.stats, in_game: true, screen: "game", controls: keys.none(), message: "" }
+set next = next with { scene: scene, game: state.say(game, map), start_stats: game.stats, in_game: true, screen: "game", controls: keys.none(), message: "" }
 next
 }
 
@@ -168,6 +170,17 @@ match save.read(text, scene.level) {
 .Ok(game) => app with { scene: scene, game: state.say(game, "Game loaded"), start_stats: game.stats, in_game: true, screen: "game", controls: keys.none(), message: "" }
 .Error(message) => app with { message: message }
 }
+}
+
+note "The maps of an episode that the WAD contains, in order (E1M1 to E1M9)."
+fn episode_maps(a: Assets, episode: Int) -> List[Text] {
+var found: List[Text] = []
+for name in a.maps {
+if starts_with(name, "E\(episode)M") {
+set found += [name]
+}
+}
+sort(found)
 }
 
 fn menu_items(screen: Text) -> List[Text] {
@@ -233,7 +246,7 @@ return next with { screen: "main", item: 0, in_game: false, message: "Episode co
 }
 return start_level(next, a, following, app.game.skill, app.game.stats)
 }
-let count = length(menu_items(app.screen))
+let count = if app.screen == "level" { math.max(length(episode_maps(a, app.episode)), 1) } else { length(menu_items(app.screen)) }
 match name {
 "Up" => {
 play(a, "DSPSTOP", 60, 0)
@@ -248,9 +261,11 @@ play(a, "DSSWTCHX", 80, 0)
 let back = match app.screen {
 "main" => if app.in_game { "game" } else { "title" }
 "skill" => "episode"
+"level" => "skill"
 _ => "main"
 }
-return next with { screen: back, item: if back == "skill" { 2 } else { 0 }, message: "" }
+let back_item = if back == "skill" { app.skill } else if back == "episode" { app.episode - 1 } else { 0 }
+return next with { screen: back, item: back_item, message: "" }
 }
 "Enter" => {}
 _ => return next
@@ -264,8 +279,15 @@ match app.screen {
 3 => return next with { screen: "help" }
 _ => return next with { quit: true }
 }
-"episode" => return next with { screen: "skill", episode: app.item + 1, item: 2 }
-"skill" => return start_level(next, a, "E\(app.episode)M1", app.item, state.start_stats())
+"episode" => return next with { screen: "skill", episode: app.item + 1, item: app.skill }
+"skill" => return next with { screen: "level", skill: app.item, item: 0 }
+"level" => {
+let maps = episode_maps(a, app.episode)
+if length(maps) == 0 {
+return next with { message: "This episode has no maps in the WAD" }
+}
+return start_level(next, a, maps[app.item], app.skill, state.start_stats())
+}
 "load" => return load_game(next, a, app.item)
 "save" => return save_game(next, app.item)
 _ => {}
@@ -334,7 +356,7 @@ frame
 }
 
 fn menu_frame(app: App, a: Assets, tic: Int, descriptions: List[Text]) -> raster.Image {
-var pixels = if app.in_game { raster.remap(game_frame(app, a), a.shades[18]) } else { raster.remap(picture_at(black(a), a, "TITLEPIC", 0, 0), a.shades[14]) }
+var pixels = if app.in_game { raster.remap(game_frame(app, a), a.shades[18]) } else { raster.remap(picture_at(black(a), a, "TITLEPIC", 0, 0), a.shades[if app.screen == "level" { 24 } else { 14 }]) }
 let skull = if (tic / 8) % 2 == 0 { "M_SKULL1" } else { "M_SKULL2" }
 let items = menu_items(app.screen)
 match app.screen {
@@ -359,6 +381,16 @@ for i in range(0, length(items)) {
 set pixels = picture_at(pixels, a, items[i], 48, 63 + i * 16)
 }
 set pixels = picture_at(pixels, a, skull, 16, 58 + app.item * 16)
+}
+"level" => {
+set pixels = picture_at(pixels, a, "M_NEWG", 96, 14)
+set pixels = centered(pixels, a, 40, "CHOOSE LEVEL")
+let maps = episode_maps(a, app.episode)
+for i in range(0, length(maps)) {
+let label = if i == 8 { "\(maps[i])  (SECRET LEVEL)" } else { maps[i] }
+set pixels = write(pixels, a, 120, 58 + i * 12, label)
+}
+set pixels = picture_at(pixels, a, skull, 88, 52 + app.item * 12)
 }
 _ => {
 // Load and save: six slots with their descriptions.
@@ -427,7 +459,7 @@ open_window("Tesseradoom", width * scale, height * scale)
 let first = if start_map == "" { "E1M1" } else { start_map }
 let scene = level_scene(a, first) else return [0, 0]
 let game = world.create_at_skill(scene.level, skill)
-var app = App { screen: "title", item: 0, episode: 1, in_game: false, game: game, scene: scene, start_stats: game.stats, controls: keys.none(), monsters: monsters, quit: false, message: "" }
+var app = App { screen: "title", item: 0, episode: 1, skill: 2, in_game: false, game: game, scene: scene, start_stats: game.stats, controls: keys.none(), monsters: monsters, quit: false, message: "" }
 if start_map != "" {
 set app = start_level(app, a, start_map, skill, state.start_stats())
 }

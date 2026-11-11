@@ -181,7 +181,9 @@ fn t_replace_at<T: Clone>(mut l: Rc<Vec<T>>, i: i64, x: T, loc: &str) -> Rc<Vec<
     l
 }
 fn t_range(start: i64, end: i64, loc: &str) -> Rc<Vec<i64>> {
-    if start > end { t_fail("R004", format!("invalid range({}, {}): start is greater than end", start, end), loc) }
+    // Empty when start >= end (draft 0.20; before, start > end was R004).
+    let _ = loc;
+    if start >= end { return Rc::new(Vec::new()); }
     t_charge((end - start) as usize * 8);
     Rc::new((start..end).collect())
 }
@@ -546,6 +548,81 @@ fn t_sort_floats(mut l: Rc<Vec<f64>>) -> Rc<Vec<f64>> { Rc::make_mut(&mut l).sor
 fn t_sort_by_float<A: Clone>(mut l: Rc<Vec<A>>, f: fn(A) -> f64) -> Rc<Vec<A>> {
     Rc::make_mut(&mut l).sort_by(|x, y| f(x.clone()).total_cmp(&f(y.clone())));
     l
+}
+
+// Sound (draft 0.19). A mixer thread streams 16-bit stereo samples at 22,050 per second to an
+// audio player that reads them from standard input (`aplay`, `pw-cat`, or TESSERA_AUDIO_PLAYER).
+// Without a player, sounds are dropped silently. Safe Rust: std threads, a mutex and a pipe.
+struct TVoice { samples: Vec<u8>, position: u64, step: u64, left: i32, right: i32 }
+struct TMixer { voices: Vec<TVoice>, running: bool }
+static T_MIXER: std::sync::OnceLock<Option<std::sync::Arc<std::sync::Mutex<TMixer>>>> = std::sync::OnceLock::new();
+
+fn t_start_audio() -> Option<std::sync::Arc<std::sync::Mutex<TMixer>>> {
+    use std::process::{Command, Stdio};
+    let mut candidates: Vec<Vec<String>> = Vec::new();
+    if let Ok(custom) = std::env::var("TESSERA_AUDIO_PLAYER") {
+        if !custom.trim().is_empty() { candidates.push(custom.split_whitespace().map(|s| s.to_string()).collect()); }
+    }
+    candidates.push(["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "22050", "-c", "2", "--buffer-time=60000", "-"].iter().map(|s| s.to_string()).collect());
+    candidates.push(["pw-cat", "--playback", "--format=s16", "--rate=22050", "--channels=2", "--latency=40ms", "-"].iter().map(|s| s.to_string()).collect());
+    for argv in candidates {
+        let child = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        if let Ok(mut child) = child {
+            let mut input = match child.stdin.take() { Some(i) => i, None => continue };
+            let mixer = std::sync::Arc::new(std::sync::Mutex::new(TMixer { voices: Vec::new(), running: true }));
+            let shared = mixer.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut buffer = vec![0u8; 256 * 4];
+                loop {
+                    {
+                        let mut m = match shared.lock() { Ok(m) => m, Err(_) => return };
+                        if !m.running { return; }
+                        for frame in 0..256 {
+                            let (mut l, mut r) = (0i32, 0i32);
+                            for v in m.voices.iter_mut() {
+                                let index = (v.position >> 16) as usize;
+                                if index < v.samples.len() {
+                                    let s = (v.samples[index] as i32 - 128) * 256;
+                                    l += s * v.left / 100;
+                                    r += s * v.right / 100;
+                                    v.position += v.step;
+                                }
+                            }
+                            m.voices.retain(|v| ((v.position >> 16) as usize) < v.samples.len());
+                            let l = l.clamp(-32768, 32767) as i16;
+                            let r = r.clamp(-32768, 32767) as i16;
+                            buffer[frame * 4..frame * 4 + 2].copy_from_slice(&l.to_le_bytes());
+                            buffer[frame * 4 + 2..frame * 4 + 4].copy_from_slice(&r.to_le_bytes());
+                        }
+                    }
+                    // Writing blocks while the player's buffer is full, which paces the loop.
+                    if input.write_all(&buffer).is_err() {
+                        if let Ok(mut m) = shared.lock() { m.running = false; }
+                        return;
+                    }
+                }
+            });
+            return Some(mixer);
+        }
+    }
+    None
+}
+
+fn t_play_sound(samples: &Rc<Vec<u8>>, rate: i64, volume: i64, pan: i64, loc: &str) {
+    if !(1000..=96000).contains(&rate) || !(0..=100).contains(&volume) || !(-100..=100).contains(&pan) {
+        t_fail("R004", format!("play_sound: rate {} (1000..96000), volume {} (0..100) or pan {} (-100..100) out of range", rate, volume, pan), loc)
+    }
+    let mixer = match T_MIXER.get_or_init(t_start_audio) { Some(m) => m, None => return };
+    if let Ok(mut m) = mixer.lock() {
+        if !m.running || samples.is_empty() || volume == 0 { return; }
+        if m.voices.len() >= 16 { m.voices.remove(0); }
+        // Equal-power-ish panning: the far side fades to a third at full pan.
+        let left = (volume * (300 - (pan.max(0) * 2)) / 300) as i32;
+        let right = (volume * (300 + (pan.min(0) * 2)) / 300) as i32;
+        let step = ((rate as u64) << 16) / 22050;
+        m.voices.push(TVoice { samples: samples.to_vec(), position: 0, step, left, right });
+    }
 }
 
 // Bit operations (draft 0.14). Shifts never lose bits silently: `shift_left` is R002 when the
@@ -916,6 +993,12 @@ impl T_Ui {
             0xffe1 | 0xffe2 => "Shift".into(),
             0xffe3 | 0xffe4 => "Control".into(),
             0xffe9 | 0xffea => "Alt".into(),
+            0xffbe..=0xffc9 => format!("F{}", keysym - 0xffbe + 1),
+            0xffff => "Delete".into(),
+            0xff50 => "Home".into(),
+            0xff57 => "End".into(),
+            0xff55 => "PageUp".into(),
+            0xff56 => "PageDown".into(),
             _ => return None,
         };
         Some(name)
@@ -3436,13 +3519,6 @@ struct T_geometry__Rays {
 }
 
 #[derive(Clone, PartialEq)]
-struct T_geometry__Hit {
-    f_hit: bool,
-    f_distance: i64,
-    f_along: i64,
-}
-
-#[derive(Clone, PartialEq)]
 struct T_raycast__Column {
     f_line: i64,
     f_top: i64,
@@ -3457,6 +3533,9 @@ struct T_render__Scene {
     f_upper: Rc<Vec<i64>>,
     f_lower: Rc<Vec<i64>>,
     f_middle: Rc<Vec<i64>>,
+    f_switched_upper: Rc<Vec<i64>>,
+    f_switched_lower: Rc<Vec<i64>>,
+    f_switched_middle: Rc<Vec<i64>>,
     f_floor_flat: Rc<Vec<i64>>,
     f_ceiling_flat: Rc<Vec<i64>>,
     f_sky_flat: i64,
@@ -3477,6 +3556,7 @@ struct T_render__Canvas {
 struct T_render__View {
     f_scene: Rc<T_render__Scene>,
     f_sectors: Rc<Vec<Rc<T_level__Sector>>>,
+    f_switched: Rc<Vec<i64>>,
     f_camera: Rc<T_geometry__Camera>,
     f_rays: Rc<T_geometry__Rays>,
 }
@@ -3529,6 +3609,13 @@ struct T_art__Sprites {
 }
 
 #[derive(Clone, PartialEq)]
+struct T_art__Graphic {
+    f_image: Rc<T_std__raster__Image>,
+    f_left: i64,
+    f_top: i64,
+}
+
+#[derive(Clone, PartialEq)]
 struct T_movement__Player {
     f_x: i64,
     f_y: i64,
@@ -3537,99 +3624,32 @@ struct T_movement__Player {
 }
 
 #[derive(Clone, PartialEq)]
-struct T_play__Controls {
-    f_forward: bool,
-    f_back: bool,
-    f_turn_left: bool,
-    f_turn_right: bool,
-    f_step_left: bool,
-    f_step_right: bool,
-    f_run: bool,
-    f_use: bool,
-    f_fire: bool,
+struct T_play__Assets {
+    f_wad: Rc<T_wad__Wad>,
+    f_sprites: Rc<T_art__Sprites>,
+    f_sounds: Rc<std::collections::BTreeMap<Rc<String>, Rc<T_std__sound__Sound>>>,
+    f_font: Rc<T_std__raster__Font>,
+    f_pictures: Rc<std::collections::BTreeMap<Rc<String>, Rc<T_art__Graphic>>>,
+    f_palettes: Rc<Vec<Rc<Vec<i64>>>>,
+    f_shades: Rc<Vec<Rc<Vec<i64>>>>,
+    f_trig: Rc<T_geometry__Trig>,
+    f_maps: Rc<Vec<Rc<String>>>,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_play__App {
+    f_screen: Rc<String>,
+    f_item: i64,
+    f_episode: i64,
+    f_skill: i64,
+    f_in_game: bool,
+    f_game: Rc<T_state__World>,
+    f_scene: Rc<T_render__Scene>,
+    f_start_stats: Rc<T_state__Stats>,
+    f_controls: Rc<T_std__keys__Keys>,
+    f_monsters: bool,
     f_quit: bool,
-}
-
-#[derive(Clone, PartialEq)]
-enum T_world__State {
-    V_Idle,
-    V_Chase(i64),
-    V_Attack(i64),
-    V_Pain(i64),
-    V_Dead(i64),
-}
-
-#[derive(Clone, PartialEq)]
-struct T_world__Mobj {
-    f_kind: i64,
-    f_info: Rc<T_things__Info>,
-    f_x: i64,
-    f_y: i64,
-    f_angle: i64,
-    f_sector: i64,
-    f_health: i64,
-    f_present: bool,
-    f_state: Rc<T_world__State>,
-}
-
-#[derive(Clone, PartialEq)]
-enum T_world__Motion {
-    V_DoorOpening(i64, i64, i64),
-    V_DoorWaiting(i64, i64, i64, i64),
-    V_DoorClosing(i64, i64, i64),
-    V_LiftLowering(i64, i64, i64),
-    V_LiftWaiting(i64, i64, i64, i64),
-    V_LiftRising(i64, i64, i64),
-    V_FloorLowering(i64, i64),
-    V_Finished,
-}
-
-#[derive(Clone, PartialEq)]
-struct T_world__Mover {
-    f_sector: i64,
-    f_motion: Rc<T_world__Motion>,
-}
-
-#[derive(Clone, PartialEq)]
-struct T_world__Stats {
-    f_health: i64,
-    f_armor: i64,
-    f_ammo: i64,
-    f_keys: Rc<Vec<Rc<String>>>,
-    f_weapons: Rc<Vec<Rc<String>>>,
-    f_kills: i64,
-    f_items: i64,
-    f_secrets: i64,
-}
-
-#[derive(Clone, PartialEq)]
-struct T_world__Input {
-    f_forward: i64,
-    f_sideways: i64,
-    f_forward_move: i64,
-    f_side_move: i64,
-    f_turn: i64,
-    f_use: bool,
-    f_fire: bool,
-}
-
-#[derive(Clone, PartialEq)]
-struct T_world__World {
-    f_level: Rc<T_level__Level>,
-    f_neighbors: Rc<Vec<Rc<Vec<i64>>>>,
-    f_player: Rc<T_movement__Player>,
-    f_stats: Rc<T_world__Stats>,
-    f_mobjs: Rc<Vec<Rc<T_world__Mobj>>>,
-    f_movers: Rc<Vec<Rc<T_world__Mover>>>,
-    f_tic: i64,
-    f_seed: i64,
     f_message: Rc<String>,
-    f_message_time: i64,
-    f_cooldown: i64,
-    f_use_held: bool,
-    f_exited: bool,
-    f_momentum_x: i64,
-    f_momentum_y: i64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -3639,13 +3659,190 @@ struct T_demo__Demo {
     f_map: i64,
     f_players: i64,
     f_console: i64,
-    f_tics: Rc<Vec<Rc<T_world__Input>>>,
+    f_tics: Rc<Vec<Rc<T_state__Input>>>,
+}
+
+#[derive(Clone, PartialEq)]
+enum T_state__State {
+    V_Idle,
+    V_Chase(i64),
+    V_Attack(i64),
+    V_Pain(i64),
+    V_Dead(i64),
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Mobj {
+    f_kind: i64,
+    f_info: Rc<T_things__Info>,
+    f_x: i64,
+    f_y: i64,
+    f_angle: i64,
+    f_sector: i64,
+    f_health: i64,
+    f_present: bool,
+    f_state: Rc<T_state__State>,
+}
+
+#[derive(Clone, PartialEq)]
+enum T_state__Motion {
+    V_DoorOpening(i64, i64, i64),
+    V_DoorWaiting(i64, i64, i64, i64),
+    V_DoorClosing(i64, i64, i64),
+    V_LiftLowering(i64, i64, i64),
+    V_LiftWaiting(i64, i64, i64, i64),
+    V_LiftRising(i64, i64, i64),
+    V_FloorLowering(i64, i64),
+    V_Crushing(i64, i64, bool, bool),
+    V_Finished,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Mover {
+    f_sector: i64,
+    f_motion: Rc<T_state__Motion>,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Light {
+    f_sector: i64,
+    f_kind: i64,
+    f_bright: i64,
+    f_dark: i64,
+    f_timer: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Missile {
+    f_sprite: Rc<String>,
+    f_x: i64,
+    f_y: i64,
+    f_z: i64,
+    f_dx: i64,
+    f_dy: i64,
+    f_damage_min: i64,
+    f_damage_max: i64,
+    f_radius: i64,
+    f_splash: bool,
+    f_owner: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Effect {
+    f_sprite: Rc<String>,
+    f_frames: Rc<String>,
+    f_x: i64,
+    f_y: i64,
+    f_z: i64,
+    f_time: i64,
+    f_speed: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Sound {
+    f_name: Rc<String>,
+    f_x: i64,
+    f_y: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Stats {
+    f_health: i64,
+    f_armor: i64,
+    f_armor_class: i64,
+    f_ammo: Rc<Vec<i64>>,
+    f_max_ammo: Rc<Vec<i64>>,
+    f_weapons: Rc<Vec<bool>>,
+    f_weapon: i64,
+    f_keys: Rc<Vec<Rc<String>>>,
+    f_kills: i64,
+    f_items: i64,
+    f_secrets: i64,
+    f_berserk: bool,
+    f_invulnerable: i64,
+    f_radiation_suit: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__Input {
+    f_forward: i64,
+    f_sideways: i64,
+    f_forward_move: i64,
+    f_side_move: i64,
+    f_turn: i64,
+    f_use: bool,
+    f_fire: bool,
+    f_weapon: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_state__World {
+    f_level: Rc<T_level__Level>,
+    f_skill: i64,
+    f_neighbors: Rc<Vec<Rc<Vec<i64>>>>,
+    f_centers: Rc<Vec<Rc<Vec<i64>>>>,
+    f_player: Rc<T_movement__Player>,
+    f_stats: Rc<T_state__Stats>,
+    f_mobjs: Rc<Vec<Rc<T_state__Mobj>>>,
+    f_movers: Rc<Vec<Rc<T_state__Mover>>>,
+    f_lights: Rc<Vec<Rc<T_state__Light>>>,
+    f_missiles: Rc<Vec<Rc<T_state__Missile>>>,
+    f_effects: Rc<Vec<Rc<T_state__Effect>>>,
+    f_switched: Rc<Vec<i64>>,
+    f_sounds: Rc<Vec<Rc<T_state__Sound>>>,
+    f_tic: i64,
+    f_seed: i64,
+    f_message: Rc<String>,
+    f_message_time: i64,
+    f_cooldown: i64,
+    f_firing: i64,
+    f_fire_held: bool,
+    f_use_held: bool,
+    f_exited: i64,
+    f_momentum_x: i64,
+    f_momentum_y: i64,
+    f_damage_flash: i64,
+    f_bonus_flash: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_std__plane__Hit {
+    f_hit: bool,
+    f_distance: i64,
+    f_along: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_std__raster__Image {
+    f_width: i64,
+    f_height: i64,
+    f_pixels: Rc<Vec<i64>>,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_std__raster__Font {
+    f_glyphs: Rc<std::collections::BTreeMap<i64, Rc<T_std__raster__Image>>>,
+    f_space: i64,
+    f_transparent: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_std__sound__Sound {
+    f_samples: Rc<Vec<u8>>,
+    f_rate: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct T_std__keys__Keys {
+    f_held: Rc<Vec<Rc<String>>>,
+    f_typed: Rc<String>,
 }
 
 #[derive(Clone, PartialEq)]
 enum T_things__Role {
     V_Decoration,
     V_Obstacle,
+    V_Barrel,
     V_Item(Rc<T_things__Pickup>),
     V_Monster(Rc<T_things__Species>),
     V_Hidden,
@@ -3656,10 +3853,11 @@ enum T_things__Pickup {
     V_Health(i64, i64),
     V_Armor(i64, i64),
     V_SetArmor(i64),
-    V_Ammo(i64),
+    V_Ammo(i64, i64),
+    V_Backpack,
     V_Key(Rc<String>),
-    V_Weapon(Rc<String>, i64),
-    V_Other(Rc<String>),
+    V_Weapon(i64, i64, i64),
+    V_Power(Rc<String>, i64),
 }
 
 #[derive(Clone, PartialEq)]
@@ -3672,6 +3870,11 @@ struct T_things__Species {
     f_melee: bool,
     f_damage_min: i64,
     f_damage_max: i64,
+    f_missile: Rc<String>,
+    f_sight: Rc<String>,
+    f_hurt: Rc<String>,
+    f_dies: Rc<String>,
+    f_drop: i64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -3686,28 +3889,28 @@ struct T_things__Info {
 }
 
 fn f_usage() -> Rc<String> {
-    t_enter("main.tes:18:4 in function `usage`");
-    t_text("usage: tesseradoom [--wad FILE] info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1")
+    t_enter("main.tes:20:4 in function `usage`");
+    t_text("usage: tesseradoom [--wad FILE] [start] | info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1")
 }
 
 fn f_load(v_path: Rc<String>) -> Rc<T_wad__Wad> {
-    t_enter("main.tes:20:4 in function `load`");
-    let v_data: Rc<Vec<u8>> = match &(t_read_bytes(v_path.clone(), "main.tes:21:18 in function `load`")) {
+    t_enter("main.tes:22:4 in function `load`");
+    let v_data: Rc<Vec<u8>> = match &(t_read_bytes(v_path.clone(), "main.tes:23:18 in function `load`")) {
         Ok(t1) => { let v_d = t1.clone(); v_d.clone() }
         Err(t2) => { let v_e = t2.clone(); if (v_e.clone() == Rc::new(T_FileError::V_NotFound)) {
-            t_exit_with(2i64, t_concat(t_concat(t_text("error: WAD file `"), (v_path.clone())), t_text("` not found; see README.md (Game data)")), "main.tes:23:34 in function `load`")
+            t_exit_with(2i64, t_concat(t_concat(t_text("error: WAD file `"), (v_path.clone())), t_text("` not found; see README.md (Game data)")), "main.tes:25:34 in function `load`")
         } else {
-            t_exit_with(2i64, t_concat(t_concat(t_text("error: cannot read `"), (v_path.clone())), t_text("`")), "main.tes:23:122 in function `load`")
+            t_exit_with(2i64, t_concat(t_concat(t_text("error: cannot read `"), (v_path.clone())), t_text("`")), "main.tes:25:122 in function `load`")
         } }
     };
-    match &(f_wad__parse(v_data.clone())) {
-        Ok(t3) => { let v_w = t3.clone(); v_w.clone() }
-        Err(t4) => { let v_message = t4.clone(); t_exit_with(2i64, t_concat(t_concat(t_concat(t_text("error: "), (v_path.clone())), t_text(": ")), (v_message.clone())), "main.tes:27:20 in function `load`") }
+    match &(f_wad__parse(v_data)) {
+        Ok(t3) => { let v_w = t3.clone(); v_w }
+        Err(t4) => { let v_message = t4.clone(); t_exit_with(2i64, t_concat(t_concat(t_concat(t_text("error: "), (v_path)), t_text(": ")), (v_message)), "main.tes:29:20 in function `load`") }
     }
 }
 
 fn f_info(v_w: Rc<T_wad__Wad>) -> () {
-    t_enter("main.tes:31:4 in function `info`");
+    t_enter("main.tes:33:4 in function `info`");
     t_print(t_concat(t_text("type "), ((v_w.clone()).f_kind.clone())));
     t_print(t_concat(t_text("lumps "), t_int_to_text(t_list_length(&(v_w.clone()).f_lumps.clone()))));
     let v_maps: Rc<Vec<Rc<String>>> = f_wad__map_names(v_w.clone());
@@ -3715,15 +3918,15 @@ fn f_info(v_w: Rc<T_wad__Wad>) -> () {
 }
 
 fn f_load_level(v_w: Rc<T_wad__Wad>, v_map: Rc<String>) -> Rc<T_level__Level> {
-    t_enter("main.tes:38:4 in function `load_level`");
-    match &(f_level__load(v_w.clone(), t_to_upper(&v_map.clone()))) {
-        Ok(t1) => { let v_l = t1.clone(); v_l.clone() }
-        Err(t2) => { let v_message = t2.clone(); t_exit_with(2i64, t_concat(t_text("error: "), (v_message.clone())), "main.tes:41:20 in function `load_level`") }
+    t_enter("main.tes:40:4 in function `load_level`");
+    match &(f_level__load(v_w, t_to_upper(&v_map))) {
+        Ok(t1) => { let v_l = t1.clone(); v_l }
+        Err(t2) => { let v_message = t2.clone(); t_exit_with(2i64, t_concat(t_text("error: "), (v_message)), "main.tes:43:20 in function `load_level`") }
     }
 }
 
 fn f_map_dump(v_l: Rc<T_level__Level>) -> () {
-    t_enter("main.tes:45:4 in function `map_dump`");
+    t_enter("main.tes:47:4 in function `map_dump`");
     t_print(t_concat(t_text("map "), ((v_l.clone()).f_name.clone())));
     t_print(t_concat(t_text("things "), t_int_to_text(t_list_length(&(v_l.clone()).f_things.clone()))));
     t_print(t_concat(t_text("vertexes "), t_int_to_text(t_list_length(&(v_l.clone()).f_vertexes.clone()))));
@@ -3733,113 +3936,121 @@ fn f_map_dump(v_l: Rc<T_level__Level>) -> () {
     t_print(t_concat(t_text("segs "), t_int_to_text(t_list_length(&(v_l.clone()).f_segs.clone()))));
     t_print(t_concat(t_text("subsectors "), t_int_to_text(t_list_length(&(v_l.clone()).f_subsectors.clone()))));
     t_print(t_concat(t_text("nodes "), t_int_to_text(t_list_length(&(v_l.clone()).f_nodes.clone()))));
-    match &(f_level__find_thing(v_l.clone(), 1i64)) {
+    match &(f_level__find_thing(v_l, 1i64)) {
         Some(t1) => { let v_t = t1.clone(); t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("player 1 start "), t_int_to_text((v_t.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_t.clone()).f_y.clone())), t_text(" angle ")), t_int_to_text((v_t.clone()).f_angle.clone()))) }
         None => { t_print(t_text("player 1 start none")) }
     }
 }
 
 fn f_load_demo(v_w: Rc<T_wad__Wad>, v_name: Rc<String>) -> Rc<T_demo__Demo> {
-    t_enter("main.tes:61:4 in function `load_demo`");
-    match &(f_demo__parse(f_required_lump(v_w.clone(), t_to_upper(&v_name.clone())))) {
-        Ok(t1) => { let v_d = t1.clone(); v_d.clone() }
-        Err(t2) => { let v_message = t2.clone(); t_exit_with(2i64, t_concat(t_concat(t_concat(t_text("error: "), (v_name.clone())), t_text(": ")), (v_message.clone())), "main.tes:64:20 in function `load_demo`") }
+    t_enter("main.tes:63:4 in function `load_demo`");
+    match &(f_demo__parse(f_required_lump(v_w, t_to_upper(&v_name.clone())))) {
+        Ok(t1) => { let v_d = t1.clone(); v_d }
+        Err(t2) => { let v_message = t2.clone(); t_exit_with(2i64, t_concat(t_concat(t_concat(t_text("error: "), (v_name.clone())), t_text(": ")), (v_message)), "main.tes:66:20 in function `load_demo`") }
     }
 }
 
 fn f_required_lump(v_w: Rc<T_wad__Wad>, v_name: Rc<String>) -> Rc<Vec<u8>> {
-    t_enter("main.tes:68:4 in function `required_lump`");
-    match &(f_wad__lump(v_w.clone(), v_name.clone())) {
-        Some(t1) => { let v_data = t1.clone(); v_data.clone() }
-        None => { t_exit_with(2i64, t_concat(t_concat(t_text("error: the WAD has no "), (v_name.clone())), t_text(" lump")), "main.tes:71:10 in function `required_lump`") }
+    t_enter("main.tes:70:4 in function `required_lump`");
+    match &(f_wad__lump(v_w, v_name.clone())) {
+        Some(t1) => { let v_data = t1.clone(); v_data }
+        None => { t_exit_with(2i64, t_concat(t_concat(t_text("error: the WAD has no "), (v_name.clone())), t_text(" lump")), "main.tes:73:10 in function `required_lump`") }
     }
 }
 
 fn f_write_image(v_w: Rc<T_wad__Wad>, v_pixels: Rc<Vec<i64>>, v_path: Rc<String>) -> () {
-    t_enter("main.tes:75:4 in function `write_image`");
+    t_enter("main.tes:77:4 in function `write_image`");
     let v_colors: Rc<Vec<i64>> = f_std__palette__read(f_required_lump(v_w.clone(), t_text("PLAYPAL")), 0i64);
-    match &(t_write_bytes(v_path.clone(), f_std__ppm__encode(f_geometry__screen_width(), f_geometry__screen_height(), v_pixels.clone(), v_colors.clone()), "main.tes:77:7 in function `write_image`")) {
+    match &(t_write_bytes(v_path.clone(), f_std__ppm__encode(f_geometry__screen_width(), f_geometry__screen_height(), v_pixels, v_colors), "main.tes:79:7 in function `write_image`")) {
         Ok(_) => { t_print(t_concat(t_text("wrote "), (v_path.clone()))) }
-        Err(_) => { t_exit_with(2i64, t_concat(t_text("error: cannot write "), (v_path.clone())), "main.tes:79:14 in function `write_image`") }
+        Err(_) => { t_exit_with(2i64, t_concat(t_text("error: cannot write "), (v_path.clone())), "main.tes:81:14 in function `write_image`") }
+    }
+}
+
+fn f_write_frame(v_a: Rc<T_play__Assets>, v_pixels: Rc<Vec<i64>>, v_path: Rc<String>) -> () {
+    t_enter("main.tes:85:4 in function `write_frame`");
+    match &(t_write_bytes(v_path.clone(), f_std__ppm__encode(f_geometry__screen_width(), f_geometry__screen_height(), v_pixels, t_index(&(v_a).f_palettes.clone(), 0i64, "main.tes:86:95 in function `write_frame`")), "main.tes:86:7 in function `write_frame`")) {
+        Ok(_) => { t_print(t_concat(t_text("wrote "), (v_path.clone()))) }
+        Err(_) => { t_exit_with(2i64, t_concat(t_text("error: cannot write "), (v_path.clone())), "main.tes:88:14 in function `write_frame`") }
     }
 }
 
 fn f_command_argument(v_arguments: Rc<Vec<Rc<String>>>, v_index: i64) -> Rc<String> {
-    t_enter("main.tes:83:4 in function `command_argument`");
+    t_enter("main.tes:92:4 in function `command_argument`");
     if (v_index.clone() >= t_list_length(&v_arguments.clone())) {
-        t_exit_with(64i64, f_usage(), "main.tes:85:1 in function `command_argument`")
+        t_exit_with(64i64, f_usage(), "main.tes:94:1 in function `command_argument`")
     };
-    t_index(&v_arguments.clone(), v_index.clone(), "main.tes:87:1 in function `command_argument`")
+    t_index(&v_arguments, v_index, "main.tes:96:1 in function `command_argument`")
 }
 
 // note: M6: reads commands until the end of input: `forward N`, `back N`, `left N`, `right N` (units), `turn DEGREES` (counter-clockwise), `where`, `look FILE.ppm`, `quit`. Prints the position after every command, in fixed point (16.16) for exact checking.
 fn f_walk_console(v_w: Rc<T_wad__Wad>, v_l: Rc<T_level__Level>) -> () {
-    t_enter("main.tes:91:4 in function `walk_console`");
+    t_enter("main.tes:100:4 in function `walk_console`");
     let v_trig: Rc<T_geometry__Trig> = f_geometry__make_trig();
     let v_scene: Rc<T_render__Scene> = f_render__prepare(v_l.clone(), f_art__load(v_w.clone(), f_render__wanted_textures(v_l.clone())));
     let mut v_p: Rc<T_movement__Player> = f_movement__start(v_l.clone());
     t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("at "), t_int_to_text((v_p.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_y.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_angle.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_sector.clone())));
     while true {
-        t_tick("main.tes:96:12 in function `walk_console`");
-        let v_line: Rc<String> = match t_read_line("main.tes:97:12 in function `walk_console`") { Some(t_value) => t_value, None => { break } };
+        t_tick("main.tes:105:12 in function `walk_console`");
+        let v_line: Rc<String> = match t_read_line("main.tes:106:12 in function `walk_console`") { Some(t_value) => t_value, None => { break } };
         let v_words: Rc<Vec<Rc<String>>> = t_split(&t_trim(&v_line.clone()), &t_text(" "));
         let v_amount: i64 = if (t_list_length(&v_words.clone()) > 1i64) {
-            t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:99:56 in function `walk_console`")), 0i64)
+            t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:108:56 in function `walk_console`")), 0i64)
         } else {
             0i64
         };
-        match (t_index(&v_words.clone(), 0i64, "main.tes:100:7 in function `walk_console`")).as_str() {
+        match (t_index(&v_words.clone(), 0i64, "main.tes:109:7 in function `walk_console`")).as_str() {
             "forward" => { {
-                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, t_shift_left(v_amount.clone(), 16i64, "main.tes:101:48 in function `walk_console`"), 0i64);
+                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, t_shift_left(v_amount.clone(), 16i64, "main.tes:110:48 in function `walk_console`"), 0i64);
             } }
             "back" => { {
-                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, t_neg(t_shift_left(v_amount.clone(), 16i64, "main.tes:102:46 in function `walk_console`"), "main.tes:102:45 in function `walk_console`"), 0i64);
+                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, t_neg(t_shift_left(v_amount.clone(), 16i64, "main.tes:111:46 in function `walk_console`"), "main.tes:111:45 in function `walk_console`"), 0i64);
             } }
             "right" => { {
-                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, 0i64, t_shift_left(v_amount.clone(), 16i64, "main.tes:103:49 in function `walk_console`"));
+                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, 0i64, t_shift_left(v_amount.clone(), 16i64, "main.tes:112:49 in function `walk_console`"));
             } }
             "left" => { {
-                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, 0i64, t_neg(t_shift_left(v_amount.clone(), 16i64, "main.tes:104:49 in function `walk_console`"), "main.tes:104:48 in function `walk_console`"));
+                v_p = f_movement__walk(v_l.clone(), v_trig.clone(), v_p, 0i64, t_neg(t_shift_left(v_amount.clone(), 16i64, "main.tes:113:49 in function `walk_console`"), "main.tes:113:48 in function `walk_console`"));
             } }
             "turn" => { {
-                v_p = f_movement__turn(v_p, t_div(t_mul(v_amount.clone(), f_geometry__fine_angles(), "main.tes:105:43 in function `walk_console`"), 360i64, "main.tes:105:68 in function `walk_console`"));
+                v_p = f_movement__turn(v_p, t_div(t_mul(v_amount.clone(), f_geometry__fine_angles(), "main.tes:114:43 in function `walk_console`"), 360i64, "main.tes:114:68 in function `walk_console`"));
             } }
             "look" => { if (t_list_length(&v_words.clone()) > 1i64) {
-                f_write_image(v_w.clone(), f_render__render(v_scene.clone(), f_movement__camera(v_l.clone(), v_p.clone()), v_trig.clone()), t_index(&v_words.clone(), 1i64, "main.tes:106:100 in function `walk_console`"))
+                f_write_image(v_w.clone(), f_render__render(v_scene.clone(), f_movement__camera(v_l.clone(), v_p.clone()), v_trig.clone()), t_index(&v_words.clone(), 1i64, "main.tes:115:100 in function `walk_console`"))
             } }
             "where" => { {
             } }
             "quit" => { break }
             "" => { {
             } }
-            _ => { t_print_error(t_concat(t_concat(t_text("unknown command `"), (t_index(&v_words.clone(), 0i64, "main.tes:110:38 in function `walk_console`"))), t_text("`"))) }
+            _ => { t_print_error(t_concat(t_concat(t_text("unknown command `"), (t_index(&v_words.clone(), 0i64, "main.tes:119:38 in function `walk_console`"))), t_text("`"))) }
         };
         t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("at "), t_int_to_text((v_p.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_y.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_angle.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_sector.clone())))
     }
 }
 
-// note: M8: the game world driven by commands, one per line: `forward N`, `back N`, `left N`, `right N` (units, in steps of 8 units per tic), `turn DEGREES`, `face X Y`, `goto X Y`, `use`, `fire`, `wait TICS`, `sector N`, `monsters`, `look FILE.ppm`. Prints the state after every command.
+// note: M8: the game world driven by commands, one per line: `forward N`, `back N`, `left N`, `right N` (units, in steps of 8 units per tic), `turn DEGREES`, `face X Y`, `goto X Y`, `use`, `fire`, `wait TICS`, `sector N`, `monsters`, `weapon N`, `give`, `place X Y ANGLE`, `switch SIDEDEF`, `intermission FILE.ppm`, `save FILE`, `load FILE`, `look FILE.ppm`. Prints the state after every command.
 fn f_game_console(v_w: Rc<T_wad__Wad>, v_l: Rc<T_level__Level>, v_monsters: bool) -> () {
-    t_enter("main.tes:117:4 in function `game_console`");
+    t_enter("main.tes:126:4 in function `game_console`");
     let v_trig: Rc<T_geometry__Trig> = f_geometry__make_trig();
     let v_scene: Rc<T_render__Scene> = f_render__prepare(v_l.clone(), f_art__load(v_w.clone(), f_render__wanted_textures(v_l.clone())));
     let v_sprites: Rc<T_art__Sprites> = f_art__load_sprites(v_w.clone());
-    let mut v_game: Rc<T_world__World> = f_world__create(v_l.clone());
+    let mut v_game: Rc<T_state__World> = f_world__create(v_l.clone());
     if (!v_monsters.clone()) {
         v_game = f_world__without_monsters(v_game);
     };
     t_print(f_game_state(v_game.clone()));
     while true {
-        t_tick("main.tes:126:12 in function `game_console`");
-        let v_line: Rc<String> = match t_read_line("main.tes:127:12 in function `game_console`") { Some(t_value) => t_value, None => { break } };
+        t_tick("main.tes:135:12 in function `game_console`");
+        let v_line: Rc<String> = match t_read_line("main.tes:136:12 in function `game_console`") { Some(t_value) => t_value, None => { break } };
         let v_words: Rc<Vec<Rc<String>>> = t_split(&t_trim(&v_line.clone()), &t_text(" "));
         let v_amount: i64 = if (t_list_length(&v_words.clone()) > 1i64) {
-            t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:129:56 in function `game_console`")), 0i64)
+            t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:138:56 in function `game_console`")), 0i64)
         } else {
             0i64
         };
-        let v_none: Rc<T_world__Input> = f_world__no_input();
-        match (t_index(&v_words.clone(), 0i64, "main.tes:131:7 in function `game_console`")).as_str() {
+        let v_none: Rc<T_state__Input> = f_world__no_input();
+        match (t_index(&v_words.clone(), 0i64, "main.tes:140:7 in function `game_console`")).as_str() {
             "forward" => { {
                 v_game = f_walk_tics(v_game, v_trig.clone(), { let mut t1 = Rc::unwrap_or_clone(v_none.clone()); t1.f_forward = 8i64; Rc::new(t1) }, v_amount.clone());
             } }
@@ -3853,18 +4064,18 @@ fn f_game_console(v_w: Rc<T_wad__Wad>, v_l: Rc<T_level__Level>, v_monsters: bool
                 v_game = f_walk_tics(v_game, v_trig.clone(), { let mut t4 = Rc::unwrap_or_clone(v_none.clone()); t4.f_sideways = (-8i64); Rc::new(t4) }, v_amount.clone());
             } }
             "turn" => { {
-                v_game = f_world__tic(v_game, { let mut t5 = Rc::unwrap_or_clone(v_none.clone()); t5.f_turn = t_div(t_mul(v_amount.clone(), f_geometry__fine_angles(), "main.tes:136:63 in function `game_console`"), 360i64, "main.tes:136:88 in function `game_console`"); Rc::new(t5) }, v_trig.clone());
+                v_game = f_world__tic(v_game, { let mut t5 = Rc::unwrap_or_clone(v_none.clone()); t5.f_turn = t_div(t_mul(v_amount.clone(), f_geometry__fine_angles(), "main.tes:145:63 in function `game_console`"), 360i64, "main.tes:145:88 in function `game_console`"); Rc::new(t5) }, v_trig.clone());
             } }
             "face" => { if (t_list_length(&v_words.clone()) >= 3i64) {
-                v_game = f_face_point(v_game, v_trig.clone(), t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:138:54 in function `game_console`")), 0i64), t_value_or(t_parse_int(&t_index(&v_words.clone(), 2i64, "main.tes:138:88 in function `game_console`")), 0i64));
+                v_game = f_face_point(v_game, v_trig.clone(), t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:147:54 in function `game_console`")), 0i64), t_value_or(t_parse_int(&t_index(&v_words.clone(), 2i64, "main.tes:147:88 in function `game_console`")), 0i64));
             } }
             "goto" => { if (t_list_length(&v_words.clone()) >= 3i64) {
-                let v_x: i64 = t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:141:28 in function `game_console`")), 0i64);
-                let v_y: i64 = t_value_or(t_parse_int(&t_index(&v_words.clone(), 2i64, "main.tes:142:28 in function `game_console`")), 0i64);
+                let v_x: i64 = t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:150:28 in function `game_console`")), 0i64);
+                let v_y: i64 = t_value_or(t_parse_int(&t_index(&v_words.clone(), 2i64, "main.tes:151:28 in function `game_console`")), 0i64);
                 v_game = f_face_point(v_game, v_trig.clone(), v_x.clone(), v_y.clone());
-                let v_dx: i64 = t_sub(v_x.clone(), t_shift_right(((v_game.clone()).f_player.clone()).f_x.clone(), 16i64, "main.tes:144:14 in function `game_console`"), "main.tes:144:12 in function `game_console`");
-                let v_dy: i64 = t_sub(v_y.clone(), t_shift_right(((v_game.clone()).f_player.clone()).f_y.clone(), 16i64, "main.tes:145:14 in function `game_console`"), "main.tes:145:12 in function `game_console`");
-                v_game = f_walk_tics(v_game, v_trig.clone(), { let mut t6 = Rc::unwrap_or_clone(v_none.clone()); t6.f_forward = 8i64; Rc::new(t6) }, f_std__math__isqrt(t_add(t_mul(v_dx.clone(), v_dx.clone(), "main.tes:146:74 in function `game_console`"), t_mul(v_dy.clone(), v_dy.clone(), "main.tes:146:84 in function `game_console`"), "main.tes:146:79 in function `game_console`")));
+                let v_dx: i64 = t_sub(v_x.clone(), t_shift_right(((v_game.clone()).f_player.clone()).f_x.clone(), 16i64, "main.tes:153:14 in function `game_console`"), "main.tes:153:12 in function `game_console`");
+                let v_dy: i64 = t_sub(v_y.clone(), t_shift_right(((v_game.clone()).f_player.clone()).f_y.clone(), 16i64, "main.tes:154:14 in function `game_console`"), "main.tes:154:12 in function `game_console`");
+                v_game = f_walk_tics(v_game, v_trig.clone(), { let mut t6 = Rc::unwrap_or_clone(v_none.clone()); t6.f_forward = 8i64; Rc::new(t6) }, f_std__math__isqrt(t_add(t_mul(v_dx.clone(), v_dx.clone(), "main.tes:155:74 in function `game_console`"), t_mul(v_dy.clone(), v_dy.clone(), "main.tes:155:84 in function `game_console`"), "main.tes:155:79 in function `game_console`")));
             } }
             "use" => { {
                 v_game = f_world__tic(f_world__tic(v_game, { let mut t7 = Rc::unwrap_or_clone(v_none.clone()); t7.f_use = true; Rc::new(t7) }, v_trig.clone()), v_none.clone(), v_trig.clone());
@@ -3873,82 +4084,127 @@ fn f_game_console(v_w: Rc<T_wad__Wad>, v_l: Rc<T_level__Level>, v_monsters: bool
                 v_game = f_world__tic(v_game, { let mut t8 = Rc::unwrap_or_clone(v_none.clone()); t8.f_fire = true; Rc::new(t8) }, v_trig.clone());
             } }
             "wait" => { {
-                for _ in t_iter(t_range(0i64, v_amount.clone(), "main.tes:150:20 in function `game_console`")) {
-                    t_tick("main.tes:150:37 in function `game_console`");
+                for _ in t_iter(t_range(0i64, v_amount.clone(), "main.tes:159:20 in function `game_console`")) {
+                    t_tick("main.tes:159:37 in function `game_console`");
                     v_game = f_world__tic(v_game, v_none.clone(), v_trig.clone());
                 }
             } }
             "monsters" => { {
                 for v_m in t_iter((v_game.clone()).f_mobjs.clone()) {
-                    t_tick("main.tes:153:35 in function `game_console`");
-                    if (((v_m.clone()).f_present.clone() && ((v_m.clone()).f_state.clone() != Rc::new(T_world__State::V_Idle))) && (((v_m.clone()).f_info.clone()).f_health.clone() > 0i64)) {
-                        t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("monster "), t_int_to_text((v_m.clone()).f_kind.clone())), t_text(" at ")), t_int_to_text(t_shift_right((v_m.clone()).f_x.clone(), 16i64, "main.tes:155:31 in function `game_console`"))), t_text(" ")), t_int_to_text(t_shift_right((v_m.clone()).f_y.clone(), 16i64, "main.tes:155:55 in function `game_console`"))), t_text(" health ")), t_int_to_text((v_m.clone()).f_health.clone())), t_text(" ")), (f_state_name((v_m.clone()).f_state.clone()))))
+                    t_tick("main.tes:162:35 in function `game_console`");
+                    if (((v_m.clone()).f_present.clone() && ((v_m.clone()).f_state.clone() != Rc::new(T_state__State::V_Idle))) && (((v_m.clone()).f_info.clone()).f_health.clone() > 0i64)) {
+                        t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("monster "), t_int_to_text((v_m.clone()).f_kind.clone())), t_text(" at ")), t_int_to_text(t_shift_right((v_m.clone()).f_x.clone(), 16i64, "main.tes:164:31 in function `game_console`"))), t_text(" ")), t_int_to_text(t_shift_right((v_m.clone()).f_y.clone(), 16i64, "main.tes:164:55 in function `game_console`"))), t_text(" health ")), t_int_to_text((v_m.clone()).f_health.clone())), t_text(" ")), (f_state_name((v_m.clone()).f_state.clone()))))
                     }
                 }
             } }
             "sector" => { {
-                let v_s: Rc<T_level__Sector> = t_index(&((v_game.clone()).f_level.clone()).f_sectors.clone(), v_amount.clone(), "main.tes:159:9 in function `game_console`");
-                t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("sector "), t_int_to_text(v_amount.clone())), t_text(" floor ")), t_int_to_text((v_s.clone()).f_floor.clone())), t_text(" ceiling ")), t_int_to_text((v_s.clone()).f_ceiling.clone())))
+                let v_s: Rc<T_level__Sector> = t_index(&((v_game.clone()).f_level.clone()).f_sectors.clone(), v_amount.clone(), "main.tes:168:9 in function `game_console`");
+                t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("sector "), t_int_to_text(v_amount.clone())), t_text(" floor ")), t_int_to_text((v_s.clone()).f_floor.clone())), t_text(" ceiling ")), t_int_to_text((v_s.clone()).f_ceiling.clone())), t_text(" light ")), t_int_to_text((v_s.clone()).f_light.clone())))
             } }
             "look" => { if (t_list_length(&v_words.clone()) > 1i64) {
-                f_write_image(v_w.clone(), f_render__render_world(v_scene.clone(), ((v_game.clone()).f_level.clone()).f_sectors.clone(), f_world__camera(v_game.clone()), v_trig.clone(), f_world__sprites(v_game.clone()), v_sprites.clone()), t_index(&v_words.clone(), 1i64, "main.tes:162:153 in function `game_console`"))
+                f_write_image(v_w.clone(), f_render__render_world(v_scene.clone(), ((v_game.clone()).f_level.clone()).f_sectors.clone(), (v_game.clone()).f_switched.clone(), f_world__camera(v_game.clone()), v_trig.clone(), f_world__sprites(v_game.clone()), v_sprites.clone()), t_index(&v_words.clone(), 1i64, "main.tes:171:168 in function `game_console`"))
+            } }
+            "weapon" => { {
+                v_game = f_world__tic(v_game, { let mut t9 = Rc::unwrap_or_clone(v_none.clone()); t9.f_weapon = t_sub(v_amount.clone(), 1i64, "main.tes:172:67 in function `game_console`"); Rc::new(t9) }, v_trig.clone());
+            } }
+            "give" => { {
+                { let t_value = { let mut t10 = Rc::unwrap_or_clone((v_game.clone()).f_stats.clone()); t10.f_weapons = t_repeat_list(Rc::new(vec![true]), 8i64, "main.tes:173:55 in function `game_console`"); t10.f_ammo = ((v_game.clone()).f_stats.clone()).f_max_ammo.clone(); t10.f_keys = Rc::new(vec![t_text("blue"), t_text("yellow"), t_text("red")]); Rc::new(t10) }; *&mut Rc::make_mut(&mut v_game).f_stats = t_value; }
+            } }
+            "place" => { if (t_list_length(&v_words.clone()) >= 4i64) {
+                let v_x: i64 = t_shift_left(t_value_or(t_parse_int(&t_index(&v_words.clone(), 1i64, "main.tes:175:39 in function `game_console`")), 0i64), 16i64, "main.tes:175:9 in function `game_console`");
+                let v_y: i64 = t_shift_left(t_value_or(t_parse_int(&t_index(&v_words.clone(), 2i64, "main.tes:176:39 in function `game_console`")), 0i64), 16i64, "main.tes:176:9 in function `game_console`");
+                { let t_value = { let mut t11 = Rc::unwrap_or_clone((v_game.clone()).f_player.clone()); t11.f_x = v_x.clone(); t11.f_y = v_y.clone(); t11.f_angle = f_geometry__degrees_to_fine(t_value_or(t_parse_int(&t_index(&v_words.clone(), 3i64, "main.tes:177:101 in function `game_console`")), 0i64)); t11.f_sector = f_geometry__sector_at(v_l.clone(), v_x.clone(), v_y.clone()); Rc::new(t11) }; *&mut Rc::make_mut(&mut v_game).f_player = t_value; }
+            } }
+            "switch" => { t_print(t_concat(t_concat(t_concat(t_text("switch "), t_int_to_text(v_amount.clone())), t_text(" ")), t_int_to_text(t_index(&(v_game.clone()).f_switched.clone(), v_amount.clone(), "main.tes:179:39 in function `game_console`")))) }
+            "intermission" => { if (t_list_length(&v_words.clone()) > 1i64) {
+                f_write_frame(f_play__load_assets(v_w.clone()), f_play__intermission_pixels(v_game.clone(), v_scene.clone(), f_play__load_assets(v_w.clone())), t_index(&v_words.clone(), 1i64, "main.tes:181:94 in function `game_console`"))
+            } }
+            "save" => { if (t_list_length(&v_words.clone()) > 1i64) {
+                match &(t_write_text(t_index(&v_words.clone(), 1i64, "main.tes:184:18 in function `game_console`"), f_save__write(v_game.clone()), "main.tes:184:7 in function `game_console`")) {
+                    Ok(_) => { t_print(t_concat(t_text("saved "), (t_index(&v_words.clone(), 1i64, "main.tes:185:26 in function `game_console`")))) }
+                    Err(_) => { t_print_error(t_concat(t_text("cannot write "), (t_index(&v_words.clone(), 1i64, "main.tes:186:42 in function `game_console`")))) }
+                }
+            } }
+            "load" => { if (t_list_length(&v_words.clone()) > 1i64) {
+                match &(t_read_text(t_index(&v_words.clone(), 1i64, "main.tes:190:17 in function `game_console`"), "main.tes:190:7 in function `game_console`")) {
+                    Ok(t12) => { let v_text = t12.clone(); match &(f_save__read(v_text.clone(), v_l.clone())) {
+                        Ok(t13) => { let v_loaded = t13.clone(); {
+                            v_game = v_loaded.clone();
+                        } }
+                        Err(t14) => { let v_message = t14.clone(); t_print_error(v_message.clone()) }
+                    } }
+                    Err(_) => { t_print_error(t_concat(t_text("cannot read "), (t_index(&v_words.clone(), 1i64, "main.tes:195:41 in function `game_console`")))) }
+                }
             } }
             "" => { {
             } }
-            _ => { t_print_error(t_concat(t_concat(t_text("unknown command `"), (t_index(&v_words.clone(), 0i64, "main.tes:164:38 in function `game_console`"))), t_text("`"))) }
+            _ => { t_print_error(t_concat(t_concat(t_text("unknown command `"), (t_index(&v_words.clone(), 0i64, "main.tes:199:38 in function `game_console`"))), t_text("`"))) }
         };
         t_print(f_game_state(v_game.clone()))
     }
 }
 
 // note: Walks `amount` units: one tic of `input` per 8 units, the last tic shorter.
-fn f_walk_tics(v_start: Rc<T_world__World>, v_trig: Rc<T_geometry__Trig>, v_input: Rc<T_world__Input>, v_amount: i64) -> Rc<T_world__World> {
-    t_enter("main.tes:171:4 in function `walk_tics`");
-    let mut v_game: Rc<T_world__World> = v_start;
+fn f_walk_tics(v_start: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_input: Rc<T_state__Input>, v_amount: i64) -> Rc<T_state__World> {
+    t_enter("main.tes:206:4 in function `walk_tics`");
+    let mut v_game: Rc<T_state__World> = v_start;
     let mut v_left: i64 = v_amount;
     while (v_left.clone() > 0i64) {
-        t_tick("main.tes:174:16 in function `walk_tics`");
+        t_tick("main.tes:209:16 in function `walk_tics`");
         let v_part: i64 = f_std__math__min(v_left.clone(), 8i64);
-        v_game = f_world__tic(v_game, { let mut t1 = Rc::unwrap_or_clone(v_input.clone()); t1.f_forward = t_div(t_mul((v_input.clone()).f_forward.clone(), v_part.clone(), "main.tes:176:64 in function `walk_tics`"), 8i64, "main.tes:176:71 in function `walk_tics`"); t1.f_sideways = t_div(t_mul((v_input.clone()).f_sideways.clone(), v_part.clone(), "main.tes:176:101 in function `walk_tics`"), 8i64, "main.tes:176:108 in function `walk_tics`"); Rc::new(t1) }, v_trig.clone());
-        v_left = t_sub(v_left.clone(), v_part.clone(), "main.tes:177:10 in function `walk_tics`");
+        v_game = f_world__tic(v_game, { let mut t1 = Rc::unwrap_or_clone(v_input.clone()); t1.f_forward = t_div(t_mul((v_input.clone()).f_forward.clone(), v_part.clone(), "main.tes:211:64 in function `walk_tics`"), 8i64, "main.tes:211:71 in function `walk_tics`"); t1.f_sideways = t_div(t_mul((v_input.clone()).f_sideways.clone(), v_part.clone(), "main.tes:211:101 in function `walk_tics`"), 8i64, "main.tes:211:108 in function `walk_tics`"); Rc::new(t1) }, v_trig.clone());
+        v_left = t_sub(v_left.clone(), v_part.clone(), "main.tes:212:10 in function `walk_tics`");
     }
-    v_game.clone()
+    v_game
 }
 
-fn f_state_name(v_s: Rc<T_world__State>) -> Rc<String> {
-    t_enter("main.tes:182:4 in function `state_name`");
-    match &*(v_s.clone()) {
-        T_world__State::V_Idle => { t_text("idle") }
-        T_world__State::V_Chase(_) => { t_text("chasing") }
-        T_world__State::V_Attack(_) => { t_text("attacking") }
-        T_world__State::V_Pain(_) => { t_text("in pain") }
-        T_world__State::V_Dead(_) => { t_text("dead") }
+fn f_sound_name(v_s: Rc<T_state__Sound>) -> Rc<String> {
+    t_enter("main.tes:217:4 in function `sound_name`");
+    (v_s).f_name.clone()
+}
+
+fn f_state_name(v_s: Rc<T_state__State>) -> Rc<String> {
+    t_enter("main.tes:219:4 in function `state_name`");
+    match &*(v_s) {
+        T_state__State::V_Idle => { t_text("idle") }
+        T_state__State::V_Chase(_) => { t_text("chasing") }
+        T_state__State::V_Attack(_) => { t_text("attacking") }
+        T_state__State::V_Pain(_) => { t_text("in pain") }
+        T_state__State::V_Dead(_) => { t_text("dead") }
     }
 }
 
 // note: Turns the player towards a map point, in a tic without movement.
-fn f_face_point(v_start: Rc<T_world__World>, v_trig: Rc<T_geometry__Trig>, v_x: i64, v_y: i64) -> Rc<T_world__World> {
-    t_enter("main.tes:193:4 in function `face_point`");
+fn f_face_point(v_start: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_x: i64, v_y: i64) -> Rc<T_state__World> {
+    t_enter("main.tes:230:4 in function `face_point`");
     let v_p: Rc<T_movement__Player> = (v_start.clone()).f_player.clone();
-    let v_dx: i64 = t_sub(t_shift_left(v_x.clone(), 16i64, "main.tes:195:10 in function `face_point`"), (v_p.clone()).f_x.clone(), "main.tes:195:28 in function `face_point`");
-    let v_dy: i64 = t_sub(t_shift_left(v_y.clone(), 16i64, "main.tes:196:10 in function `face_point`"), (v_p.clone()).f_y.clone(), "main.tes:196:28 in function `face_point`");
+    let v_dx: i64 = t_sub(t_shift_left(v_x.clone(), 16i64, "main.tes:232:10 in function `face_point`"), (v_p.clone()).f_x.clone(), "main.tes:232:28 in function `face_point`");
+    let v_dy: i64 = t_sub(t_shift_left(v_y.clone(), 16i64, "main.tes:233:10 in function `face_point`"), (v_p.clone()).f_y.clone(), "main.tes:233:28 in function `face_point`");
     let mut v_best: i64 = 0i64;
     let mut v_best_dot: i64 = 0i64;
-    for v_a in t_iter(t_range(0i64, f_geometry__fine_angles(), "main.tes:199:10 in function `face_point`")) {
-        t_tick("main.tes:199:43 in function `face_point`");
-        let v_dot: i64 = t_add(t_mul(t_shift_right(v_dx.clone(), 8i64, "main.tes:200:11 in function `face_point`"), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), v_a.clone(), "main.tes:200:44 in function `face_point`"), 8i64, "main.tes:200:32 in function `face_point`"), "main.tes:200:30 in function `face_point`"), t_mul(t_shift_right(v_dy.clone(), 8i64, "main.tes:200:65 in function `face_point`"), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), v_a.clone(), "main.tes:200:98 in function `face_point`"), 8i64, "main.tes:200:86 in function `face_point`"), "main.tes:200:84 in function `face_point`"), "main.tes:200:63 in function `face_point`");
+    for v_a in t_iter(t_range(0i64, f_geometry__fine_angles(), "main.tes:236:10 in function `face_point`")) {
+        t_tick("main.tes:236:43 in function `face_point`");
+        let v_dot: i64 = t_add(t_mul(t_shift_right(v_dx.clone(), 8i64, "main.tes:237:11 in function `face_point`"), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), v_a.clone(), "main.tes:237:44 in function `face_point`"), 8i64, "main.tes:237:32 in function `face_point`"), "main.tes:237:30 in function `face_point`"), t_mul(t_shift_right(v_dy.clone(), 8i64, "main.tes:237:65 in function `face_point`"), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), v_a.clone(), "main.tes:237:98 in function `face_point`"), 8i64, "main.tes:237:86 in function `face_point`"), "main.tes:237:84 in function `face_point`"), "main.tes:237:63 in function `face_point`");
         if ((v_a.clone() == 0i64) || (v_dot.clone() > v_best_dot.clone())) {
             v_best = v_a.clone();
             v_best_dot = v_dot.clone();
         }
     }
-    f_world__tic(v_start.clone(), { let mut t1 = Rc::unwrap_or_clone(f_world__no_input()); t1.f_turn = f_geometry__wrap_angle(t_sub(v_best.clone(), (v_p.clone()).f_angle.clone(), "main.tes:206:73 in function `face_point`")); Rc::new(t1) }, v_trig.clone())
+    f_world__tic(v_start, { let mut t1 = Rc::unwrap_or_clone(f_world__no_input()); t1.f_turn = f_geometry__wrap_angle(t_sub(v_best, (v_p).f_angle.clone(), "main.tes:243:73 in function `face_point`")); Rc::new(t1) }, v_trig)
 }
 
-fn f_game_state(v_g: Rc<T_world__World>) -> Rc<String> {
-    t_enter("main.tes:209:4 in function `game_state`");
+fn f_game_state(v_g: Rc<T_state__World>) -> Rc<String> {
+    t_enter("main.tes:246:4 in function `game_state`");
     let v_p: Rc<T_movement__Player> = (v_g.clone()).f_player.clone();
-    t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("tic "), t_int_to_text((v_g.clone()).f_tic.clone())), t_text(" at ")), t_int_to_text(t_shift_right((v_p.clone()).f_x.clone(), 16i64, "main.tes:211:20 in function `game_state`"))), t_text(" ")), t_int_to_text(t_shift_right((v_p.clone()).f_y.clone(), 16i64, "main.tes:211:44 in function `game_state`"))), t_text(" angle ")), t_int_to_text(t_div(t_mul((v_p.clone()).f_angle.clone(), 360i64, "main.tes:211:82 in function `game_state`"), f_geometry__fine_angles(), "main.tes:211:88 in function `game_state`"))), t_text(" sector ")), t_int_to_text((v_p.clone()).f_sector.clone())), t_text(" health ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_health.clone())), t_text(" armor ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_armor.clone())), t_text(" ammo ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_ammo.clone())), t_text(" keys [")), (t_join(&((v_g.clone()).f_stats.clone()).f_keys.clone(), &t_text(" ")))), t_text("] items ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_items.clone())), t_text(" kills ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_kills.clone())), t_text(" secrets ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_secrets.clone())), t_text("")), (if ((v_g.clone()).f_message_time.clone() > 0i64) {
+    t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("tic "), t_int_to_text((v_g.clone()).f_tic.clone())), t_text(" at ")), t_int_to_text(t_shift_right((v_p.clone()).f_x.clone(), 16i64, "main.tes:248:20 in function `game_state`"))), t_text(" ")), t_int_to_text(t_shift_right((v_p.clone()).f_y.clone(), 16i64, "main.tes:248:44 in function `game_state`"))), t_text(" angle ")), t_int_to_text(t_div(t_mul((v_p.clone()).f_angle.clone(), 360i64, "main.tes:248:82 in function `game_state`"), f_geometry__fine_angles(), "main.tes:248:88 in function `game_state`"))), t_text(" sector ")), t_int_to_text((v_p.clone()).f_sector.clone())), t_text(" health ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_health.clone())), t_text(" armor ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_armor.clone())), t_text(" ammo ")), (t_join(&t_map_list(((v_g.clone()).f_stats.clone()).f_ammo.clone(), ((|v_t_arg0: i64| t_int_to_text(v_t_arg0.clone())) as fn(i64) -> Rc<String>)), &t_text("/")))), t_text(" weapon ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_weapon.clone())), t_text(" keys [")), (t_join(&((v_g.clone()).f_stats.clone()).f_keys.clone(), &t_text(" ")))), t_text("] items ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_items.clone())), t_text(" kills ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_kills.clone())), t_text(" secrets ")), t_int_to_text(((v_g.clone()).f_stats.clone()).f_secrets.clone())), t_text("")), (if ((v_g.clone()).f_exited.clone() > 0i64) {
+        t_concat(t_concat(t_concat(t_text(" exited "), t_int_to_text((v_g.clone()).f_exited.clone())), t_text(" next ")), (f_world__next_map(((v_g.clone()).f_level.clone()).f_name.clone(), ((v_g.clone()).f_exited.clone() == 2i64))))
+    } else {
+        t_text("")
+    })), t_text(" missiles ")), t_int_to_text(t_list_length(&(v_g.clone()).f_missiles.clone()))), t_text(" effects ")), t_int_to_text(t_list_length(&(v_g.clone()).f_effects.clone()))), t_text("")), (if (t_list_length(&(v_g.clone()).f_sounds.clone()) > 0i64) {
+        t_concat(t_text(" sounds: "), (t_join(&t_map_list((v_g.clone()).f_sounds.clone(), (f_sound_name as fn(Rc<T_state__Sound>) -> Rc<String>)), &t_text(" "))))
+    } else {
+        t_text("")
+    })), t_text("")), (if ((v_g.clone()).f_message_time.clone() > 0i64) {
         t_concat(t_text(" message: "), ((v_g.clone()).f_message.clone()))
     } else {
         t_text("")
@@ -3956,18 +4212,21 @@ fn f_game_state(v_g: Rc<T_world__World>) -> Rc<String> {
 }
 
 fn f_main() -> () {
-    t_enter("main.tes:214:4 in function `main`");
-    let mut v_arguments: Rc<Vec<Rc<String>>> = t_args("main.tes:215:17 in function `main`");
+    t_enter("main.tes:251:4 in function `main`");
+    let mut v_arguments: Rc<Vec<Rc<String>>> = t_args("main.tes:252:17 in function `main`");
     let mut v_path: Rc<String> = t_text("WAD/freedoom1.wad");
-    if ((t_list_length(&v_arguments.clone()) >= 2i64) && (t_index(&v_arguments.clone(), 0i64, "main.tes:217:31 in function `main`") == t_text("--wad"))) {
-        v_path = t_index(&v_arguments.clone(), 1i64, "main.tes:218:12 in function `main`");
-        v_arguments = t_slice(v_arguments.clone(), 2i64, t_list_length(&v_arguments.clone()), "main.tes:219:17 in function `main`");
+    if ((t_list_length(&v_arguments.clone()) >= 2i64) && (t_index(&v_arguments.clone(), 0i64, "main.tes:254:31 in function `main`") == t_text("--wad"))) {
+        v_path = t_index(&v_arguments.clone(), 1i64, "main.tes:255:12 in function `main`");
+        v_arguments = t_slice(v_arguments.clone(), 2i64, t_list_length(&v_arguments.clone()), "main.tes:256:17 in function `main`");
     };
     if (t_list_length(&v_arguments.clone()) == 0i64) {
-        t_exit_with(64i64, f_usage(), "main.tes:222:1 in function `main`")
+        v_arguments = Rc::new(vec![t_text("start")]);
+    };
+    if (!t_contains(&Rc::new(vec![t_text("start"), t_text("info"), t_text("map"), t_text("ascii"), t_text("raycast"), t_text("columns"), t_text("render"), t_text("bench"), t_text("walk"), t_text("play"), t_text("game"), t_text("demo"), t_text("watch")]), &t_index(&v_arguments.clone(), 0i64, "main.tes:262:134 in function `main`"))) {
+        t_exit_with(64i64, f_usage(), "main.tes:263:1 in function `main`")
     };
     let v_w: Rc<T_wad__Wad> = f_load(v_path.clone());
-    match (t_index(&v_arguments.clone(), 0i64, "main.tes:225:7 in function `main`")).as_str() {
+    match (t_index(&v_arguments.clone(), 0i64, "main.tes:266:7 in function `main`")).as_str() {
         "info" => { f_info(v_w.clone()) }
         "raycast" => { {
             let v_l: Rc<T_level__Level> = f_load_level(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64));
@@ -3979,12 +4238,12 @@ fn f_main() -> () {
             let v_scene: Rc<T_render__Scene> = f_render__prepare(v_l.clone(), f_art__load(v_w.clone(), f_render__wanted_textures(v_l.clone())));
             let mut v_camera: Rc<T_geometry__Camera> = f_geometry__start_camera(v_l.clone());
             if (t_list_length(&v_arguments.clone()) >= 6i64) {
-                let v_x: i64 = t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 3i64, "main.tes:237:28 in function `main`")), 0i64);
-                let v_y: i64 = t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 4i64, "main.tes:238:28 in function `main`")), 0i64);
-                let v_degrees: i64 = t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 5i64, "main.tes:239:34 in function `main`")), 0i64);
-                let v_fx: i64 = t_shift_left(v_x.clone(), 16i64, "main.tes:240:10 in function `main`");
-                let v_fy: i64 = t_shift_left(v_y.clone(), 16i64, "main.tes:241:10 in function `main`");
-                v_camera = Rc::new(T_geometry__Camera { f_x: v_fx.clone(), f_y: v_fy.clone(), f_z: t_shift_left(t_add((t_index(&(v_l.clone()).f_sectors.clone(), f_geometry__sector_at(v_l.clone(), v_fx.clone(), v_fy.clone()), "main.tes:242:60 in function `main`")).f_floor.clone(), f_geometry__eye_height(), "main.tes:242:107 in function `main`"), 16i64, "main.tes:242:49 in function `main`"), f_angle: f_geometry__degrees_to_fine(v_degrees.clone()) });
+                let v_x: i64 = t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 3i64, "main.tes:278:28 in function `main`")), 0i64);
+                let v_y: i64 = t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 4i64, "main.tes:279:28 in function `main`")), 0i64);
+                let v_degrees: i64 = t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 5i64, "main.tes:280:34 in function `main`")), 0i64);
+                let v_fx: i64 = t_shift_left(v_x.clone(), 16i64, "main.tes:281:10 in function `main`");
+                let v_fy: i64 = t_shift_left(v_y.clone(), 16i64, "main.tes:282:10 in function `main`");
+                v_camera = Rc::new(T_geometry__Camera { f_x: v_fx.clone(), f_y: v_fy.clone(), f_z: t_shift_left(t_add((t_index(&(v_l.clone()).f_sectors.clone(), f_geometry__sector_at(v_l.clone(), v_fx.clone(), v_fy.clone()), "main.tes:283:60 in function `main`")).f_floor.clone(), f_geometry__eye_height(), "main.tes:283:107 in function `main`"), 16i64, "main.tes:283:49 in function `main`"), f_angle: f_geometry__degrees_to_fine(v_degrees.clone()) });
             };
             f_write_image(v_w.clone(), f_render__render(v_scene.clone(), v_camera.clone(), f_geometry__make_trig()), f_command_argument(v_arguments.clone(), 2i64))
         } }
@@ -3993,17 +4252,17 @@ fn f_main() -> () {
             let v_scene: Rc<T_render__Scene> = f_render__prepare(v_l.clone(), f_art__load(v_w.clone(), f_render__wanted_textures(v_l.clone())));
             let v_uncapped: bool = t_contains(&v_arguments.clone(), &t_text("--uncapped"));
             let v_seconds: i64 = match &(t_index_of(&v_arguments.clone(), &t_text("--seconds"))) {
-                Some(t1) => { let v_at = t1.clone(); if (t_add(v_at.clone(), 1i64, "main.tes:251:20 in function `main`") < t_list_length(&v_arguments.clone())) {
-                    t_value_or(t_parse_int(&t_index(&v_arguments.clone(), t_add(v_at.clone(), 1i64, "main.tes:251:78 in function `main`"), "main.tes:251:65 in function `main`")), 0i64)
+                Some(t1) => { let v_at = t1.clone(); if (t_add(v_at.clone(), 1i64, "main.tes:292:20 in function `main`") < t_list_length(&v_arguments.clone())) {
+                    t_value_or(t_parse_int(&t_index(&v_arguments.clone(), t_add(v_at.clone(), 1i64, "main.tes:292:78 in function `main`"), "main.tes:292:65 in function `main`")), 0i64)
                 } else {
                     0i64
                 } }
                 None => { 0i64 }
             };
-            let v_result: Rc<Vec<i64>> = f_play__run(v_scene.clone(), f_art__load_sprites(v_w.clone()), f_required_lump(v_w.clone(), t_text("PLAYPAL")), v_seconds.clone(), v_uncapped.clone(), (!t_contains(&v_arguments.clone(), &t_text("--no-monsters"))));
-            let v_took: i64 = t_index(&v_result.clone(), 1i64, "main.tes:255:12 in function `main`");
-            t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_int_to_text(t_index(&v_result.clone(), 0i64, "main.tes:256:10 in function `main`")), t_text(" frames in ")), t_int_to_text(v_took.clone())), t_text(" ms: ")), t_int_to_text(if (v_took.clone() > 0i64) {
-                t_div(t_mul(t_index(&v_result.clone(), 0i64, "main.tes:256:59 in function `main`"), 1000i64, "main.tes:256:69 in function `main`"), v_took.clone(), "main.tes:256:76 in function `main`")
+            let v_result: Rc<Vec<i64>> = f_play__run(f_play__load_assets(v_w.clone()), (v_l.clone()).f_name.clone(), 2i64, v_seconds.clone(), v_uncapped.clone(), (!t_contains(&v_arguments.clone(), &t_text("--no-monsters"))));
+            let v_took: i64 = t_index(&v_result.clone(), 1i64, "main.tes:296:12 in function `main`");
+            t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_int_to_text(t_index(&v_result.clone(), 0i64, "main.tes:297:10 in function `main`")), t_text(" frames in ")), t_int_to_text(v_took.clone())), t_text(" ms: ")), t_int_to_text(if (v_took.clone() > 0i64) {
+                t_div(t_mul(t_index(&v_result.clone(), 0i64, "main.tes:297:59 in function `main`"), 1000i64, "main.tes:297:69 in function `main`"), v_took.clone(), "main.tes:297:76 in function `main`")
             } else {
                 0i64
             })), t_text(" frames per second")))
@@ -4012,20 +4271,20 @@ fn f_main() -> () {
             let v_d: Rc<T_demo__Demo> = f_load_demo(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64));
             let v_l: Rc<T_level__Level> = f_load_level(v_w.clone(), f_demo__map_name(v_d.clone()));
             let v_trig: Rc<T_geometry__Trig> = f_geometry__make_trig();
-            let mut v_game: Rc<T_world__World> = f_world__create_at_skill(v_l.clone(), (v_d.clone()).f_skill.clone());
+            let mut v_game: Rc<T_state__World> = f_world__create_at_skill(v_l.clone(), (v_d.clone()).f_skill.clone());
             if t_contains(&v_arguments.clone(), &t_text("--no-monsters")) {
                 v_game = f_world__without_monsters(v_game);
             };
-            let v_count: i64 = if ((t_list_length(&v_arguments.clone()) > 2i64) && (t_index(&v_arguments.clone(), 2i64, "main.tes:266:42 in function `main`") != t_text("--no-monsters"))) {
-                f_std__math__min(t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 2i64, "main.tes:266:104 in function `main`")), 0i64), t_list_length(&(v_d.clone()).f_tics.clone()))
+            let v_count: i64 = if ((t_list_length(&v_arguments.clone()) > 2i64) && (t_index(&v_arguments.clone(), 2i64, "main.tes:307:42 in function `main`") != t_text("--no-monsters"))) {
+                f_std__math__min(t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 2i64, "main.tes:307:104 in function `main`")), 0i64), t_list_length(&(v_d.clone()).f_tics.clone()))
             } else {
                 t_list_length(&(v_d.clone()).f_tics.clone())
             };
-            t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("demo "), (t_index(&v_arguments.clone(), 1i64, "main.tes:267:15 in function `main`"))), t_text(": map ")), (f_demo__map_name(v_d.clone()))), t_text(" skill ")), t_int_to_text((v_d.clone()).f_skill.clone())), t_text(" players ")), t_int_to_text((v_d.clone()).f_players.clone())), t_text(" tics ")), t_int_to_text(t_list_length(&(v_d.clone()).f_tics.clone()))));
+            t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("demo "), (t_index(&v_arguments.clone(), 1i64, "main.tes:308:15 in function `main`"))), t_text(": map ")), (f_demo__map_name(v_d.clone()))), t_text(" skill ")), t_int_to_text((v_d.clone()).f_skill.clone())), t_text(" players ")), t_int_to_text((v_d.clone()).f_players.clone())), t_text(" tics ")), t_int_to_text(t_list_length(&(v_d.clone()).f_tics.clone()))));
             t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("at "), t_int_to_text(((v_game.clone()).f_player.clone()).f_x.clone())), t_text(" ")), t_int_to_text(((v_game.clone()).f_player.clone()).f_y.clone())), t_text(" ")), t_int_to_text(((v_game.clone()).f_player.clone()).f_angle.clone())), t_text(" ")), t_int_to_text(((v_game.clone()).f_player.clone()).f_sector.clone())), t_text(" health ")), t_int_to_text(((v_game.clone()).f_stats.clone()).f_health.clone())));
-            for v_i in t_iter(t_range(0i64, v_count.clone(), "main.tes:269:10 in function `main`")) {
-                t_tick("main.tes:269:26 in function `main`");
-                v_game = f_world__tic(v_game, t_index(&(v_d.clone()).f_tics.clone(), v_i.clone(), "main.tes:270:28 in function `main`"), v_trig.clone());
+            for v_i in t_iter(t_range(0i64, v_count.clone(), "main.tes:310:10 in function `main`")) {
+                t_tick("main.tes:310:26 in function `main`");
+                v_game = f_world__tic(v_game, t_index(&(v_d.clone()).f_tics.clone(), v_i.clone(), "main.tes:311:28 in function `main`"), v_trig.clone());
                 t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("at "), t_int_to_text(((v_game.clone()).f_player.clone()).f_x.clone())), t_text(" ")), t_int_to_text(((v_game.clone()).f_player.clone()).f_y.clone())), t_text(" ")), t_int_to_text(((v_game.clone()).f_player.clone()).f_angle.clone())), t_text(" ")), t_int_to_text(((v_game.clone()).f_player.clone()).f_sector.clone())), t_text(" health ")), t_int_to_text(((v_game.clone()).f_stats.clone()).f_health.clone())))
             }
         } }
@@ -4033,15 +4292,19 @@ fn f_main() -> () {
             let v_d: Rc<T_demo__Demo> = f_load_demo(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64));
             let v_l: Rc<T_level__Level> = f_load_level(v_w.clone(), f_demo__map_name(v_d.clone()));
             let v_scene: Rc<T_render__Scene> = f_render__prepare(v_l.clone(), f_art__load(v_w.clone(), f_render__wanted_textures(v_l.clone())));
-            let v_result: Rc<Vec<i64>> = f_play__watch(v_scene.clone(), f_art__load_sprites(v_w.clone()), f_required_lump(v_w.clone(), t_text("PLAYPAL")), (v_d.clone()).f_tics.clone(), (v_d.clone()).f_skill.clone());
-            t_print(t_concat(t_concat(t_concat(t_int_to_text(t_index(&v_result.clone(), 0i64, "main.tes:279:10 in function `main`")), t_text(" frames in ")), t_int_to_text(t_index(&v_result.clone(), 1i64, "main.tes:279:33 in function `main`"))), t_text(" ms")))
+            let v_result: Rc<Vec<i64>> = f_play__watch(f_play__load_assets(v_w.clone()), v_scene.clone(), (v_d.clone()).f_tics.clone(), (v_d.clone()).f_skill.clone());
+            t_print(t_concat(t_concat(t_concat(t_int_to_text(t_index(&v_result.clone(), 0i64, "main.tes:320:10 in function `main`")), t_text(" frames in ")), t_int_to_text(t_index(&v_result.clone(), 1i64, "main.tes:320:33 in function `main`"))), t_text(" ms")))
+        } }
+        "start" => { {
+            let v_result: Rc<Vec<i64>> = f_play__run(f_play__load_assets(v_w.clone()), t_text(""), 2i64, 0i64, false, (!t_contains(&v_arguments.clone(), &t_text("--no-monsters"))));
+            t_print(t_concat(t_concat(t_concat(t_int_to_text(t_index(&v_result.clone(), 0i64, "main.tes:324:10 in function `main`")), t_text(" frames in ")), t_int_to_text(t_index(&v_result.clone(), 1i64, "main.tes:324:33 in function `main`"))), t_text(" ms")))
         } }
         "game" => { f_game_console(v_w.clone(), f_load_level(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64)), (!t_contains(&v_arguments.clone(), &t_text("--no-monsters")))) }
         "walk" => { f_walk_console(v_w.clone(), f_load_level(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64))) }
         "bench" => { {
             let v_l: Rc<T_level__Level> = f_load_level(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64));
             let v_frames: i64 = if (t_list_length(&v_arguments.clone()) > 2i64) {
-                t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 2i64, "main.tes:285:60 in function `main`")), 100i64)
+                t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 2i64, "main.tes:330:60 in function `main`")), 100i64)
             } else {
                 100i64
             };
@@ -4050,19 +4313,19 @@ fn f_main() -> () {
             let v_start: Rc<T_geometry__Camera> = f_geometry__start_camera(v_l.clone());
             let v_began: i64 = tw_monotonic_ms();
             let mut v_checksum: i64 = 0i64;
-            for v_frame in t_iter(t_range(0i64, v_frames.clone(), "main.tes:291:14 in function `main`")) {
-                t_tick("main.tes:291:31 in function `main`");
+            for v_frame in t_iter(t_range(0i64, v_frames.clone(), "main.tes:336:14 in function `main`")) {
+                t_tick("main.tes:336:31 in function `main`");
                 let v_camera: Rc<T_geometry__Camera> = if t_contains(&v_arguments.clone(), &t_text("--still")) {
                     v_start.clone()
                 } else {
-                    { let mut t2 = Rc::unwrap_or_clone(v_start.clone()); t2.f_angle = f_geometry__wrap_angle(t_add((v_start.clone()).f_angle.clone(), t_div(t_mul(v_frame.clone(), f_geometry__fine_angles(), "main.tes:292:125 in function `main`"), v_frames.clone(), "main.tes:292:150 in function `main`"), "main.tes:292:117 in function `main`")); Rc::new(t2) }
+                    { let mut t2 = Rc::unwrap_or_clone(v_start.clone()); t2.f_angle = f_geometry__wrap_angle(t_add((v_start.clone()).f_angle.clone(), t_div(t_mul(v_frame.clone(), f_geometry__fine_angles(), "main.tes:337:125 in function `main`"), v_frames.clone(), "main.tes:337:150 in function `main`"), "main.tes:337:117 in function `main`")); Rc::new(t2) }
                 };
                 let v_pixels: Rc<Vec<i64>> = f_render__render(v_scene.clone(), v_camera.clone(), v_trig.clone());
-                v_checksum = t_rem(t_add(v_checksum.clone(), t_index(&v_pixels.clone(), t_rem(v_frame.clone(), t_list_length(&v_pixels.clone()), "main.tes:294:41 in function `main`"), "main.tes:294:28 in function `main`"), "main.tes:294:26 in function `main`"), 1000000i64, "main.tes:294:60 in function `main`");
+                v_checksum = t_rem(t_add(v_checksum.clone(), t_index(&v_pixels.clone(), t_rem(v_frame.clone(), t_list_length(&v_pixels.clone()), "main.tes:339:41 in function `main`"), "main.tes:339:28 in function `main`"), "main.tes:339:26 in function `main`"), 1000000i64, "main.tes:339:60 in function `main`");
             }
-            let v_took: i64 = t_sub(tw_monotonic_ms(), v_began.clone(), "main.tes:296:24 in function `main`");
+            let v_took: i64 = t_sub(tw_monotonic_ms(), v_began.clone(), "main.tes:341:24 in function `main`");
             t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_int_to_text(v_frames.clone()), t_text(" frames in ")), t_int_to_text(v_took.clone())), t_text(" ms: ")), t_int_to_text(if (v_took.clone() > 0i64) {
-                t_div(t_mul(v_frames.clone(), 1000i64, "main.tes:297:63 in function `main`"), v_took.clone(), "main.tes:297:70 in function `main`")
+                t_div(t_mul(v_frames.clone(), 1000i64, "main.tes:342:63 in function `main`"), v_took.clone(), "main.tes:342:70 in function `main`")
             } else {
                 0i64
             })), t_text(" frames per second (checksum ")), t_int_to_text(v_checksum.clone())), t_text(")")))
@@ -4072,28 +4335,28 @@ fn f_main() -> () {
             let v_camera: Rc<T_geometry__Camera> = f_geometry__start_camera(v_l.clone());
             t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("camera "), t_int_to_text((v_camera.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_camera.clone()).f_y.clone())), t_text(" ")), t_int_to_text((v_camera.clone()).f_z.clone())), t_text(" ")), t_int_to_text((v_camera.clone()).f_angle.clone())));
             let v_columns: Rc<Vec<Rc<T_raycast__Column>>> = f_raycast__cast(v_l.clone(), f_geometry__make_trig(), v_camera.clone());
-            for v_x in t_iter(t_range(0i64, t_list_length(&v_columns.clone()), "main.tes:304:10 in function `main`")) {
-                t_tick("main.tes:304:36 in function `main`");
-                let v_c: Rc<T_raycast__Column> = t_index(&v_columns.clone(), v_x.clone(), "main.tes:305:9 in function `main`");
+            for v_x in t_iter(t_range(0i64, t_list_length(&v_columns.clone()), "main.tes:349:10 in function `main`")) {
+                t_tick("main.tes:349:36 in function `main`");
+                let v_c: Rc<T_raycast__Column> = t_index(&v_columns.clone(), v_x.clone(), "main.tes:350:9 in function `main`");
                 t_print(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_int_to_text(v_x.clone()), t_text(" ")), t_int_to_text((v_c.clone()).f_line.clone())), t_text(" ")), t_int_to_text((v_c.clone()).f_top.clone())), t_text(" ")), t_int_to_text((v_c.clone()).f_bottom.clone())))
             }
         } }
         "map" => { f_map_dump(f_load_level(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64))) }
         "ascii" => { {
             let v_width: i64 = if (t_list_length(&v_arguments.clone()) > 2i64) {
-                t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 2i64, "main.tes:311:59 in function `main`")), 0i64)
+                t_value_or(t_parse_int(&t_index(&v_arguments.clone(), 2i64, "main.tes:356:59 in function `main`")), 0i64)
             } else {
                 120i64
             };
             if ((v_width.clone() < 10i64) || (v_width.clone() > 1000i64)) {
-                t_exit_with(64i64, t_text("error: WIDTH must be 10 to 1000"), "main.tes:313:1 in function `main`")
+                t_exit_with(64i64, t_text("error: WIDTH must be 10 to 1000"), "main.tes:358:1 in function `main`")
             };
             for v_row in t_iter(f_automap__render(f_load_level(v_w.clone(), f_command_argument(v_arguments.clone(), 1i64)), v_width.clone())) {
-                t_tick("main.tes:315:81 in function `main`");
+                t_tick("main.tes:360:81 in function `main`");
                 t_print(v_row.clone())
             }
         } }
-        _ => { t_exit_with(64i64, f_usage(), "main.tes:319:6 in function `main`") }
+        _ => { t_exit_with(64i64, f_usage(), "main.tes:364:6 in function `main`") }
     }
 }
 
@@ -4101,16 +4364,16 @@ fn f_main() -> () {
 fn f_wad__parse(v_data: Rc<Vec<u8>>) -> Result<Rc<T_wad__Wad>, Rc<String>> {
     t_enter("wad.tes:21:8 in function `wad__parse`");
     if (t_list_length(&v_data.clone()) < 12i64) {
-        return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_text("too short for a WAD header ("), t_int_to_text(t_list_length(&v_data.clone()))), t_text(" bytes)")))
+        return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_text("too short for a WAD header ("), t_int_to_text(t_list_length(&v_data))), t_text(" bytes)")))
     };
     let v_kind: Rc<String> = f_std__bytes__read_ascii(v_data.clone(), 0i64, 4i64);
     if ((v_kind.clone() != t_text("IWAD")) && (v_kind.clone() != t_text("PWAD"))) {
-        return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_text("not a WAD file: the header starts with \""), (v_kind.clone())), t_text("\"")))
+        return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_text("not a WAD file: the header starts with \""), (v_kind)), t_text("\"")))
     };
     let v_count: i64 = f_std__bytes__read_i32_le(v_data.clone(), 4i64);
     let v_directory: i64 = f_std__bytes__read_i32_le(v_data.clone(), 8i64);
     if (((v_count.clone() < 0i64) || (v_directory.clone() < 0i64)) || (t_add(v_directory.clone(), t_mul(v_count.clone(), 16i64, "wad.tes:31:52 in function `wad__parse`"), "wad.tes:31:44 in function `wad__parse`") > t_list_length(&v_data.clone()))) {
-        return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_concat(t_text("the directory ("), t_int_to_text(v_count.clone())), t_text(" entries at offset ")), t_int_to_text(v_directory.clone())), t_text(") lies outside the file")))
+        return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_concat(t_text("the directory ("), t_int_to_text(v_count)), t_text(" entries at offset ")), t_int_to_text(v_directory)), t_text(") lies outside the file")))
     };
     let mut v_lumps: Rc<Vec<Rc<T_wad__Lump>>> = Rc::new(Vec::<Rc<T_wad__Lump>>::new());
     for v_index in t_iter(t_range(0i64, v_count.clone(), "wad.tes:35:14 in function `wad__parse`")) {
@@ -4120,11 +4383,11 @@ fn f_wad__parse(v_data: Rc<Vec<u8>>) -> Result<Rc<T_wad__Wad>, Rc<String>> {
         let v_size: i64 = f_std__bytes__read_i32_le(v_data.clone(), t_add(v_entry.clone(), 4i64, "wad.tes:38:42 in function `wad__parse`"));
         let v_name: Rc<String> = t_to_upper(&f_std__bytes__read_ascii(v_data.clone(), t_add(v_entry.clone(), 8i64, "wad.tes:39:50 in function `wad__parse`"), 8i64));
         if (((v_offset.clone() < 0i64) || (v_size.clone() < 0i64)) || (t_add(v_offset.clone(), v_size.clone(), "wad.tes:40:37 in function `wad__parse`") > t_list_length(&v_data.clone()))) {
-            return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_concat(t_text("lump "), t_int_to_text(v_index.clone())), t_text(" (")), (v_name.clone())), t_text(") lies outside the file")))
+            return Result::<Rc<T_wad__Wad>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_concat(t_text("lump "), t_int_to_text(v_index)), t_text(" (")), (v_name)), t_text(") lies outside the file")))
         };
         v_lumps = t_concat_lists(std::mem::take(&mut v_lumps), Rc::new(vec![Rc::new(T_wad__Lump { f_name: v_name.clone(), f_offset: v_offset.clone(), f_size: v_size.clone() })]));
     }
-    Result::<Rc<T_wad__Wad>, Rc<String>>::Ok(Rc::new(T_wad__Wad { f_kind: v_kind.clone(), f_data: v_data.clone(), f_lumps: v_lumps.clone() }))
+    Result::<Rc<T_wad__Wad>, Rc<String>>::Ok(Rc::new(T_wad__Wad { f_kind: v_kind, f_data: v_data, f_lumps: v_lumps }))
 }
 
 // note: Index of the last lump with this name (case-insensitive), as later lumps replace earlier ones.
@@ -4135,7 +4398,7 @@ fn f_wad__find(v_wad: Rc<T_wad__Wad>, v_name: Rc<String>) -> Option<i64> {
     while (v_index.clone() >= 0i64) {
         t_tick("wad.tes:52:18 in function `wad__find`");
         if ((t_index(&(v_wad.clone()).f_lumps.clone(), v_index.clone(), "wad.tes:53:4 in function `wad__find`")).f_name.clone() == v_wanted.clone()) {
-            return Some(v_index.clone())
+            return Some(v_index)
         };
         v_index = t_sub(v_index.clone(), 1i64, "wad.tes:56:11 in function `wad__find`");
     }
@@ -4145,14 +4408,14 @@ fn f_wad__find(v_wad: Rc<T_wad__Wad>, v_name: Rc<String>) -> Option<i64> {
 fn f_wad__lump_data(v_wad: Rc<T_wad__Wad>, v_index: i64) -> Rc<Vec<u8>> {
     t_enter("wad.tes:61:8 in function `wad__lump_data`");
     let v_lump: Rc<T_wad__Lump> = t_index(&(v_wad.clone()).f_lumps.clone(), v_index.clone(), "wad.tes:62:12 in function `wad__lump_data`");
-    t_slice((v_wad.clone()).f_data.clone(), (v_lump.clone()).f_offset.clone(), t_add((v_lump.clone()).f_offset.clone(), (v_lump.clone()).f_size.clone(), "wad.tes:63:42 in function `wad__lump_data`"), "wad.tes:63:1 in function `wad__lump_data`")
+    t_slice((v_wad).f_data.clone(), (v_lump.clone()).f_offset.clone(), t_add((v_lump.clone()).f_offset.clone(), (v_lump.clone()).f_size.clone(), "wad.tes:63:42 in function `wad__lump_data`"), "wad.tes:63:1 in function `wad__lump_data`")
 }
 
 // note: The data of the last lump with this name.
 fn f_wad__lump(v_wad: Rc<T_wad__Wad>, v_name: Rc<String>) -> Option<Rc<Vec<u8>>> {
     t_enter("wad.tes:67:8 in function `wad__lump`");
     let v_index: i64 = match f_wad__find(v_wad.clone(), v_name.clone()) { Some(t_value) => t_value, None => { return Option::<Rc<Vec<u8>>>::None } };
-    Some(f_wad__lump_data(v_wad.clone(), v_index.clone()))
+    Some(f_wad__lump_data(v_wad, v_index))
 }
 
 // note: Map markers: lumps directly followed by a `THINGS` lump, in directory order.
@@ -4165,7 +4428,7 @@ fn f_wad__map_names(v_wad: Rc<T_wad__Wad>) -> Rc<Vec<Rc<String>>> {
             v_names = t_concat_lists(std::mem::take(&mut v_names), Rc::new(vec![(t_index(&(v_wad.clone()).f_lumps.clone(), v_index.clone(), "wad.tes:77:15 in function `wad__map_names`")).f_name.clone()]));
         }
     }
-    v_names.clone()
+    v_names
 }
 
 // note: A lump of a map, such as `LINEDEFS` of `E1M1`: searched among the lumps after the map marker, up to the next map.
@@ -4177,7 +4440,7 @@ fn f_wad__map_lump(v_wad: Rc<T_wad__Wad>, v_map: Rc<String>, v_name: Rc<String>)
         t_tick("wad.tes:87:58 in function `wad__map_lump`");
         let v_lump_name: Rc<String> = (t_index(&(v_wad.clone()).f_lumps.clone(), v_index.clone(), "wad.tes:88:17 in function `wad__map_lump`")).f_name.clone();
         if (v_lump_name.clone() == v_name.clone()) {
-            return Some(f_wad__lump_data(v_wad.clone(), v_index.clone()))
+            return Some(f_wad__lump_data(v_wad, v_index))
         };
         if ((v_index.clone() > t_add(v_marker.clone(), 1i64, "wad.tes:92:19 in function `wad__map_lump`")) && (v_lump_name.clone() == t_text("THINGS"))) {
             return Option::<Rc<Vec<u8>>>::None
@@ -4203,22 +4466,22 @@ fn f_wad__lumps_between(v_wad: Rc<T_wad__Wad>, v_first: Rc<Vec<Rc<String>>>, v_l
             v_found = t_concat_lists(std::mem::take(&mut v_found), Rc::new(vec![v_index.clone()]));
         }
     }
-    v_found.clone()
+    v_found
 }
 
 fn f_level__u16(v_data: Rc<Vec<u8>>, v_at: i64) -> i64 {
     t_enter("level.tes:99:4 in function `level__u16`");
-    f_std__bytes__read_u16_le(v_data.clone(), v_at.clone())
+    f_std__bytes__read_u16_le(v_data, v_at)
 }
 
 fn f_level__i16(v_data: Rc<Vec<u8>>, v_at: i64) -> i64 {
     t_enter("level.tes:101:4 in function `level__i16`");
-    f_std__bytes__read_i16_le(v_data.clone(), v_at.clone())
+    f_std__bytes__read_i16_le(v_data, v_at)
 }
 
 fn f_level__name8(v_data: Rc<Vec<u8>>, v_at: i64) -> Rc<String> {
     t_enter("level.tes:103:4 in function `level__name8`");
-    t_to_upper(&f_std__bytes__read_ascii(v_data.clone(), v_at.clone(), 8i64))
+    t_to_upper(&f_std__bytes__read_ascii(v_data, v_at, 8i64))
 }
 
 fn f_level__index_or_none(v_value: i64) -> i64 {
@@ -4232,8 +4495,8 @@ fn f_level__index_or_none(v_value: i64) -> i64 {
 
 fn f_level__required(v_w: Rc<T_wad__Wad>, v_map: Rc<String>, v_name: Rc<String>) -> Result<Rc<Vec<u8>>, Rc<String>> {
     t_enter("level.tes:107:4 in function `level__required`");
-    match &(f_wad__map_lump(v_w.clone(), v_map.clone(), v_name.clone())) {
-        Some(t1) => { let v_data = t1.clone(); Result::<Rc<Vec<u8>>, Rc<String>>::Ok(v_data.clone()) }
+    match &(f_wad__map_lump(v_w, v_map.clone(), v_name.clone())) {
+        Some(t1) => { let v_data = t1.clone(); Result::<Rc<Vec<u8>>, Rc<String>>::Ok(v_data) }
         None => { Result::<Rc<Vec<u8>>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_concat(t_text("map "), (v_map.clone())), t_text(" has no ")), (v_name.clone())), t_text(" lump"))) }
     }
 }
@@ -4241,7 +4504,7 @@ fn f_level__required(v_w: Rc<T_wad__Wad>, v_map: Rc<String>, v_name: Rc<String>)
 fn f_level__load(v_w: Rc<T_wad__Wad>, v_map: Rc<String>) -> Result<Rc<T_level__Level>, Rc<String>> {
     t_enter("level.tes:114:8 in function `level__load`");
     if (f_wad__find(v_w.clone(), v_map.clone()) == Option::<i64>::None) {
-        return Result::<Rc<T_level__Level>, Rc<String>>::Err(t_concat(t_text("no map named "), (v_map.clone())))
+        return Result::<Rc<T_level__Level>, Rc<String>>::Err(t_concat(t_text("no map named "), (v_map)))
     };
     let v_thing_data: Rc<Vec<u8>> = match f_level__required(v_w.clone(), v_map.clone(), t_text("THINGS")) { Ok(ok_value) => ok_value, Err(error_value) => return Err(error_value) };
     let mut v_things: Rc<Vec<Rc<T_level__Thing>>> = Rc::new(Vec::<Rc<T_level__Thing>>::new());
@@ -4299,7 +4562,7 @@ fn f_level__load(v_w: Rc<T_wad__Wad>, v_map: Rc<String>) -> Result<Rc<T_level__L
         let v_b: i64 = t_mul(v_at.clone(), 26i64, "level.tes:163:12 in function `level__load`");
         v_sectors = t_concat_lists(std::mem::take(&mut v_sectors), Rc::new(vec![Rc::new(T_level__Sector { f_floor: f_level__i16(v_sector_data.clone(), v_b.clone()), f_ceiling: f_level__i16(v_sector_data.clone(), t_add(v_b.clone(), 2i64, "level.tes:164:82 in function `level__load`")), f_floor_flat: f_level__name8(v_sector_data.clone(), t_add(v_b.clone(), 4i64, "level.tes:164:121 in function `level__load`")), f_ceiling_flat: f_level__name8(v_sector_data.clone(), t_add(v_b.clone(), 12i64, "level.tes:164:162 in function `level__load`")), f_light: f_level__i16(v_sector_data.clone(), t_add(v_b.clone(), 20i64, "level.tes:164:195 in function `level__load`")), f_special: f_level__u16(v_sector_data.clone(), t_add(v_b.clone(), 22i64, "level.tes:164:230 in function `level__load`")), f_tag: f_level__u16(v_sector_data.clone(), t_add(v_b.clone(), 24i64, "level.tes:164:261 in function `level__load`")) })]));
     }
-    Result::<Rc<T_level__Level>, Rc<String>>::Ok(Rc::new(T_level__Level { f_name: v_map.clone(), f_things: v_things.clone(), f_vertexes: v_vertexes.clone(), f_linedefs: v_linedefs.clone(), f_sidedefs: v_sidedefs.clone(), f_segs: v_segs.clone(), f_subsectors: v_subsectors.clone(), f_nodes: v_nodes.clone(), f_sectors: v_sectors.clone() }))
+    Result::<Rc<T_level__Level>, Rc<String>>::Ok(Rc::new(T_level__Level { f_name: v_map, f_things: v_things, f_vertexes: v_vertexes, f_linedefs: v_linedefs, f_sidedefs: v_sidedefs, f_segs: v_segs, f_subsectors: v_subsectors, f_nodes: v_nodes, f_sectors: v_sectors }))
 }
 
 // note: The first thing of the given type, such as 1 for the player 1 start.
@@ -4308,7 +4571,7 @@ fn f_level__find_thing(v_l: Rc<T_level__Level>, v_kind: i64) -> Option<Rc<T_leve
     for v_t in t_iter((v_l.clone()).f_things.clone()) {
         t_tick("level.tes:171:19 in function `level__find_thing`");
         if ((v_t.clone()).f_kind.clone() == v_kind.clone()) {
-            return Some(v_t.clone())
+            return Some(v_t)
         }
     }
     Option::<Rc<T_level__Thing>>::None
@@ -4325,7 +4588,7 @@ fn f_level__line_sector(v_l: Rc<T_level__Level>, v_line: Rc<T_level__Linedef>, v
     if (v_index.clone() < 0i64) {
         return Option::<i64>::None
     };
-    Some((t_index(&(v_l.clone()).f_sidedefs.clone(), v_index.clone(), "level.tes:185:7 in function `level__line_sector`")).f_sector.clone())
+    Some((t_index(&(v_l).f_sidedefs.clone(), v_index, "level.tes:185:7 in function `level__line_sector`")).f_sector.clone())
 }
 
 // note: Marks one cell; stronger marks win: `#` over `+` over `.`. Changes `cells` in place when called as `set cells = plot(cells, ...)`.
@@ -4333,14 +4596,14 @@ fn f_automap__plot(v_cells: Rc<Vec<i64>>, v_width: i64, v_height: i64, v_x: i64,
     t_enter("automap.tes:9:4 in function `automap__plot`");
     let mut v_out: Rc<Vec<i64>> = v_cells;
     if ((((v_x.clone() < 0i64) || (v_y.clone() < 0i64)) || (v_x.clone() >= v_width.clone())) || (v_y.clone() >= v_height.clone())) {
-        return v_out.clone()
+        return v_out
     };
     let v_at: i64 = t_add(t_mul(v_y.clone(), v_width.clone(), "automap.tes:14:12 in function `automap__plot`"), v_x.clone(), "automap.tes:14:20 in function `automap__plot`");
     let v_current: i64 = t_index(&v_out.clone(), v_at.clone(), "automap.tes:15:15 in function `automap__plot`");
     if (!((v_current.clone() == 35i64) || ((v_current.clone() == 43i64) && (v_code.clone() == 46i64)))) {
         { let t_place0: i64 = v_at.clone(); let t_value = v_code.clone(); *t_slot(&mut v_out, t_place0, "automap.tes:17:5 in function `automap__plot`") = t_value; }
     };
-    v_out.clone()
+    v_out
 }
 
 fn f_automap__trace_line(v_cells: Rc<Vec<i64>>, v_width: i64, v_height: i64, v_x0: i64, v_y0: i64, v_x1: i64, v_y1: i64, v_code: i64) -> Rc<Vec<i64>> {
@@ -4377,7 +4640,7 @@ fn f_automap__trace_line(v_cells: Rc<Vec<i64>>, v_width: i64, v_height: i64, v_x
             v_y = t_add(v_y.clone(), v_step_y.clone(), "automap.tes:43:7 in function `automap__trace_line`");
         }
     }
-    v_out.clone()
+    v_out
 }
 
 fn f_automap__line_code(v_l: Rc<T_level__Level>, v_line: Rc<T_level__Linedef>) -> i64 {
@@ -4433,12 +4696,12 @@ fn f_automap__render(v_l: Rc<T_level__Level>, v_width: i64) -> Rc<Vec<Rc<String>
         t_tick("automap.tes:89:27 in function `automap__render`");
         v_rows = t_concat_lists(std::mem::take(&mut v_rows), Rc::new(vec![f_automap__trim_end(t_from_code_points(&t_slice(v_cells.clone(), t_mul(v_y.clone(), v_width.clone(), "automap.tes:90:55 in function `automap__render`"), t_add(t_mul(v_y.clone(), v_width.clone(), "automap.tes:90:66 in function `automap__render`"), v_width.clone(), "automap.tes:90:74 in function `automap__render`"), "automap.tes:90:40 in function `automap__render`"), "automap.tes:90:23 in function `automap__render`"))]));
     }
-    v_rows.clone()
+    v_rows
 }
 
 fn f_automap__scale(v_offset: i64, v_span: i64, v_width: i64) -> i64 {
     t_enter("automap.tes:95:4 in function `automap__scale`");
-    t_div(t_mul(v_offset.clone(), t_sub(v_width.clone(), 1i64, "automap.tes:95:71 in function `automap__scale`"), "automap.tes:95:62 in function `automap__scale`"), v_span.clone(), "automap.tes:95:76 in function `automap__scale`")
+    t_div(t_mul(v_offset, t_sub(v_width, 1i64, "automap.tes:95:71 in function `automap__scale`"), "automap.tes:95:62 in function `automap__scale`"), v_span, "automap.tes:95:76 in function `automap__scale`")
 }
 
 fn f_automap__trim_end(v_text: Rc<String>) -> Rc<String> {
@@ -4448,7 +4711,7 @@ fn f_automap__trim_end(v_text: Rc<String>) -> Rc<String> {
         t_tick("automap.tes:99:60 in function `automap__trim_end`");
         v_codes = t_slice(v_codes.clone(), 0i64, t_sub(t_list_length(&v_codes.clone()), 1i64, "automap.tes:100:43 in function `automap__trim_end`"), "automap.tes:100:13 in function `automap__trim_end`");
     }
-    t_from_code_points(&v_codes.clone(), "automap.tes:102:1 in function `automap__trim_end`")
+    t_from_code_points(&v_codes, "automap.tes:102:1 in function `automap__trim_end`")
 }
 
 fn f_geometry__fine_angles() -> i64 {
@@ -4485,13 +4748,13 @@ fn f_geometry__make_trig() -> Rc<T_geometry__Trig> {
 
 fn f_geometry__wrap_angle(v_angle: i64) -> i64 {
     t_enter("geometry.tes:36:8 in function `geometry__wrap_angle`");
-    t_rem(t_add(t_rem(v_angle.clone(), f_geometry__fine_angles(), "geometry.tes:36:48 in function `geometry__wrap_angle`"), f_geometry__fine_angles(), "geometry.tes:36:65 in function `geometry__wrap_angle`"), f_geometry__fine_angles(), "geometry.tes:36:82 in function `geometry__wrap_angle`")
+    t_rem(t_add(t_rem(v_angle, f_geometry__fine_angles(), "geometry.tes:36:48 in function `geometry__wrap_angle`"), f_geometry__fine_angles(), "geometry.tes:36:65 in function `geometry__wrap_angle`"), f_geometry__fine_angles(), "geometry.tes:36:82 in function `geometry__wrap_angle`")
 }
 
 // note: Converts a THINGS angle in degrees to a fine angle.
 fn f_geometry__degrees_to_fine(v_degrees: i64) -> i64 {
     t_enter("geometry.tes:39:8 in function `geometry__degrees_to_fine`");
-    f_geometry__wrap_angle(t_div(t_mul(v_degrees.clone(), f_geometry__fine_angles(), "geometry.tes:39:66 in function `geometry__degrees_to_fine`"), 360i64, "geometry.tes:39:82 in function `geometry__degrees_to_fine`"))
+    f_geometry__wrap_angle(t_div(t_mul(v_degrees, f_geometry__fine_angles(), "geometry.tes:39:66 in function `geometry__degrees_to_fine`"), 360i64, "geometry.tes:39:82 in function `geometry__degrees_to_fine`"))
 }
 
 fn f_geometry__column_rays(v_trig: Rc<T_geometry__Trig>, v_angle: i64) -> Rc<T_geometry__Rays> {
@@ -4506,55 +4769,16 @@ fn f_geometry__column_rays(v_trig: Rc<T_geometry__Trig>, v_angle: i64) -> Rc<T_g
         v_dx = t_concat_lists(std::mem::take(&mut v_dx), Rc::new(vec![t_add(v_c.clone(), f_std__fixed__mul(v_s.clone(), v_k.clone()), "geometry.tes:56:14 in function `geometry__column_rays`")]));
         v_dy = t_concat_lists(std::mem::take(&mut v_dy), Rc::new(vec![t_sub(v_s.clone(), f_std__fixed__mul(v_c.clone(), v_k.clone()), "geometry.tes:57:14 in function `geometry__column_rays`")]));
     }
-    Rc::new(T_geometry__Rays { f_dx: v_dx.clone(), f_dy: v_dy.clone() })
-}
-
-fn f_geometry__no_hit() -> Rc<T_geometry__Hit> {
-    t_enter("geometry.tes:69:4 in function `geometry__no_hit`");
-    Rc::new(T_geometry__Hit { f_hit: false, f_distance: 0i64, f_along: 0i64 })
-}
-
-// note: Exact quotient of a by b as a fixed value, without overflowing a * 65536: magnitudes up to 2^50 for `a` and 2^47 for `b` are safe.
-fn f_geometry__ratio(v_a: i64, v_b: i64) -> i64 {
-    t_enter("geometry.tes:72:8 in function `geometry__ratio`");
-    let v_whole: i64 = t_div(v_a.clone(), v_b.clone(), "geometry.tes:73:15 in function `geometry__ratio`");
-    let v_rest: i64 = t_sub(v_a.clone(), t_mul(v_whole.clone(), v_b.clone(), "geometry.tes:74:22 in function `geometry__ratio`"), "geometry.tes:74:14 in function `geometry__ratio`");
-    t_add(t_mul(v_whole.clone(), f_std__fixed__one(), "geometry.tes:75:7 in function `geometry__ratio`"), t_div(t_mul(v_rest.clone(), f_std__fixed__one(), "geometry.tes:75:28 in function `geometry__ratio`"), v_b.clone(), "geometry.tes:75:42 in function `geometry__ratio`"), "geometry.tes:75:21 in function `geometry__ratio`")
-}
-
-// note: Ray (px, py fixed) + t * (dx, dy fixed) against the segment (ax, ay)-(bx, by) in whole map units. Products stay below 2^51: positions differ by at most 2^32 (fixed), segment lengths are below 2^16 and directions below 2^18.
-fn f_geometry__intersect(v_px: i64, v_py: i64, v_dx: i64, v_dy: i64, v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> Rc<T_geometry__Hit> {
-    t_enter("geometry.tes:79:8 in function `geometry__intersect`");
-    let v_lx: i64 = t_sub(v_bx.clone(), v_ax.clone(), "geometry.tes:80:13 in function `geometry__intersect`");
-    let v_ly: i64 = t_sub(v_by.clone(), v_ay.clone(), "geometry.tes:81:13 in function `geometry__intersect`");
-    let v_den: i64 = t_sub(t_mul(v_dx.clone(), v_ly.clone(), "geometry.tes:82:14 in function `geometry__intersect`"), t_mul(v_dy.clone(), v_lx.clone(), "geometry.tes:82:24 in function `geometry__intersect`"), "geometry.tes:82:19 in function `geometry__intersect`");
-    if (v_den.clone() == 0i64) {
-        return f_geometry__no_hit()
-    };
-    let v_ex: i64 = t_sub(f_std__fixed__from_int(v_ax.clone()), v_px.clone(), "geometry.tes:86:29 in function `geometry__intersect`");
-    let v_ey: i64 = t_sub(f_std__fixed__from_int(v_ay.clone()), v_py.clone(), "geometry.tes:87:29 in function `geometry__intersect`");
-    let v_t_num: i64 = t_sub(t_mul(v_ex.clone(), v_ly.clone(), "geometry.tes:88:16 in function `geometry__intersect`"), t_mul(v_ey.clone(), v_lx.clone(), "geometry.tes:88:26 in function `geometry__intersect`"), "geometry.tes:88:21 in function `geometry__intersect`");
-    let v_u_num: i64 = t_sub(f_std__fixed__mul(v_ex.clone(), v_dy.clone()), f_std__fixed__mul(v_ey.clone(), v_dx.clone()), "geometry.tes:90:31 in function `geometry__intersect`");
-    if (v_den.clone() > 0i64) {
-        if (((v_t_num.clone() <= 0i64) || (v_u_num.clone() < 0i64)) || (v_u_num.clone() > v_den.clone())) {
-            return f_geometry__no_hit()
-        }
-    } else if (((v_t_num.clone() >= 0i64) || (v_u_num.clone() > 0i64)) || (v_u_num.clone() < v_den.clone())) {
-        return f_geometry__no_hit()
-    };
-    if (t_div(v_t_num.clone(), v_den.clone(), "geometry.tes:99:10 in function `geometry__intersect`") > 65536i64) {
-        return f_geometry__no_hit()
-    };
-    Rc::new(T_geometry__Hit { f_hit: true, f_distance: f_geometry__ratio(v_t_num.clone(), v_den.clone()), f_along: f_geometry__ratio(v_u_num.clone(), v_den.clone()) })
+    Rc::new(T_geometry__Rays { f_dx: v_dx, f_dy: v_dy })
 }
 
 // note: Which side of a BSP partition line a fixed point is on: 0 for the right (front) side, 1 for the left.
 fn f_geometry__node_side(v_node: Rc<T_level__Node>, v_x: i64, v_y: i64) -> i64 {
-    t_enter("geometry.tes:106:8 in function `geometry__node_side`");
-    let v_dx: i64 = t_sub(v_x.clone(), f_std__fixed__from_int((v_node.clone()).f_x.clone()), "geometry.tes:107:12 in function `geometry__node_side`");
-    let v_dy: i64 = t_sub(v_y.clone(), f_std__fixed__from_int((v_node.clone()).f_y.clone()), "geometry.tes:108:12 in function `geometry__node_side`");
-    let v_cross: i64 = t_sub(t_mul((v_node.clone()).f_dx.clone(), v_dy.clone(), "geometry.tes:110:21 in function `geometry__node_side`"), t_mul((v_node.clone()).f_dy.clone(), v_dx.clone(), "geometry.tes:110:36 in function `geometry__node_side`"), "geometry.tes:110:26 in function `geometry__node_side`");
-    if (v_cross.clone() > 0i64) {
+    t_enter("geometry.tes:63:8 in function `geometry__node_side`");
+    let v_dx: i64 = t_sub(v_x.clone(), f_std__fixed__from_int((v_node.clone()).f_x.clone()), "geometry.tes:64:12 in function `geometry__node_side`");
+    let v_dy: i64 = t_sub(v_y.clone(), f_std__fixed__from_int((v_node.clone()).f_y.clone()), "geometry.tes:65:12 in function `geometry__node_side`");
+    let v_cross: i64 = t_sub(t_mul((v_node.clone()).f_dx.clone(), v_dy.clone(), "geometry.tes:67:21 in function `geometry__node_side`"), t_mul((v_node.clone()).f_dy.clone(), v_dx.clone(), "geometry.tes:67:36 in function `geometry__node_side`"), "geometry.tes:67:26 in function `geometry__node_side`");
+    if (v_cross > 0i64) {
         1i64
     } else {
         0i64
@@ -4563,21 +4787,21 @@ fn f_geometry__node_side(v_node: Rc<T_level__Node>, v_x: i64, v_y: i64) -> i64 {
 
 // note: The subsector containing a fixed point, found by walking the BSP tree from the root (the last node).
 fn f_geometry__subsector_at(v_l: Rc<T_level__Level>, v_x: i64, v_y: i64) -> i64 {
-    t_enter("geometry.tes:115:8 in function `geometry__subsector_at`");
+    t_enter("geometry.tes:72:8 in function `geometry__subsector_at`");
     if (t_list_length(&(v_l.clone()).f_nodes.clone()) == 0i64) {
         return 0i64
     };
-    let mut v_child: i64 = t_sub(t_list_length(&(v_l.clone()).f_nodes.clone()), 1i64, "geometry.tes:119:29 in function `geometry__subsector_at`");
+    let mut v_child: i64 = t_sub(t_list_length(&(v_l.clone()).f_nodes.clone()), 1i64, "geometry.tes:76:29 in function `geometry__subsector_at`");
     while true {
-        t_tick("geometry.tes:120:12 in function `geometry__subsector_at`");
-        let v_node: Rc<T_level__Node> = t_index(&(v_l.clone()).f_nodes.clone(), v_child.clone(), "geometry.tes:121:12 in function `geometry__subsector_at`");
+        t_tick("geometry.tes:77:12 in function `geometry__subsector_at`");
+        let v_node: Rc<T_level__Node> = t_index(&(v_l.clone()).f_nodes.clone(), v_child.clone(), "geometry.tes:78:12 in function `geometry__subsector_at`");
         let v_next: i64 = if (f_geometry__node_side(v_node.clone(), v_x.clone(), v_y.clone()) == 0i64) {
             (v_node.clone()).f_right.clone()
         } else {
             (v_node.clone()).f_left.clone()
         };
         if ((v_next.clone() & 32768i64) != 0i64) {
-            return (v_next.clone() & 32767i64)
+            return (v_next & 32767i64)
         };
         v_child = v_next.clone();
     }
@@ -4586,171 +4810,192 @@ fn f_geometry__subsector_at(v_l: Rc<T_level__Level>, v_x: i64, v_y: i64) -> i64 
 
 // note: The sector containing a fixed point.
 fn f_geometry__sector_at(v_l: Rc<T_level__Level>, v_x: i64, v_y: i64) -> i64 {
-    t_enter("geometry.tes:132:8 in function `geometry__sector_at`");
-    let v_sub: Rc<T_level__Subsector> = t_index(&(v_l.clone()).f_subsectors.clone(), f_geometry__subsector_at(v_l.clone(), v_x.clone(), v_y.clone()), "geometry.tes:133:11 in function `geometry__sector_at`");
-    let v_seg: Rc<T_level__Seg> = t_index(&(v_l.clone()).f_segs.clone(), (v_sub.clone()).f_first.clone(), "geometry.tes:134:11 in function `geometry__sector_at`");
-    let v_line: Rc<T_level__Linedef> = t_index(&(v_l.clone()).f_linedefs.clone(), (v_seg.clone()).f_linedef.clone(), "geometry.tes:135:12 in function `geometry__sector_at`");
+    t_enter("geometry.tes:89:8 in function `geometry__sector_at`");
+    let v_sub: Rc<T_level__Subsector> = t_index(&(v_l.clone()).f_subsectors.clone(), f_geometry__subsector_at(v_l.clone(), v_x.clone(), v_y.clone()), "geometry.tes:90:11 in function `geometry__sector_at`");
+    let v_seg: Rc<T_level__Seg> = t_index(&(v_l.clone()).f_segs.clone(), (v_sub.clone()).f_first.clone(), "geometry.tes:91:11 in function `geometry__sector_at`");
+    let v_line: Rc<T_level__Linedef> = t_index(&(v_l.clone()).f_linedefs.clone(), (v_seg.clone()).f_linedef.clone(), "geometry.tes:92:12 in function `geometry__sector_at`");
     let v_side: i64 = if ((v_seg.clone()).f_side.clone() == 0i64) {
         (v_line.clone()).f_front.clone()
     } else {
         (v_line.clone()).f_back.clone()
     };
-    (t_index(&(v_l.clone()).f_sidedefs.clone(), v_side.clone(), "geometry.tes:137:1 in function `geometry__sector_at`")).f_sector.clone()
+    (t_index(&(v_l).f_sidedefs.clone(), v_side, "geometry.tes:94:1 in function `geometry__sector_at`")).f_sector.clone()
 }
 
 // note: The camera at the player 1 start, eyes 41 units above the floor.
 fn f_geometry__start_camera(v_l: Rc<T_level__Level>) -> Rc<T_geometry__Camera> {
-    t_enter("geometry.tes:141:8 in function `geometry__start_camera`");
+    t_enter("geometry.tes:98:8 in function `geometry__start_camera`");
     let v_start: Rc<T_level__Thing> = match f_level__find_thing(v_l.clone(), 1i64) { Some(t_value) => t_value, None => { return Rc::new(T_geometry__Camera { f_x: 0i64, f_y: 0i64, f_z: f_std__fixed__from_int(f_geometry__eye_height()), f_angle: 0i64 }) } };
     let v_x: i64 = f_std__fixed__from_int((v_start.clone()).f_x.clone());
     let v_y: i64 = f_std__fixed__from_int((v_start.clone()).f_y.clone());
-    let v_floor: i64 = (t_index(&(v_l.clone()).f_sectors.clone(), f_geometry__sector_at(v_l.clone(), v_x.clone(), v_y.clone()), "geometry.tes:145:13 in function `geometry__start_camera`")).f_floor.clone();
-    Rc::new(T_geometry__Camera { f_x: v_x.clone(), f_y: v_y.clone(), f_z: f_std__fixed__from_int(t_add(v_floor.clone(), f_geometry__eye_height(), "geometry.tes:146:46 in function `geometry__start_camera`")), f_angle: f_geometry__degrees_to_fine((v_start.clone()).f_angle.clone()) })
+    let v_floor: i64 = (t_index(&(v_l.clone()).f_sectors.clone(), f_geometry__sector_at(v_l.clone(), v_x.clone(), v_y.clone()), "geometry.tes:102:13 in function `geometry__start_camera`")).f_floor.clone();
+    Rc::new(T_geometry__Camera { f_x: v_x, f_y: v_y, f_z: f_std__fixed__from_int(t_add(v_floor, f_geometry__eye_height(), "geometry.tes:103:46 in function `geometry__start_camera`")), f_angle: f_geometry__degrees_to_fine((v_start).f_angle.clone()) })
 }
 
 // note: Screen row of a height (fixed) seen at a perpendicular distance (fixed).
 fn f_raycast__project(v_height: i64, v_eye: i64, v_distance: i64) -> i64 {
-    t_enter("raycast.tes:19:8 in function `raycast__project`");
-    t_sub(t_div(f_geometry__screen_height(), 2i64, "raycast.tes:20:26 in function `raycast__project`"), t_div(t_mul(t_sub(v_height.clone(), v_eye.clone(), "raycast.tes:20:40 in function `raycast__project`"), f_geometry__focal(), "raycast.tes:20:47 in function `raycast__project`"), v_distance.clone(), "raycast.tes:20:66 in function `raycast__project`"), "raycast.tes:20:30 in function `raycast__project`")
+    t_enter("raycast.tes:20:8 in function `raycast__project`");
+    t_sub(t_div(f_geometry__screen_height(), 2i64, "raycast.tes:21:26 in function `raycast__project`"), t_div(t_mul(t_sub(v_height, v_eye, "raycast.tes:21:40 in function `raycast__project`"), f_geometry__focal(), "raycast.tes:21:47 in function `raycast__project`"), v_distance, "raycast.tes:21:66 in function `raycast__project`"), "raycast.tes:21:30 in function `raycast__project`")
 }
 
 fn f_raycast__cast(v_l: Rc<T_level__Level>, v_trig: Rc<T_geometry__Trig>, v_camera: Rc<T_geometry__Camera>) -> Rc<Vec<Rc<T_raycast__Column>>> {
-    t_enter("raycast.tes:23:8 in function `raycast__cast`");
+    t_enter("raycast.tes:24:8 in function `raycast__cast`");
     let v_rays: Rc<T_geometry__Rays> = f_geometry__column_rays(v_trig.clone(), (v_camera.clone()).f_angle.clone());
     let mut v_columns: Rc<Vec<Rc<T_raycast__Column>>> = Rc::new(Vec::<Rc<T_raycast__Column>>::new());
-    for v_x in t_iter(t_range(0i64, f_geometry__screen_width(), "raycast.tes:26:10 in function `raycast__cast`")) {
-        t_tick("raycast.tes:26:44 in function `raycast__cast`");
+    for v_x in t_iter(t_range(0i64, f_geometry__screen_width(), "raycast.tes:27:10 in function `raycast__cast`")) {
+        t_tick("raycast.tes:27:44 in function `raycast__cast`");
         let mut v_best: Rc<T_raycast__Column> = Rc::new(T_raycast__Column { f_line: (-1i64), f_top: 0i64, f_bottom: 0i64, f_distance: 0i64 });
-        for v_index in t_iter(t_range(0i64, t_list_length(&(v_l.clone()).f_linedefs.clone()), "raycast.tes:28:14 in function `raycast__cast`")) {
-            t_tick("raycast.tes:28:43 in function `raycast__cast`");
-            let v_line: Rc<T_level__Linedef> = t_index(&(v_l.clone()).f_linedefs.clone(), v_index.clone(), "raycast.tes:29:12 in function `raycast__cast`");
+        for v_index in t_iter(t_range(0i64, t_list_length(&(v_l.clone()).f_linedefs.clone()), "raycast.tes:29:14 in function `raycast__cast`")) {
+            t_tick("raycast.tes:29:43 in function `raycast__cast`");
+            let v_line: Rc<T_level__Linedef> = t_index(&(v_l.clone()).f_linedefs.clone(), v_index.clone(), "raycast.tes:30:12 in function `raycast__cast`");
             if ((v_line.clone()).f_back.clone() < 0i64) {
-                let v_a: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "raycast.tes:31:9 in function `raycast__cast`");
-                let v_b: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "raycast.tes:32:9 in function `raycast__cast`");
-                let v_h: Rc<T_geometry__Hit> = f_geometry__intersect((v_camera.clone()).f_x.clone(), (v_camera.clone()).f_y.clone(), t_index(&(v_rays.clone()).f_dx.clone(), v_x.clone(), "raycast.tes:33:48 in function `raycast__cast`"), t_index(&(v_rays.clone()).f_dy.clone(), v_x.clone(), "raycast.tes:33:60 in function `raycast__cast`"), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
+                let v_a: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "raycast.tes:32:9 in function `raycast__cast`");
+                let v_b: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "raycast.tes:33:9 in function `raycast__cast`");
+                let v_h: Rc<T_std__plane__Hit> = f_std__plane__intersect((v_camera.clone()).f_x.clone(), (v_camera.clone()).f_y.clone(), t_index(&(v_rays.clone()).f_dx.clone(), v_x.clone(), "raycast.tes:34:45 in function `raycast__cast`"), t_index(&(v_rays.clone()).f_dy.clone(), v_x.clone(), "raycast.tes:34:57 in function `raycast__cast`"), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
                 if ((v_h.clone()).f_hit.clone() && (((v_best.clone()).f_line.clone() < 0i64) || ((v_h.clone()).f_distance.clone() < (v_best.clone()).f_distance.clone()))) {
-                    let v_sector: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "raycast.tes:35:24 in function `raycast__cast`")).f_sector.clone(), "raycast.tes:35:14 in function `raycast__cast`");
+                    let v_sector: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "raycast.tes:36:24 in function `raycast__cast`")).f_sector.clone(), "raycast.tes:36:14 in function `raycast__cast`");
                     let v_top: i64 = f_raycast__project(f_std__fixed__from_int((v_sector.clone()).f_ceiling.clone()), (v_camera.clone()).f_z.clone(), (v_h.clone()).f_distance.clone());
                     let v_bottom: i64 = f_raycast__project(f_std__fixed__from_int((v_sector.clone()).f_floor.clone()), (v_camera.clone()).f_z.clone(), (v_h.clone()).f_distance.clone());
-                    v_best = Rc::new(T_raycast__Column { f_line: v_index.clone(), f_top: f_std__math__clamp(v_top.clone(), 0i64, t_sub(f_geometry__screen_height(), 1i64, "raycast.tes:38:83 in function `raycast__cast`")), f_bottom: f_std__math__clamp(v_bottom.clone(), 0i64, t_sub(f_geometry__screen_height(), 1i64, "raycast.tes:38:144 in function `raycast__cast`")), f_distance: (v_h.clone()).f_distance.clone() });
+                    v_best = Rc::new(T_raycast__Column { f_line: v_index.clone(), f_top: f_std__math__clamp(v_top.clone(), 0i64, t_sub(f_geometry__screen_height(), 1i64, "raycast.tes:39:83 in function `raycast__cast`")), f_bottom: f_std__math__clamp(v_bottom.clone(), 0i64, t_sub(f_geometry__screen_height(), 1i64, "raycast.tes:39:144 in function `raycast__cast`")), f_distance: (v_h.clone()).f_distance.clone() });
                 }
             }
         }
         v_columns = t_concat_lists(std::mem::take(&mut v_columns), Rc::new(vec![v_best.clone()]));
     }
-    v_columns.clone()
+    v_columns
 }
 
 // note: The frame as palette indexes: walls in a shade per line, darker with distance through COLORMAP; ceiling and floor in two fixed colors.
 fn f_raycast__frame(v_columns: Rc<Vec<Rc<T_raycast__Column>>>, v_colormap: Rc<Vec<u8>>) -> Rc<Vec<i64>> {
-    t_enter("raycast.tes:48:8 in function `raycast__frame`");
+    t_enter("raycast.tes:49:8 in function `raycast__frame`");
     let v_width: i64 = f_geometry__screen_width();
-    let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), f_geometry__screen_height(), "raycast.tes:50:32 in function `raycast__frame`"), "raycast.tes:50:14 in function `raycast__frame`");
-    for v_x in t_iter(t_range(0i64, v_width.clone(), "raycast.tes:51:10 in function `raycast__frame`")) {
-        t_tick("raycast.tes:51:26 in function `raycast__frame`");
-        let v_c: Rc<T_raycast__Column> = t_index(&v_columns.clone(), v_x.clone(), "raycast.tes:52:9 in function `raycast__frame`");
-        for v_y in t_iter(t_range(0i64, f_geometry__screen_height(), "raycast.tes:53:10 in function `raycast__frame`")) {
-            t_tick("raycast.tes:53:45 in function `raycast__frame`");
-            let mut v_color: i64 = if (v_y.clone() < t_div(f_geometry__screen_height(), 2i64, "raycast.tes:54:45 in function `raycast__frame`")) {
+    let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), f_geometry__screen_height(), "raycast.tes:51:32 in function `raycast__frame`"), "raycast.tes:51:14 in function `raycast__frame`");
+    for v_x in t_iter(t_range(0i64, v_width.clone(), "raycast.tes:52:10 in function `raycast__frame`")) {
+        t_tick("raycast.tes:52:26 in function `raycast__frame`");
+        let v_c: Rc<T_raycast__Column> = t_index(&v_columns.clone(), v_x.clone(), "raycast.tes:53:9 in function `raycast__frame`");
+        for v_y in t_iter(t_range(0i64, f_geometry__screen_height(), "raycast.tes:54:10 in function `raycast__frame`")) {
+            t_tick("raycast.tes:54:45 in function `raycast__frame`");
+            let mut v_color: i64 = if (v_y.clone() < t_div(f_geometry__screen_height(), 2i64, "raycast.tes:55:45 in function `raycast__frame`")) {
                 5i64
             } else {
                 108i64
             };
             if ((((v_c.clone()).f_line.clone() >= 0i64) && (v_y.clone() >= (v_c.clone()).f_top.clone())) && (v_y.clone() <= (v_c.clone()).f_bottom.clone())) {
-                let v_base: i64 = t_add(80i64, t_rem(t_mul((v_c.clone()).f_line.clone(), 7i64, "raycast.tes:56:25 in function `raycast__frame`"), 24i64, "raycast.tes:56:30 in function `raycast__frame`"), "raycast.tes:56:15 in function `raycast__frame`");
-                let v_light: i64 = f_std__math__clamp(t_div(f_std__fixed__floor_int((v_c.clone()).f_distance.clone()), 64i64, "raycast.tes:57:52 in function `raycast__frame`"), 0i64, 31i64);
-                v_color = t_bytes_index(&v_colormap.clone(), t_add(t_mul(v_light.clone(), 256i64, "raycast.tes:58:28 in function `raycast__frame`"), v_base.clone(), "raycast.tes:58:34 in function `raycast__frame`"), "raycast.tes:58:13 in function `raycast__frame`");
+                let v_base: i64 = t_add(80i64, t_rem(t_mul((v_c.clone()).f_line.clone(), 7i64, "raycast.tes:57:25 in function `raycast__frame`"), 24i64, "raycast.tes:57:30 in function `raycast__frame`"), "raycast.tes:57:15 in function `raycast__frame`");
+                let v_light: i64 = f_std__math__clamp(t_div(f_std__fixed__floor_int((v_c.clone()).f_distance.clone()), 64i64, "raycast.tes:58:52 in function `raycast__frame`"), 0i64, 31i64);
+                v_color = t_bytes_index(&v_colormap.clone(), t_add(t_mul(v_light.clone(), 256i64, "raycast.tes:59:28 in function `raycast__frame`"), v_base.clone(), "raycast.tes:59:34 in function `raycast__frame`"), "raycast.tes:59:13 in function `raycast__frame`");
             };
-            { let t_place0: i64 = t_add(t_mul(v_y.clone(), v_width.clone(), "raycast.tes:60:14 in function `raycast__frame`"), v_x.clone(), "raycast.tes:60:22 in function `raycast__frame`"); let t_value = v_color.clone(); *t_slot(&mut v_pixels, t_place0, "raycast.tes:60:5 in function `raycast__frame`") = t_value; }
+            { let t_place0: i64 = t_add(t_mul(v_y.clone(), v_width.clone(), "raycast.tes:61:14 in function `raycast__frame`"), v_x.clone(), "raycast.tes:61:22 in function `raycast__frame`"); let t_value = v_color.clone(); *t_slot(&mut v_pixels, t_place0, "raycast.tes:61:5 in function `raycast__frame`") = t_value; }
         }
     }
-    v_pixels.clone()
+    v_pixels
 }
 
 fn f_render__prepare(v_l: Rc<T_level__Level>, v_a: Rc<T_art__Art>) -> Rc<T_render__Scene> {
-    t_enter("render.tes:66:8 in function `render__prepare`");
+    t_enter("render.tes:71:8 in function `render__prepare`");
     let mut v_upper: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     let mut v_lower: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     let mut v_middle: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
+    let mut v_switched_upper: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
+    let mut v_switched_lower: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
+    let mut v_switched_middle: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     for v_side in t_iter((v_l.clone()).f_sidedefs.clone()) {
-        t_tick("render.tes:70:24 in function `render__prepare`");
+        t_tick("render.tes:78:24 in function `render__prepare`");
         v_upper = t_concat_lists(std::mem::take(&mut v_upper), Rc::new(vec![f_art__texture(v_a.clone(), (v_side.clone()).f_upper.clone())]));
         v_lower = t_concat_lists(std::mem::take(&mut v_lower), Rc::new(vec![f_art__texture(v_a.clone(), (v_side.clone()).f_lower.clone())]));
         v_middle = t_concat_lists(std::mem::take(&mut v_middle), Rc::new(vec![f_art__texture(v_a.clone(), (v_side.clone()).f_middle.clone())]));
+        v_switched_upper = t_concat_lists(std::mem::take(&mut v_switched_upper), Rc::new(vec![f_art__texture(v_a.clone(), f_render__switch_partner((v_side.clone()).f_upper.clone()))]));
+        v_switched_lower = t_concat_lists(std::mem::take(&mut v_switched_lower), Rc::new(vec![f_art__texture(v_a.clone(), f_render__switch_partner((v_side.clone()).f_lower.clone()))]));
+        v_switched_middle = t_concat_lists(std::mem::take(&mut v_switched_middle), Rc::new(vec![f_art__texture(v_a.clone(), f_render__switch_partner((v_side.clone()).f_middle.clone()))]));
     }
     let mut v_floors: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     let mut v_ceilings: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     for v_sector in t_iter((v_l.clone()).f_sectors.clone()) {
-        t_tick("render.tes:77:25 in function `render__prepare`");
+        t_tick("render.tes:88:25 in function `render__prepare`");
         v_floors = t_concat_lists(std::mem::take(&mut v_floors), Rc::new(vec![f_art__flat(v_a.clone(), (v_sector.clone()).f_floor_flat.clone())]));
         v_ceilings = t_concat_lists(std::mem::take(&mut v_ceilings), Rc::new(vec![f_art__flat(v_a.clone(), (v_sector.clone()).f_ceiling_flat.clone())]));
     }
     let mut v_lengths: Rc<Vec<i64>> = Rc::new(Vec::<i64>::new());
     for v_seg in t_iter((v_l.clone()).f_segs.clone()) {
-        t_tick("render.tes:82:19 in function `render__prepare`");
-        let v_p: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_start.clone(), "render.tes:83:9 in function `render__prepare`");
-        let v_q: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_end.clone(), "render.tes:84:9 in function `render__prepare`");
-        v_lengths = t_concat_lists(std::mem::take(&mut v_lengths), Rc::new(vec![f_std__math__isqrt(t_add(t_mul(t_sub((v_q.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "render.tes:85:33 in function `render__prepare`"), t_sub((v_q.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "render.tes:85:47 in function `render__prepare`"), "render.tes:85:40 in function `render__prepare`"), t_mul(t_sub((v_q.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "render.tes:85:61 in function `render__prepare`"), t_sub((v_q.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "render.tes:85:75 in function `render__prepare`"), "render.tes:85:68 in function `render__prepare`"), "render.tes:85:54 in function `render__prepare`"))]));
+        t_tick("render.tes:93:19 in function `render__prepare`");
+        let v_p: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_start.clone(), "render.tes:94:9 in function `render__prepare`");
+        let v_q: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_end.clone(), "render.tes:95:9 in function `render__prepare`");
+        v_lengths = t_concat_lists(std::mem::take(&mut v_lengths), Rc::new(vec![f_std__math__isqrt(t_add(t_mul(t_sub((v_q.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "render.tes:96:33 in function `render__prepare`"), t_sub((v_q.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "render.tes:96:47 in function `render__prepare`"), "render.tes:96:40 in function `render__prepare`"), t_mul(t_sub((v_q.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "render.tes:96:61 in function `render__prepare`"), t_sub((v_q.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "render.tes:96:75 in function `render__prepare`"), "render.tes:96:68 in function `render__prepare`"), "render.tes:96:54 in function `render__prepare`"))]));
     }
     let v_codes: Rc<Vec<i64>> = t_code_points(&(v_l.clone()).f_name.clone());
-    let v_sky_name: Rc<String> = if ((t_list_length(&v_codes.clone()) == 4i64) && (t_index(&v_codes.clone(), 0i64, "render.tes:89:42 in function `render__prepare`") == 69i64)) {
-        t_concat(t_text("SKY"), (t_from_code_point(t_index(&v_codes.clone(), 1i64, "render.tes:89:81 in function `render__prepare`"), "render.tes:89:65 in function `render__prepare`")))
+    let v_sky_name: Rc<String> = if ((t_list_length(&v_codes.clone()) == 4i64) && (t_index(&v_codes.clone(), 0i64, "render.tes:100:42 in function `render__prepare`") == 69i64)) {
+        t_concat(t_text("SKY"), (t_from_code_point(t_index(&v_codes.clone(), 1i64, "render.tes:100:81 in function `render__prepare`"), "render.tes:100:65 in function `render__prepare`")))
     } else {
         t_text("SKY1")
     };
-    Rc::new(T_render__Scene { f_level: v_l.clone(), f_art: v_a.clone(), f_upper: v_upper.clone(), f_lower: v_lower.clone(), f_middle: v_middle.clone(), f_floor_flat: v_floors.clone(), f_ceiling_flat: v_ceilings.clone(), f_sky_flat: f_art__flat(v_a.clone(), t_text("F_SKY1")), f_sky: f_art__texture(v_a.clone(), v_sky_name.clone()), f_seg_length: v_lengths.clone() })
+    Rc::new(T_render__Scene { f_level: v_l, f_art: v_a.clone(), f_upper: v_upper, f_lower: v_lower, f_middle: v_middle, f_switched_upper: v_switched_upper, f_switched_lower: v_switched_lower, f_switched_middle: v_switched_middle, f_floor_flat: v_floors, f_ceiling_flat: v_ceilings, f_sky_flat: f_art__flat(v_a.clone(), t_text("F_SKY1")), f_sky: f_art__texture(v_a.clone(), v_sky_name), f_seg_length: v_lengths })
 }
 
-// note: Every texture a level's sidedefs name, plus the skies; textures are composed only when used.
+// note: The other texture of a switch: SW1... and SW2... are its two positions. Other names stay.
+fn f_render__switch_partner(v_name: Rc<String>) -> Rc<String> {
+    t_enter("render.tes:105:8 in function `render__switch_partner`");
+    if t_starts_with(&v_name.clone(), &t_text("SW1")) {
+        return t_concat(t_text("SW2"), t_slice_text(v_name.clone(), 3i64, t_text_length(&v_name.clone()), "render.tes:107:16 in function `render__switch_partner`"))
+    };
+    if t_starts_with(&v_name.clone(), &t_text("SW2")) {
+        return t_concat(t_text("SW1"), t_slice_text(v_name.clone(), 3i64, t_text_length(&v_name.clone()), "render.tes:110:16 in function `render__switch_partner`"))
+    };
+    v_name
+}
+
+// note: Every texture a level's sidedefs name, their switch partners, and the skies; textures are composed only when used.
 fn f_render__wanted_textures(v_l: Rc<T_level__Level>) -> Rc<Vec<Rc<String>>> {
-    t_enter("render.tes:94:8 in function `render__wanted_textures`");
+    t_enter("render.tes:116:8 in function `render__wanted_textures`");
     let mut v_names: Rc<std::collections::BTreeMap<Rc<String>, bool>> = t_map_new::<Rc<String>, bool>(vec![(t_text("SKY1"), true), (t_text("SKY2"), true), (t_text("SKY3"), true), (t_text("SKY4"), true)]);
     for v_side in t_iter((v_l.clone()).f_sidedefs.clone()) {
-        t_tick("render.tes:96:24 in function `render__wanted_textures`");
-        v_names = t_map_put(t_map_put(t_map_put(std::mem::take(&mut v_names), (v_side.clone()).f_upper.clone(), true), (v_side.clone()).f_lower.clone(), true), (v_side.clone()).f_middle.clone(), true);
+        t_tick("render.tes:118:24 in function `render__wanted_textures`");
+        for v_name in t_iter(Rc::new(vec![(v_side.clone()).f_upper.clone(), (v_side.clone()).f_lower.clone(), (v_side.clone()).f_middle.clone()])) {
+            t_tick("render.tes:119:51 in function `render__wanted_textures`");
+            v_names = t_map_put(t_map_put(std::mem::take(&mut v_names), v_name.clone(), true), f_render__switch_partner(v_name.clone()), true);
+        }
     }
-    t_map_keys(&v_names.clone())
+    t_map_keys(&v_names)
 }
 
 // note: Renders the level as it was loaded, without things.
 fn f_render__render(v_scene: Rc<T_render__Scene>, v_camera: Rc<T_geometry__Camera>, v_trig: Rc<T_geometry__Trig>) -> Rc<Vec<i64>> {
-    t_enter("render.tes:103:8 in function `render__render`");
-    f_render__render_world(v_scene.clone(), ((v_scene.clone()).f_level.clone()).f_sectors.clone(), v_camera.clone(), v_trig.clone(), Rc::new(Vec::<Rc<T_render__SpriteDraw>>::new()), Rc::new(T_art__Sprites { f_pictures: Rc::new(Vec::<Rc<T_art__Picture>>::new()), f_frames: t_map_new::<Rc<String>, i64>(vec![]) }))
+    t_enter("render.tes:127:8 in function `render__render`");
+    f_render__render_world(v_scene.clone(), ((v_scene.clone()).f_level.clone()).f_sectors.clone(), t_repeat_list(Rc::new(vec![0i64]), t_list_length(&((v_scene.clone()).f_level.clone()).f_sidedefs.clone()), "render.tes:127:131 in function `render__render`"), v_camera, v_trig, Rc::new(Vec::<Rc<T_render__SpriteDraw>>::new()), Rc::new(T_art__Sprites { f_pictures: Rc::new(Vec::<Rc<T_art__Picture>>::new()), f_frames: t_map_new::<Rc<String>, i64>(vec![]) }))
 }
 
 // note: Renders a frame with the current sector heights and the given things.
-fn f_render__render_world(v_scene: Rc<T_render__Scene>, v_sectors: Rc<Vec<Rc<T_level__Sector>>>, v_camera: Rc<T_geometry__Camera>, v_trig: Rc<T_geometry__Trig>, v_things: Rc<Vec<Rc<T_render__SpriteDraw>>>, v_sprites: Rc<T_art__Sprites>) -> Rc<Vec<i64>> {
-    t_enter("render.tes:106:8 in function `render__render_world`");
+fn f_render__render_world(v_scene: Rc<T_render__Scene>, v_sectors: Rc<Vec<Rc<T_level__Sector>>>, v_switched: Rc<Vec<i64>>, v_camera: Rc<T_geometry__Camera>, v_trig: Rc<T_geometry__Trig>, v_things: Rc<Vec<Rc<T_render__SpriteDraw>>>, v_sprites: Rc<T_art__Sprites>) -> Rc<Vec<i64>> {
+    t_enter("render.tes:130:8 in function `render__render_world`");
     let v_width: i64 = f_geometry__screen_width();
     let v_height: i64 = f_geometry__screen_height();
-    let mut v_canvas: Rc<T_render__Canvas> = Rc::new(T_render__Canvas { f_pixels: t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), v_height.clone(), "render.tes:109:49 in function `render__render_world`"), "render.tes:109:31 in function `render__render_world`"), f_depth: t_repeat_list(Rc::new(vec![f_render__far()]), t_mul(v_width.clone(), v_height.clone(), "render.tes:109:89 in function `render__render_world`"), "render.tes:109:67 in function `render__render_world`"), f_top: t_repeat_list(Rc::new(vec![0i64]), v_width.clone(), "render.tes:109:105 in function `render__render_world`"), f_bottom: t_repeat_list(Rc::new(vec![t_sub(v_height.clone(), 1i64, "render.tes:109:148 in function `render__render_world`")]), v_width.clone(), "render.tes:109:133 in function `render__render_world`"), f_open: v_width.clone() });
-    let v_view: Rc<T_render__View> = Rc::new(T_render__View { f_scene: v_scene.clone(), f_sectors: v_sectors.clone(), f_camera: v_camera.clone(), f_rays: f_geometry__column_rays(v_trig.clone(), (v_camera.clone()).f_angle.clone()) });
+    let mut v_canvas: Rc<T_render__Canvas> = Rc::new(T_render__Canvas { f_pixels: t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), v_height.clone(), "render.tes:133:49 in function `render__render_world`"), "render.tes:133:31 in function `render__render_world`"), f_depth: t_repeat_list(Rc::new(vec![f_render__far()]), t_mul(v_width.clone(), v_height.clone(), "render.tes:133:89 in function `render__render_world`"), "render.tes:133:67 in function `render__render_world`"), f_top: t_repeat_list(Rc::new(vec![0i64]), v_width.clone(), "render.tes:133:105 in function `render__render_world`"), f_bottom: t_repeat_list(Rc::new(vec![t_sub(v_height.clone(), 1i64, "render.tes:133:148 in function `render__render_world`")]), v_width.clone(), "render.tes:133:133 in function `render__render_world`"), f_open: v_width.clone() });
+    let v_view: Rc<T_render__View> = Rc::new(T_render__View { f_scene: v_scene.clone(), f_sectors: v_sectors.clone(), f_switched: v_switched.clone(), f_camera: v_camera.clone(), f_rays: f_geometry__column_rays(v_trig.clone(), (v_camera.clone()).f_angle.clone()) });
     let v_nodes: i64 = t_list_length(&((v_scene.clone()).f_level.clone()).f_nodes.clone());
     if (v_nodes.clone() == 0i64) {
         v_canvas = f_render__draw_subsector(v_view.clone(), v_canvas, 0i64);
     } else {
-        v_canvas = f_render__draw_node(v_view.clone(), v_canvas, t_sub(v_nodes.clone(), 1i64, "render.tes:116:44 in function `render__render_world`"));
+        v_canvas = f_render__draw_node(v_view.clone(), v_canvas, t_sub(v_nodes.clone(), 1i64, "render.tes:140:44 in function `render__render_world`"));
     };
     v_canvas = f_render__draw_sprites(v_view.clone(), v_canvas, v_things.clone(), v_sprites.clone(), v_trig.clone());
-    (v_canvas.clone()).f_pixels.clone()
+    (v_canvas).f_pixels.clone()
 }
 
 fn f_render__far() -> i64 {
-    t_enter("render.tes:122:4 in function `render__far`");
-    t_shift_left(1i64, 40i64, "render.tes:122:19 in function `render__far`")
+    t_enter("render.tes:146:4 in function `render__far`");
+    t_shift_left(1i64, 40i64, "render.tes:146:19 in function `render__far`")
 }
 
 fn f_render__draw_node(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_child: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:124:4 in function `render__draw_node`");
+    t_enter("render.tes:148:4 in function `render__draw_node`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     if ((v_c.clone()).f_open.clone() == 0i64) {
-        return v_c.clone()
+        return v_c
     };
     if ((v_child.clone() & 32768i64) != 0i64) {
         v_c = f_render__draw_subsector(v_view.clone(), v_c, (v_child.clone() & 32767i64));
-        return v_c.clone()
+        return v_c
     };
-    let v_node: Rc<T_level__Node> = t_index(&(((v_view.clone()).f_scene.clone()).f_level.clone()).f_nodes.clone(), v_child.clone(), "render.tes:133:12 in function `render__draw_node`");
+    let v_node: Rc<T_level__Node> = t_index(&(((v_view.clone()).f_scene.clone()).f_level.clone()).f_nodes.clone(), v_child.clone(), "render.tes:157:12 in function `render__draw_node`");
     let v_near_side: i64 = f_geometry__node_side(v_node.clone(), ((v_view.clone()).f_camera.clone()).f_x.clone(), ((v_view.clone()).f_camera.clone()).f_y.clone());
     v_c = f_render__draw_node(v_view.clone(), v_c, if (v_near_side.clone() == 0i64) {
         (v_node.clone()).f_right.clone()
@@ -4762,45 +5007,45 @@ fn f_render__draw_node(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas
     } else {
         (v_node.clone()).f_right.clone()
     });
-    v_c.clone()
+    v_c
 }
 
 fn f_render__draw_subsector(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_index: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:140:4 in function `render__draw_subsector`");
+    t_enter("render.tes:164:4 in function `render__draw_subsector`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
-    let v_sub: Rc<T_level__Subsector> = t_index(&(((v_view.clone()).f_scene.clone()).f_level.clone()).f_subsectors.clone(), v_index.clone(), "render.tes:142:11 in function `render__draw_subsector`");
-    for v_seg in t_iter(t_range((v_sub.clone()).f_first.clone(), t_add((v_sub.clone()).f_first.clone(), (v_sub.clone()).f_count.clone(), "render.tes:143:39 in function `render__draw_subsector`"), "render.tes:143:12 in function `render__draw_subsector`")) {
-        t_tick("render.tes:143:52 in function `render__draw_subsector`");
+    let v_sub: Rc<T_level__Subsector> = t_index(&(((v_view.clone()).f_scene.clone()).f_level.clone()).f_subsectors.clone(), v_index.clone(), "render.tes:166:11 in function `render__draw_subsector`");
+    for v_seg in t_iter(t_range((v_sub.clone()).f_first.clone(), t_add((v_sub.clone()).f_first.clone(), (v_sub.clone()).f_count.clone(), "render.tes:167:39 in function `render__draw_subsector`"), "render.tes:167:12 in function `render__draw_subsector`")) {
+        t_tick("render.tes:167:52 in function `render__draw_subsector`");
         v_c = f_render__draw_seg(v_view.clone(), v_c, v_seg.clone());
     }
-    v_c.clone()
+    v_c
 }
 
 // note: Screen column where a map point (whole units) appears, or none when it is behind the near plane.
 fn f_render__screen_x(v_view: Rc<T_render__View>, v_x: i64, v_y: i64) -> i64 {
-    t_enter("render.tes:150:4 in function `render__screen_x`");
+    t_enter("render.tes:174:4 in function `render__screen_x`");
     let v_cam: Rc<T_geometry__Camera> = (v_view.clone()).f_camera.clone();
-    let v_dx: i64 = t_sub(f_std__fixed__from_int(v_x.clone()), (v_cam.clone()).f_x.clone(), "render.tes:152:28 in function `render__screen_x`");
-    let v_dy: i64 = t_sub(f_std__fixed__from_int(v_y.clone()), (v_cam.clone()).f_y.clone(), "render.tes:153:28 in function `render__screen_x`");
-    let v_c: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:154:46 in function `render__screen_x`"), "render.tes:154:9 in function `render__screen_x`");
-    let v_s: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:155:46 in function `render__screen_x`"), "render.tes:155:9 in function `render__screen_x`");
-    let v_forward: i64 = t_add(f_std__fixed__mul(v_dx.clone(), v_c.clone()), f_std__fixed__mul(v_dy.clone(), v_s.clone()), "render.tes:156:32 in function `render__screen_x`");
-    let v_side: i64 = t_sub(f_std__fixed__mul(v_dx.clone(), v_s.clone()), f_std__fixed__mul(v_dy.clone(), v_c.clone()), "render.tes:157:29 in function `render__screen_x`");
-    t_add(t_div(f_geometry__screen_width(), 2i64, "render.tes:158:25 in function `render__screen_x`"), t_div(t_mul(v_side.clone(), f_geometry__focal(), "render.tes:158:36 in function `render__screen_x`"), f_std__math__max(v_forward.clone(), 1i64), "render.tes:158:55 in function `render__screen_x`"), "render.tes:158:29 in function `render__screen_x`")
+    let v_dx: i64 = t_sub(f_std__fixed__from_int(v_x.clone()), (v_cam.clone()).f_x.clone(), "render.tes:176:28 in function `render__screen_x`");
+    let v_dy: i64 = t_sub(f_std__fixed__from_int(v_y.clone()), (v_cam.clone()).f_y.clone(), "render.tes:177:28 in function `render__screen_x`");
+    let v_c: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:178:46 in function `render__screen_x`"), "render.tes:178:9 in function `render__screen_x`");
+    let v_s: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:179:46 in function `render__screen_x`"), "render.tes:179:9 in function `render__screen_x`");
+    let v_forward: i64 = t_add(f_std__fixed__mul(v_dx.clone(), v_c.clone()), f_std__fixed__mul(v_dy.clone(), v_s.clone()), "render.tes:180:32 in function `render__screen_x`");
+    let v_side: i64 = t_sub(f_std__fixed__mul(v_dx.clone(), v_s.clone()), f_std__fixed__mul(v_dy.clone(), v_c.clone()), "render.tes:181:29 in function `render__screen_x`");
+    t_add(t_div(f_geometry__screen_width(), 2i64, "render.tes:182:25 in function `render__screen_x`"), t_div(t_mul(v_side, f_geometry__focal(), "render.tes:182:36 in function `render__screen_x`"), f_std__math__max(v_forward, 1i64), "render.tes:182:55 in function `render__screen_x`"), "render.tes:182:29 in function `render__screen_x`")
 }
 
 // note: View-space depth (fixed) of a map point.
 fn f_render__depth(v_view: Rc<T_render__View>, v_x: i64, v_y: i64) -> i64 {
-    t_enter("render.tes:162:4 in function `render__depth`");
+    t_enter("render.tes:186:4 in function `render__depth`");
     let v_cam: Rc<T_geometry__Camera> = (v_view.clone()).f_camera.clone();
-    let v_dx: i64 = t_sub(f_std__fixed__from_int(v_x.clone()), (v_cam.clone()).f_x.clone(), "render.tes:164:28 in function `render__depth`");
-    let v_dy: i64 = t_sub(f_std__fixed__from_int(v_y.clone()), (v_cam.clone()).f_y.clone(), "render.tes:165:28 in function `render__depth`");
-    t_add(f_std__fixed__mul(v_dx.clone(), t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:166:52 in function `render__depth`"), "render.tes:166:15 in function `render__depth`")), f_std__fixed__mul(v_dy.clone(), t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:166:111 in function `render__depth`"), "render.tes:166:74 in function `render__depth`")), "render.tes:166:58 in function `render__depth`")
+    let v_dx: i64 = t_sub(f_std__fixed__from_int(v_x.clone()), (v_cam.clone()).f_x.clone(), "render.tes:188:28 in function `render__depth`");
+    let v_dy: i64 = t_sub(f_std__fixed__from_int(v_y.clone()), (v_cam.clone()).f_y.clone(), "render.tes:189:28 in function `render__depth`");
+    t_add(f_std__fixed__mul(v_dx, t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:190:52 in function `render__depth`"), "render.tes:190:15 in function `render__depth`")), f_std__fixed__mul(v_dy, t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:190:111 in function `render__depth`"), "render.tes:190:74 in function `render__depth`")), "render.tes:190:58 in function `render__depth`")
 }
 
 // note: The column range a seg can cover. Points behind the camera are replaced by the screen edge on their side, which can only widen the range; the exact intersection per column decides what is drawn.
 fn f_render__column_range(v_view: Rc<T_render__View>, v_a: Rc<T_level__Vertex>, v_b: Rc<T_level__Vertex>) -> Rc<Vec<i64>> {
-    t_enter("render.tes:170:4 in function `render__column_range`");
+    t_enter("render.tes:194:4 in function `render__column_range`");
     let v_near: i64 = f_std__fixed__one();
     let v_da: i64 = f_render__depth(v_view.clone(), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone());
     let v_db: i64 = f_render__depth(v_view.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
@@ -4815,39 +5060,39 @@ fn f_render__column_range(v_view: Rc<T_render__View>, v_a: Rc<T_level__Vertex>, 
     let v_right: i64 = if (v_db.clone() < v_near.clone()) {
         f_geometry__screen_width()
     } else {
-        f_std__math__clamp(t_add(f_render__screen_x(v_view.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone()), 1i64, "render.tes:178:97 in function `render__column_range`"), 0i64, f_geometry__screen_width())
+        f_std__math__clamp(t_add(f_render__screen_x(v_view.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone()), 1i64, "render.tes:202:97 in function `render__column_range`"), 0i64, f_geometry__screen_width())
     };
-    Rc::new(vec![v_left.clone(), v_right.clone()])
+    Rc::new(vec![v_left, v_right])
 }
 
 fn f_render__row_of(v_height: i64, v_eye: i64, v_distance: i64) -> i64 {
-    t_enter("render.tes:182:4 in function `render__row_of`");
-    t_sub(t_div(f_geometry__screen_height(), 2i64, "render.tes:182:83 in function `render__row_of`"), t_div(t_mul(t_sub(v_height.clone(), v_eye.clone(), "render.tes:182:97 in function `render__row_of`"), f_geometry__focal(), "render.tes:182:104 in function `render__row_of`"), v_distance.clone(), "render.tes:182:123 in function `render__row_of`"), "render.tes:182:87 in function `render__row_of`")
+    t_enter("render.tes:206:4 in function `render__row_of`");
+    t_sub(t_div(f_geometry__screen_height(), 2i64, "render.tes:206:83 in function `render__row_of`"), t_div(t_mul(t_sub(v_height, v_eye, "render.tes:206:97 in function `render__row_of`"), f_geometry__focal(), "render.tes:206:104 in function `render__row_of`"), v_distance, "render.tes:206:123 in function `render__row_of`"), "render.tes:206:87 in function `render__row_of`")
 }
 
 fn f_render__light_row(v_light: i64, v_distance: i64) -> i64 {
-    t_enter("render.tes:184:4 in function `render__light_row`");
-    f_std__math__clamp(t_add(t_div(t_sub(255i64, v_light.clone(), "render.tes:184:66 in function `render__light_row`"), 8i64, "render.tes:184:75 in function `render__light_row`"), t_div(f_std__fixed__floor_int(v_distance.clone()), 96i64, "render.tes:184:107 in function `render__light_row`"), "render.tes:184:79 in function `render__light_row`"), 0i64, 31i64)
+    t_enter("render.tes:208:4 in function `render__light_row`");
+    f_std__math__clamp(t_add(t_div(t_sub(255i64, v_light, "render.tes:208:66 in function `render__light_row`"), 8i64, "render.tes:208:75 in function `render__light_row`"), t_div(f_std__fixed__floor_int(v_distance), 96i64, "render.tes:208:107 in function `render__light_row`"), "render.tes:208:79 in function `render__light_row`"), 0i64, 31i64)
 }
 
 fn f_render__draw_seg(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_index: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:186:4 in function `render__draw_seg`");
+    t_enter("render.tes:210:4 in function `render__draw_seg`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     let v_scene: Rc<T_render__Scene> = (v_view.clone()).f_scene.clone();
     let v_l: Rc<T_level__Level> = (v_scene.clone()).f_level.clone();
-    let v_seg: Rc<T_level__Seg> = t_index(&(v_l.clone()).f_segs.clone(), v_index.clone(), "render.tes:190:11 in function `render__draw_seg`");
-    let v_a: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_start.clone(), "render.tes:191:9 in function `render__draw_seg`");
-    let v_b: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_end.clone(), "render.tes:192:9 in function `render__draw_seg`");
+    let v_seg: Rc<T_level__Seg> = t_index(&(v_l.clone()).f_segs.clone(), v_index.clone(), "render.tes:214:11 in function `render__draw_seg`");
+    let v_a: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_start.clone(), "render.tes:215:9 in function `render__draw_seg`");
+    let v_b: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_seg.clone()).f_end.clone(), "render.tes:216:9 in function `render__draw_seg`");
     let v_cam: Rc<T_geometry__Camera> = (v_view.clone()).f_camera.clone();
-    let v_facing: i64 = t_sub(t_mul(t_sub((v_b.clone()).f_x.clone(), (v_a.clone()).f_x.clone(), "render.tes:195:19 in function `render__draw_seg`"), t_sub((v_cam.clone()).f_y.clone(), f_std__fixed__from_int((v_a.clone()).f_y.clone()), "render.tes:195:35 in function `render__draw_seg`"), "render.tes:195:26 in function `render__draw_seg`"), t_mul(t_sub((v_b.clone()).f_y.clone(), (v_a.clone()).f_y.clone(), "render.tes:195:65 in function `render__draw_seg`"), t_sub((v_cam.clone()).f_x.clone(), f_std__fixed__from_int((v_a.clone()).f_x.clone()), "render.tes:195:81 in function `render__draw_seg`"), "render.tes:195:72 in function `render__draw_seg`"), "render.tes:195:58 in function `render__draw_seg`");
+    let v_facing: i64 = t_sub(t_mul(t_sub((v_b.clone()).f_x.clone(), (v_a.clone()).f_x.clone(), "render.tes:219:19 in function `render__draw_seg`"), t_sub((v_cam.clone()).f_y.clone(), f_std__fixed__from_int((v_a.clone()).f_y.clone()), "render.tes:219:35 in function `render__draw_seg`"), "render.tes:219:26 in function `render__draw_seg`"), t_mul(t_sub((v_b.clone()).f_y.clone(), (v_a.clone()).f_y.clone(), "render.tes:219:65 in function `render__draw_seg`"), t_sub((v_cam.clone()).f_x.clone(), f_std__fixed__from_int((v_a.clone()).f_x.clone()), "render.tes:219:81 in function `render__draw_seg`"), "render.tes:219:72 in function `render__draw_seg`"), "render.tes:219:58 in function `render__draw_seg`");
     if (v_facing.clone() >= 0i64) {
-        return v_c.clone()
+        return v_c
     };
     let v_range: Rc<Vec<i64>> = f_render__column_range(v_view.clone(), v_a.clone(), v_b.clone());
-    if (t_index(&v_range.clone(), 0i64, "render.tes:200:4 in function `render__draw_seg`") >= t_index(&v_range.clone(), 1i64, "render.tes:200:16 in function `render__draw_seg`")) {
-        return v_c.clone()
+    if (t_index(&v_range.clone(), 0i64, "render.tes:224:4 in function `render__draw_seg`") >= t_index(&v_range.clone(), 1i64, "render.tes:224:16 in function `render__draw_seg`")) {
+        return v_c
     };
-    let v_line: Rc<T_level__Linedef> = t_index(&(v_l.clone()).f_linedefs.clone(), (v_seg.clone()).f_linedef.clone(), "render.tes:203:12 in function `render__draw_seg`");
+    let v_line: Rc<T_level__Linedef> = t_index(&(v_l.clone()).f_linedefs.clone(), (v_seg.clone()).f_linedef.clone(), "render.tes:227:12 in function `render__draw_seg`");
     let v_side_index: i64 = if ((v_seg.clone()).f_side.clone() == 0i64) {
         (v_line.clone()).f_front.clone()
     } else {
@@ -4858,67 +5103,83 @@ fn f_render__draw_seg(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>
     } else {
         (v_line.clone()).f_front.clone()
     };
-    let v_side: Rc<T_level__Sidedef> = t_index(&(v_l.clone()).f_sidedefs.clone(), v_side_index.clone(), "render.tes:206:12 in function `render__draw_seg`");
-    let v_front: Rc<T_level__Sector> = t_index(&(v_view.clone()).f_sectors.clone(), (v_side.clone()).f_sector.clone(), "render.tes:207:13 in function `render__draw_seg`");
+    let v_side: Rc<T_level__Sidedef> = t_index(&(v_l.clone()).f_sidedefs.clone(), v_side_index.clone(), "render.tes:230:12 in function `render__draw_seg`");
+    let v_front: Rc<T_level__Sector> = t_index(&(v_view.clone()).f_sectors.clone(), (v_side.clone()).f_sector.clone(), "render.tes:231:13 in function `render__draw_seg`");
     let v_two_sided: bool = (v_back_index.clone() >= 0i64);
     let v_back: Rc<T_level__Sector> = if v_two_sided.clone() {
-        t_index(&(v_view.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), v_back_index.clone(), "render.tes:209:40 in function `render__draw_seg`")).f_sector.clone(), "render.tes:209:27 in function `render__draw_seg`")
+        t_index(&(v_view.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), v_back_index.clone(), "render.tes:233:40 in function `render__draw_seg`")).f_sector.clone(), "render.tes:233:27 in function `render__draw_seg`")
     } else {
         v_front.clone()
     };
-    let v_front_sky: bool = (t_index(&(v_scene.clone()).f_ceiling_flat.clone(), (v_side.clone()).f_sector.clone(), "render.tes:210:17 in function `render__draw_seg`") == (v_scene.clone()).f_sky_flat.clone());
-    let v_back_sky: bool = (v_two_sided.clone() && (t_index(&(v_scene.clone()).f_ceiling_flat.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), v_back_index.clone(), "render.tes:211:49 in function `render__draw_seg`")).f_sector.clone(), "render.tes:211:30 in function `render__draw_seg`") == (v_scene.clone()).f_sky_flat.clone()));
+    let v_front_sky: bool = (t_index(&(v_scene.clone()).f_ceiling_flat.clone(), (v_side.clone()).f_sector.clone(), "render.tes:234:17 in function `render__draw_seg`") == (v_scene.clone()).f_sky_flat.clone());
+    let v_back_sky: bool = (v_two_sided.clone() && (t_index(&(v_scene.clone()).f_ceiling_flat.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), v_back_index.clone(), "render.tes:235:49 in function `render__draw_seg`")).f_sector.clone(), "render.tes:235:30 in function `render__draw_seg`") == (v_scene.clone()).f_sky_flat.clone()));
+    let v_flipped: bool = (t_index(&(v_view.clone()).f_switched.clone(), v_side_index.clone(), "render.tes:236:15 in function `render__draw_seg`") != 0i64);
+    let v_middle_texture: i64 = if v_flipped.clone() {
+        t_index(&(v_scene.clone()).f_switched_middle.clone(), v_side_index.clone(), "render.tes:237:35 in function `render__draw_seg`")
+    } else {
+        t_index(&(v_scene.clone()).f_middle.clone(), v_side_index.clone(), "render.tes:237:78 in function `render__draw_seg`")
+    };
+    let v_upper_texture: i64 = if v_flipped.clone() {
+        t_index(&(v_scene.clone()).f_switched_upper.clone(), v_side_index.clone(), "render.tes:238:34 in function `render__draw_seg`")
+    } else {
+        t_index(&(v_scene.clone()).f_upper.clone(), v_side_index.clone(), "render.tes:238:76 in function `render__draw_seg`")
+    };
+    let v_lower_texture: i64 = if v_flipped.clone() {
+        t_index(&(v_scene.clone()).f_switched_lower.clone(), v_side_index.clone(), "render.tes:239:34 in function `render__draw_seg`")
+    } else {
+        t_index(&(v_scene.clone()).f_lower.clone(), v_side_index.clone(), "render.tes:239:76 in function `render__draw_seg`")
+    };
     let v_lower_unpegged: bool = (((v_line.clone()).f_flags.clone() & 16i64) != 0i64);
     let v_upper_unpegged: bool = (((v_line.clone()).f_flags.clone() & 8i64) != 0i64);
-    let v_seg_length: i64 = t_index(&(v_scene.clone()).f_seg_length.clone(), v_index.clone(), "render.tes:214:18 in function `render__draw_seg`");
+    let v_seg_length: i64 = t_index(&(v_scene.clone()).f_seg_length.clone(), v_index.clone(), "render.tes:242:18 in function `render__draw_seg`");
     let v_ceiling: i64 = f_std__fixed__from_int((v_front.clone()).f_ceiling.clone());
     let v_floor: i64 = f_std__fixed__from_int((v_front.clone()).f_floor.clone());
     let v_back_ceiling: i64 = f_std__fixed__from_int((v_back.clone()).f_ceiling.clone());
     let v_back_floor: i64 = f_std__fixed__from_int((v_back.clone()).f_floor.clone());
-    for v_x in t_iter(t_range(t_index(&v_range.clone(), 0i64, "render.tes:219:16 in function `render__draw_seg`"), t_index(&v_range.clone(), 1i64, "render.tes:219:26 in function `render__draw_seg`"), "render.tes:219:10 in function `render__draw_seg`")) {
-        t_tick("render.tes:219:36 in function `render__draw_seg`");
-        let v_top: i64 = t_index(&(v_c.clone()).f_top.clone(), v_x.clone(), "render.tes:220:11 in function `render__draw_seg`");
-        let v_bottom: i64 = t_index(&(v_c.clone()).f_bottom.clone(), v_x.clone(), "render.tes:221:14 in function `render__draw_seg`");
+    for v_x in t_iter(t_range(t_index(&v_range.clone(), 0i64, "render.tes:247:16 in function `render__draw_seg`"), t_index(&v_range.clone(), 1i64, "render.tes:247:26 in function `render__draw_seg`"), "render.tes:247:10 in function `render__draw_seg`")) {
+        t_tick("render.tes:247:36 in function `render__draw_seg`");
+        let v_top: i64 = t_index(&(v_c.clone()).f_top.clone(), v_x.clone(), "render.tes:248:11 in function `render__draw_seg`");
+        let v_bottom: i64 = t_index(&(v_c.clone()).f_bottom.clone(), v_x.clone(), "render.tes:249:14 in function `render__draw_seg`");
         if (v_top.clone() <= v_bottom.clone()) {
-            let v_hit: Rc<T_geometry__Hit> = f_geometry__intersect((v_cam.clone()).f_x.clone(), (v_cam.clone()).f_y.clone(), t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), v_x.clone(), "render.tes:223:44 in function `render__draw_seg`"), t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), v_x.clone(), "render.tes:223:61 in function `render__draw_seg`"), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
+            let v_hit: Rc<T_std__plane__Hit> = f_std__plane__intersect((v_cam.clone()).f_x.clone(), (v_cam.clone()).f_y.clone(), t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), v_x.clone(), "render.tes:251:41 in function `render__draw_seg`"), t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), v_x.clone(), "render.tes:251:58 in function `render__draw_seg`"), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
             if ((v_hit.clone()).f_hit.clone() && ((v_hit.clone()).f_distance.clone() > 1024i64)) {
                 let v_distance: i64 = (v_hit.clone()).f_distance.clone();
-                let v_u: i64 = t_add(t_add((v_seg.clone()).f_offset.clone(), (v_side.clone()).f_x_offset.clone(), "render.tes:226:20 in function `render__draw_seg`"), f_std__fixed__floor_int(t_mul((v_hit.clone()).f_along.clone(), v_seg_length.clone(), "render.tes:226:64 in function `render__draw_seg`")), "render.tes:226:36 in function `render__draw_seg`");
+                let v_u: i64 = t_add(t_add((v_seg.clone()).f_offset.clone(), (v_side.clone()).f_x_offset.clone(), "render.tes:254:20 in function `render__draw_seg`"), f_std__fixed__floor_int(t_mul((v_hit.clone()).f_along.clone(), v_seg_length.clone(), "render.tes:254:64 in function `render__draw_seg`")), "render.tes:254:36 in function `render__draw_seg`");
                 let v_light: i64 = f_render__light_row((v_front.clone()).f_light.clone(), v_distance.clone());
                 let v_wall_top: i64 = f_std__math__max(f_render__row_of(v_ceiling.clone(), (v_cam.clone()).f_z.clone(), v_distance.clone()), v_top.clone());
-                let v_wall_bottom: i64 = f_std__math__min(t_sub(f_render__row_of(v_floor.clone(), (v_cam.clone()).f_z.clone(), v_distance.clone()), 1i64, "render.tes:229:59 in function `render__draw_seg`"), v_bottom.clone());
+                let v_wall_bottom: i64 = f_std__math__min(t_sub(f_render__row_of(v_floor.clone(), (v_cam.clone()).f_z.clone(), v_distance.clone()), 1i64, "render.tes:257:59 in function `render__draw_seg`"), v_bottom.clone());
                 if v_front_sky.clone() {
-                    v_c = f_render__draw_sky(v_view.clone(), v_c, v_x.clone(), v_top.clone(), f_std__math__min(t_sub(v_wall_top.clone(), 1i64, "render.tes:232:53 in function `render__draw_seg`"), v_bottom.clone()));
+                    v_c = f_render__draw_sky(v_view.clone(), v_c, v_x.clone(), v_top.clone(), f_std__math__min(t_sub(v_wall_top.clone(), 1i64, "render.tes:260:53 in function `render__draw_seg`"), v_bottom.clone()));
                 } else if (v_ceiling.clone() > (v_cam.clone()).f_z.clone()) {
-                    v_c = f_render__draw_flat(v_view.clone(), v_c, v_x.clone(), v_top.clone(), f_std__math__min(t_sub(v_wall_top.clone(), 1i64, "render.tes:234:54 in function `render__draw_seg`"), v_bottom.clone()), v_ceiling.clone(), t_index(&(v_scene.clone()).f_ceiling_flat.clone(), (v_side.clone()).f_sector.clone(), "render.tes:234:77 in function `render__draw_seg`"), (v_front.clone()).f_light.clone());
+                    v_c = f_render__draw_flat(v_view.clone(), v_c, v_x.clone(), v_top.clone(), f_std__math__min(t_sub(v_wall_top.clone(), 1i64, "render.tes:262:54 in function `render__draw_seg`"), v_bottom.clone()), v_ceiling.clone(), t_index(&(v_scene.clone()).f_ceiling_flat.clone(), (v_side.clone()).f_sector.clone(), "render.tes:262:77 in function `render__draw_seg`"), (v_front.clone()).f_light.clone());
                 };
                 if (v_floor.clone() < (v_cam.clone()).f_z.clone()) {
-                    v_c = f_render__draw_flat(v_view.clone(), v_c, v_x.clone(), f_std__math__max(t_add(v_wall_bottom.clone(), 1i64, "render.tes:237:52 in function `render__draw_seg`"), v_top.clone()), v_bottom.clone(), v_floor.clone(), t_index(&(v_scene.clone()).f_floor_flat.clone(), (v_side.clone()).f_sector.clone(), "render.tes:237:78 in function `render__draw_seg`"), (v_front.clone()).f_light.clone());
+                    v_c = f_render__draw_flat(v_view.clone(), v_c, v_x.clone(), f_std__math__max(t_add(v_wall_bottom.clone(), 1i64, "render.tes:265:52 in function `render__draw_seg`"), v_top.clone()), v_bottom.clone(), v_floor.clone(), t_index(&(v_scene.clone()).f_floor_flat.clone(), (v_side.clone()).f_sector.clone(), "render.tes:265:78 in function `render__draw_seg`"), (v_front.clone()).f_light.clone());
                 };
                 if (!v_two_sided.clone()) {
                     let v_texture_top: i64 = if v_lower_unpegged.clone() {
-                        t_add(v_floor.clone(), f_std__fixed__from_int(f_render__texture_height(v_scene.clone(), t_index(&(v_scene.clone()).f_middle.clone(), v_side_index.clone(), "render.tes:240:84 in function `render__draw_seg`"))), "render.tes:240:45 in function `render__draw_seg`")
+                        t_add(v_floor.clone(), f_std__fixed__from_int(f_render__texture_height(v_scene.clone(), v_middle_texture.clone())), "render.tes:268:45 in function `render__draw_seg`")
                     } else {
                         v_ceiling.clone()
                     };
-                    v_c = f_render__draw_wall(v_view.clone(), v_c, v_x.clone(), v_wall_top.clone(), v_wall_bottom.clone(), t_index(&(v_scene.clone()).f_middle.clone(), v_side_index.clone(), "render.tes:241:54 in function `render__draw_seg`"), v_u.clone(), t_add(v_texture_top.clone(), f_std__fixed__from_int((v_side.clone()).f_y_offset.clone()), "render.tes:241:95 in function `render__draw_seg`"), v_distance.clone(), v_light.clone());
+                    v_c = f_render__draw_wall(v_view.clone(), v_c, v_x.clone(), v_wall_top.clone(), v_wall_bottom.clone(), v_middle_texture.clone(), v_u.clone(), t_add(v_texture_top.clone(), f_std__fixed__from_int((v_side.clone()).f_y_offset.clone()), "render.tes:269:85 in function `render__draw_seg`"), v_distance.clone(), v_light.clone());
                     v_c = f_render__mark_depth(v_c, v_x.clone(), v_wall_top.clone(), v_wall_bottom.clone(), v_distance.clone());
-                    { let t_place0: i64 = v_x.clone(); let t_value = t_add(v_bottom.clone(), 1i64, "render.tes:243:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_top, t_place0, "render.tes:243:5 in function `render__draw_seg`") = t_value; }
-                    { let t_place0: i64 = v_x.clone(); let t_value = t_sub(v_top.clone(), 1i64, "render.tes:244:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_bottom, t_place0, "render.tes:244:5 in function `render__draw_seg`") = t_value; }
-                    { let t_value = t_sub((v_c.clone()).f_open.clone(), 1i64, "render.tes:245:12 in function `render__draw_seg`"); *&mut Rc::make_mut(&mut v_c).f_open = t_value; }
+                    { let t_place0: i64 = v_x.clone(); let t_value = t_add(v_bottom.clone(), 1i64, "render.tes:271:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_top, t_place0, "render.tes:271:5 in function `render__draw_seg`") = t_value; }
+                    { let t_place0: i64 = v_x.clone(); let t_value = t_sub(v_top.clone(), 1i64, "render.tes:272:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_bottom, t_place0, "render.tes:272:5 in function `render__draw_seg`") = t_value; }
+                    { let t_value = t_sub((v_c.clone()).f_open.clone(), 1i64, "render.tes:273:12 in function `render__draw_seg`"); *&mut Rc::make_mut(&mut v_c).f_open = t_value; }
                 } else {
                     let mut v_new_top: i64 = v_wall_top.clone();
                     let mut v_new_bottom: i64 = v_wall_bottom.clone();
                     if ((v_back_ceiling.clone() < v_ceiling.clone()) && (!(v_front_sky.clone() && v_back_sky.clone()))) {
-                        let v_upper_end: i64 = f_std__math__min(t_sub(f_render__row_of(v_back_ceiling.clone(), (v_cam.clone()).f_z.clone(), v_distance.clone()), 1i64, "render.tes:250:64 in function `render__draw_seg`"), v_wall_bottom.clone());
+                        let v_upper_end: i64 = f_std__math__min(t_sub(f_render__row_of(v_back_ceiling.clone(), (v_cam.clone()).f_z.clone(), v_distance.clone()), 1i64, "render.tes:278:64 in function `render__draw_seg`"), v_wall_bottom.clone());
                         let v_texture_top: i64 = if v_upper_unpegged.clone() {
                             v_ceiling.clone()
                         } else {
-                            t_add(v_back_ceiling.clone(), f_std__fixed__from_int(f_render__texture_height(v_scene.clone(), t_index(&(v_scene.clone()).f_upper.clone(), v_side_index.clone(), "render.tes:251:108 in function `render__draw_seg`"))), "render.tes:251:69 in function `render__draw_seg`")
+                            t_add(v_back_ceiling.clone(), f_std__fixed__from_int(f_render__texture_height(v_scene.clone(), v_upper_texture.clone())), "render.tes:279:69 in function `render__draw_seg`")
                         };
-                        v_c = f_render__draw_wall(v_view.clone(), v_c, v_x.clone(), v_wall_top.clone(), v_upper_end.clone(), t_index(&(v_scene.clone()).f_upper.clone(), v_side_index.clone(), "render.tes:252:52 in function `render__draw_seg`"), v_u.clone(), t_add(v_texture_top.clone(), f_std__fixed__from_int((v_side.clone()).f_y_offset.clone()), "render.tes:252:92 in function `render__draw_seg`"), v_distance.clone(), v_light.clone());
+                        v_c = f_render__draw_wall(v_view.clone(), v_c, v_x.clone(), v_wall_top.clone(), v_upper_end.clone(), v_upper_texture.clone(), v_u.clone(), t_add(v_texture_top.clone(), f_std__fixed__from_int((v_side.clone()).f_y_offset.clone()), "render.tes:280:82 in function `render__draw_seg`"), v_distance.clone(), v_light.clone());
                         v_c = f_render__mark_depth(v_c, v_x.clone(), v_wall_top.clone(), v_upper_end.clone(), v_distance.clone());
-                        v_new_top = f_std__math__max(v_new_top.clone(), t_add(v_upper_end.clone(), 1i64, "render.tes:254:43 in function `render__draw_seg`"));
+                        v_new_top = f_std__math__max(v_new_top.clone(), t_add(v_upper_end.clone(), 1i64, "render.tes:282:43 in function `render__draw_seg`"));
                     };
                     if (v_back_floor.clone() > v_floor.clone()) {
                         let v_lower_start: i64 = f_std__math__max(f_render__row_of(v_back_floor.clone(), (v_cam.clone()).f_z.clone(), v_distance.clone()), v_new_top.clone());
@@ -4927,192 +5188,192 @@ fn f_render__draw_seg(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>
                         } else {
                             v_back_floor.clone()
                         };
-                        v_c = f_render__draw_wall(v_view.clone(), v_c, v_x.clone(), v_lower_start.clone(), v_wall_bottom.clone(), t_index(&(v_scene.clone()).f_lower.clone(), v_side_index.clone(), "render.tes:259:57 in function `render__draw_seg`"), v_u.clone(), t_add(v_texture_top.clone(), f_std__fixed__from_int((v_side.clone()).f_y_offset.clone()), "render.tes:259:97 in function `render__draw_seg`"), v_distance.clone(), v_light.clone());
+                        v_c = f_render__draw_wall(v_view.clone(), v_c, v_x.clone(), v_lower_start.clone(), v_wall_bottom.clone(), v_lower_texture.clone(), v_u.clone(), t_add(v_texture_top.clone(), f_std__fixed__from_int((v_side.clone()).f_y_offset.clone()), "render.tes:287:87 in function `render__draw_seg`"), v_distance.clone(), v_light.clone());
                         v_c = f_render__mark_depth(v_c, v_x.clone(), v_lower_start.clone(), v_wall_bottom.clone(), v_distance.clone());
-                        v_new_bottom = f_std__math__min(v_new_bottom.clone(), t_sub(v_lower_start.clone(), 1i64, "render.tes:261:51 in function `render__draw_seg`"));
+                        v_new_bottom = f_std__math__min(v_new_bottom.clone(), t_sub(v_lower_start.clone(), 1i64, "render.tes:289:51 in function `render__draw_seg`"));
                     };
                     if ((v_back_ceiling.clone() <= v_back_floor.clone()) || (v_new_top.clone() > v_new_bottom.clone())) {
                         v_c = f_render__mark_depth(v_c, v_x.clone(), v_new_top.clone(), v_new_bottom.clone(), v_distance.clone());
-                        { let t_place0: i64 = v_x.clone(); let t_value = t_add(v_bottom.clone(), 1i64, "render.tes:266:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_top, t_place0, "render.tes:266:5 in function `render__draw_seg`") = t_value; }
-                        { let t_place0: i64 = v_x.clone(); let t_value = t_sub(v_top.clone(), 1i64, "render.tes:267:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_bottom, t_place0, "render.tes:267:5 in function `render__draw_seg`") = t_value; }
-                        { let t_value = t_sub((v_c.clone()).f_open.clone(), 1i64, "render.tes:268:12 in function `render__draw_seg`"); *&mut Rc::make_mut(&mut v_c).f_open = t_value; }
+                        { let t_place0: i64 = v_x.clone(); let t_value = t_add(v_bottom.clone(), 1i64, "render.tes:294:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_top, t_place0, "render.tes:294:5 in function `render__draw_seg`") = t_value; }
+                        { let t_place0: i64 = v_x.clone(); let t_value = t_sub(v_top.clone(), 1i64, "render.tes:295:23 in function `render__draw_seg`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_bottom, t_place0, "render.tes:295:5 in function `render__draw_seg`") = t_value; }
+                        { let t_value = t_sub((v_c.clone()).f_open.clone(), 1i64, "render.tes:296:12 in function `render__draw_seg`"); *&mut Rc::make_mut(&mut v_c).f_open = t_value; }
                     } else {
-                        { let t_place0: i64 = v_x.clone(); let t_value = v_new_top.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_top, t_place0, "render.tes:270:5 in function `render__draw_seg`") = t_value; }
-                        { let t_place0: i64 = v_x.clone(); let t_value = v_new_bottom.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_bottom, t_place0, "render.tes:271:5 in function `render__draw_seg`") = t_value; }
+                        { let t_place0: i64 = v_x.clone(); let t_value = v_new_top.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_top, t_place0, "render.tes:298:5 in function `render__draw_seg`") = t_value; }
+                        { let t_place0: i64 = v_x.clone(); let t_value = v_new_bottom.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_bottom, t_place0, "render.tes:299:5 in function `render__draw_seg`") = t_value; }
                     }
                 }
             }
         }
     }
-    v_c.clone()
+    v_c
 }
 
 fn f_render__texture_height(v_scene: Rc<T_render__Scene>, v_texture: i64) -> i64 {
-    t_enter("render.tes:280:4 in function `render__texture_height`");
+    t_enter("render.tes:308:4 in function `render__texture_height`");
     if (v_texture.clone() < 0i64) {
         0i64
     } else {
-        (t_index(&((v_scene.clone()).f_art.clone()).f_textures.clone(), v_texture.clone(), "render.tes:280:84 in function `render__texture_height`")).f_height.clone()
+        (t_index(&((v_scene).f_art.clone()).f_textures.clone(), v_texture.clone(), "render.tes:308:84 in function `render__texture_height`")).f_height.clone()
     }
 }
 
 // note: Wall rows `from` to `to` of one column: texture column `u`; `texture_top` is the world height (fixed) of the texture's first row.
 fn f_render__draw_wall(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_x: i64, v_from: i64, v_to: i64, v_texture: i64, v_u: i64, v_texture_top: i64, v_distance: i64, v_light: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:283:4 in function `render__draw_wall`");
+    t_enter("render.tes:311:4 in function `render__draw_wall`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     if ((v_texture.clone() < 0i64) || (v_from.clone() > v_to.clone())) {
-        return v_c.clone()
+        return v_c
     };
-    let v_picture: Rc<T_art__Picture> = t_index(&(((v_view.clone()).f_scene.clone()).f_art.clone()).f_textures.clone(), v_texture.clone(), "render.tes:288:15 in function `render__draw_wall`");
+    let v_picture: Rc<T_art__Picture> = t_index(&(((v_view.clone()).f_scene.clone()).f_art.clone()).f_textures.clone(), v_texture.clone(), "render.tes:316:15 in function `render__draw_wall`");
     let v_pixels: Rc<Vec<i64>> = (v_picture.clone()).f_pixels.clone();
     let v_h: i64 = (v_picture.clone()).f_height.clone();
-    let v_column: i64 = t_mul(t_rem(t_add(t_rem(v_u.clone(), (v_picture.clone()).f_width.clone(), "render.tes:291:18 in function `render__draw_wall`"), (v_picture.clone()).f_width.clone(), "render.tes:291:35 in function `render__draw_wall`"), (v_picture.clone()).f_width.clone(), "render.tes:291:52 in function `render__draw_wall`"), v_h.clone(), "render.tes:291:68 in function `render__draw_wall`");
+    let v_column: i64 = t_mul(t_rem(t_add(t_rem(v_u.clone(), (v_picture.clone()).f_width.clone(), "render.tes:319:18 in function `render__draw_wall`"), (v_picture.clone()).f_width.clone(), "render.tes:319:35 in function `render__draw_wall`"), (v_picture.clone()).f_width.clone(), "render.tes:319:52 in function `render__draw_wall`"), v_h.clone(), "render.tes:319:68 in function `render__draw_wall`");
     let v_colormap: Rc<Vec<u8>> = (((v_view.clone()).f_scene.clone()).f_art.clone()).f_colormap.clone();
-    let v_shade: i64 = t_mul(v_light.clone(), 256i64, "render.tes:293:19 in function `render__draw_wall`");
+    let v_shade: i64 = t_mul(v_light.clone(), 256i64, "render.tes:321:19 in function `render__draw_wall`");
     let v_width: i64 = f_geometry__screen_width();
     let v_focal: i64 = f_geometry__focal();
-    let v_step: i64 = t_div(v_distance.clone(), v_focal.clone(), "render.tes:297:21 in function `render__draw_wall`");
-    let mut v_v: i64 = t_sub(v_texture_top.clone(), t_add(((v_view.clone()).f_camera.clone()).f_z.clone(), t_div(t_mul(t_sub(t_mul(2i64, t_sub(t_div(f_geometry__screen_height(), 2i64, "render.tes:298:71 in function `render__draw_wall`"), v_from.clone(), "render.tes:298:75 in function `render__draw_wall`"), "render.tes:298:43 in function `render__draw_wall`"), 1i64, "render.tes:298:83 in function `render__draw_wall`"), v_distance.clone(), "render.tes:298:88 in function `render__draw_wall`"), t_mul(2i64, v_focal.clone(), "render.tes:298:104 in function `render__draw_wall`"), "render.tes:298:99 in function `render__draw_wall`"), "render.tes:298:38 in function `render__draw_wall`"), "render.tes:298:21 in function `render__draw_wall`");
-    let mut v_at: i64 = t_add(t_mul(v_from.clone(), v_width.clone(), "render.tes:299:15 in function `render__draw_wall`"), v_x.clone(), "render.tes:299:23 in function `render__draw_wall`");
-    for _ in t_iter(t_range(v_from.clone(), t_add(v_to.clone(), 1i64, "render.tes:300:25 in function `render__draw_wall`"), "render.tes:300:10 in function `render__draw_wall`")) {
-        t_tick("render.tes:300:30 in function `render__draw_wall`");
-        let v_row: i64 = t_rem(t_add(t_rem(t_shift_right(v_v.clone(), 16i64, "render.tes:301:13 in function `render__draw_wall`"), v_h.clone(), "render.tes:301:32 in function `render__draw_wall`"), v_h.clone(), "render.tes:301:37 in function `render__draw_wall`"), v_h.clone(), "render.tes:301:42 in function `render__draw_wall`");
-        let v_texel: i64 = t_index(&v_pixels.clone(), t_add(v_column.clone(), v_row.clone(), "render.tes:302:27 in function `render__draw_wall`"), "render.tes:302:13 in function `render__draw_wall`");
+    let v_step: i64 = t_div(v_distance.clone(), v_focal.clone(), "render.tes:325:21 in function `render__draw_wall`");
+    let mut v_v: i64 = t_sub(v_texture_top.clone(), t_add(((v_view.clone()).f_camera.clone()).f_z.clone(), t_div(t_mul(t_sub(t_mul(2i64, t_sub(t_div(f_geometry__screen_height(), 2i64, "render.tes:326:71 in function `render__draw_wall`"), v_from.clone(), "render.tes:326:75 in function `render__draw_wall`"), "render.tes:326:43 in function `render__draw_wall`"), 1i64, "render.tes:326:83 in function `render__draw_wall`"), v_distance.clone(), "render.tes:326:88 in function `render__draw_wall`"), t_mul(2i64, v_focal.clone(), "render.tes:326:104 in function `render__draw_wall`"), "render.tes:326:99 in function `render__draw_wall`"), "render.tes:326:38 in function `render__draw_wall`"), "render.tes:326:21 in function `render__draw_wall`");
+    let mut v_at: i64 = t_add(t_mul(v_from.clone(), v_width.clone(), "render.tes:327:15 in function `render__draw_wall`"), v_x.clone(), "render.tes:327:23 in function `render__draw_wall`");
+    for _ in t_iter(t_range(v_from.clone(), t_add(v_to.clone(), 1i64, "render.tes:328:25 in function `render__draw_wall`"), "render.tes:328:10 in function `render__draw_wall`")) {
+        t_tick("render.tes:328:30 in function `render__draw_wall`");
+        let v_row: i64 = t_rem(t_add(t_rem(t_shift_right(v_v.clone(), 16i64, "render.tes:329:13 in function `render__draw_wall`"), v_h.clone(), "render.tes:329:32 in function `render__draw_wall`"), v_h.clone(), "render.tes:329:37 in function `render__draw_wall`"), v_h.clone(), "render.tes:329:42 in function `render__draw_wall`");
+        let v_texel: i64 = t_index(&v_pixels.clone(), t_add(v_column.clone(), v_row.clone(), "render.tes:330:27 in function `render__draw_wall`"), "render.tes:330:13 in function `render__draw_wall`");
         if (v_texel.clone() >= 0i64) {
-            { let t_place0: i64 = v_at.clone(); let t_value = t_bytes_index(&v_colormap.clone(), t_add(v_shade.clone(), v_texel.clone(), "render.tes:304:35 in function `render__draw_wall`"), "render.tes:304:20 in function `render__draw_wall`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:304:5 in function `render__draw_wall`") = t_value; }
+            { let t_place0: i64 = v_at.clone(); let t_value = t_bytes_index(&v_colormap.clone(), t_add(v_shade.clone(), v_texel.clone(), "render.tes:332:35 in function `render__draw_wall`"), "render.tes:332:20 in function `render__draw_wall`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:332:5 in function `render__draw_wall`") = t_value; }
         };
-        v_v = t_add(v_v.clone(), v_step.clone(), "render.tes:306:7 in function `render__draw_wall`");
-        v_at = t_add(v_at.clone(), v_width.clone(), "render.tes:307:8 in function `render__draw_wall`");
+        v_v = t_add(v_v.clone(), v_step.clone(), "render.tes:334:7 in function `render__draw_wall`");
+        v_at = t_add(v_at.clone(), v_width.clone(), "render.tes:335:8 in function `render__draw_wall`");
     }
-    v_c.clone()
+    v_c
 }
 
 // note: Floor or ceiling rows of one column at `height` (fixed): each pixel looks up the flat at the map point it shows.
 fn f_render__draw_flat(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_x: i64, v_from: i64, v_to: i64, v_height: i64, v_flat: i64, v_light: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:313:4 in function `render__draw_flat`");
+    t_enter("render.tes:341:4 in function `render__draw_flat`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     if ((v_flat.clone() < 0i64) || (v_from.clone() > v_to.clone())) {
-        return v_c.clone()
+        return v_c
     };
-    let v_texels: Rc<Vec<u8>> = t_index(&(((v_view.clone()).f_scene.clone()).f_art.clone()).f_flats.clone(), v_flat.clone(), "render.tes:318:14 in function `render__draw_flat`");
+    let v_texels: Rc<Vec<u8>> = t_index(&(((v_view.clone()).f_scene.clone()).f_art.clone()).f_flats.clone(), v_flat.clone(), "render.tes:346:14 in function `render__draw_flat`");
     let v_colormap: Rc<Vec<u8>> = (((v_view.clone()).f_scene.clone()).f_art.clone()).f_colormap.clone();
     let v_cam: Rc<T_geometry__Camera> = (v_view.clone()).f_camera.clone();
-    let v_dz: i64 = t_sub((v_cam.clone()).f_z.clone(), v_height.clone(), "render.tes:321:16 in function `render__draw_flat`");
-    let v_ray_x: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), v_x.clone(), "render.tes:322:13 in function `render__draw_flat`");
-    let v_ray_y: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), v_x.clone(), "render.tes:323:13 in function `render__draw_flat`");
-    let v_centre: i64 = t_div(f_geometry__screen_height(), 2i64, "render.tes:324:39 in function `render__draw_flat`");
+    let v_dz: i64 = t_sub((v_cam.clone()).f_z.clone(), v_height.clone(), "render.tes:349:16 in function `render__draw_flat`");
+    let v_ray_x: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), v_x.clone(), "render.tes:350:13 in function `render__draw_flat`");
+    let v_ray_y: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), v_x.clone(), "render.tes:351:13 in function `render__draw_flat`");
+    let v_centre: i64 = t_div(f_geometry__screen_height(), 2i64, "render.tes:352:39 in function `render__draw_flat`");
     let v_width: i64 = f_geometry__screen_width();
-    let v_scaled_height: i64 = t_mul(t_mul(v_dz.clone(), 2i64, "render.tes:326:24 in function `render__draw_flat`"), f_geometry__focal(), "render.tes:326:28 in function `render__draw_flat`");
-    let v_base_light: i64 = t_div(t_sub(255i64, v_light.clone(), "render.tes:327:23 in function `render__draw_flat`"), 8i64, "render.tes:327:32 in function `render__draw_flat`");
-    let mut v_at: i64 = t_add(t_mul(v_from.clone(), v_width.clone(), "render.tes:328:15 in function `render__draw_flat`"), v_x.clone(), "render.tes:328:23 in function `render__draw_flat`");
-    for v_y in t_iter(t_range(v_from.clone(), t_add(v_to.clone(), 1i64, "render.tes:329:25 in function `render__draw_flat`"), "render.tes:329:10 in function `render__draw_flat`")) {
-        t_tick("render.tes:329:30 in function `render__draw_flat`");
-        let v_below: i64 = t_sub(t_add(t_mul(2i64, v_y.clone(), "render.tes:331:15 in function `render__draw_flat`"), 1i64, "render.tes:331:19 in function `render__draw_flat`"), t_mul(2i64, v_centre.clone(), "render.tes:331:27 in function `render__draw_flat`"), "render.tes:331:23 in function `render__draw_flat`");
+    let v_scaled_height: i64 = t_mul(t_mul(v_dz.clone(), 2i64, "render.tes:354:24 in function `render__draw_flat`"), f_geometry__focal(), "render.tes:354:28 in function `render__draw_flat`");
+    let v_base_light: i64 = t_div(t_sub(255i64, v_light.clone(), "render.tes:355:23 in function `render__draw_flat`"), 8i64, "render.tes:355:32 in function `render__draw_flat`");
+    let mut v_at: i64 = t_add(t_mul(v_from.clone(), v_width.clone(), "render.tes:356:15 in function `render__draw_flat`"), v_x.clone(), "render.tes:356:23 in function `render__draw_flat`");
+    for v_y in t_iter(t_range(v_from.clone(), t_add(v_to.clone(), 1i64, "render.tes:357:25 in function `render__draw_flat`"), "render.tes:357:10 in function `render__draw_flat`")) {
+        t_tick("render.tes:357:30 in function `render__draw_flat`");
+        let v_below: i64 = t_sub(t_add(t_mul(2i64, v_y.clone(), "render.tes:359:15 in function `render__draw_flat`"), 1i64, "render.tes:359:19 in function `render__draw_flat`"), t_mul(2i64, v_centre.clone(), "render.tes:359:27 in function `render__draw_flat`"), "render.tes:359:23 in function `render__draw_flat`");
         if ((v_below.clone() != 0i64) && ((v_below.clone() > 0i64) == (v_dz.clone() > 0i64))) {
-            let v_distance: i64 = t_div(v_scaled_height.clone(), v_below.clone(), "render.tes:333:30 in function `render__draw_flat`");
-            let v_wx: i64 = t_shift_right(t_add((v_cam.clone()).f_x.clone(), t_shift_right(t_mul(v_ray_x.clone(), v_distance.clone(), "render.tes:334:48 in function `render__draw_flat`"), 16i64, "render.tes:334:30 in function `render__draw_flat`"), "render.tes:334:28 in function `render__draw_flat`"), 16i64, "render.tes:334:10 in function `render__draw_flat`");
-            let v_wy: i64 = t_shift_right(t_add((v_cam.clone()).f_y.clone(), t_shift_right(t_mul(v_ray_y.clone(), v_distance.clone(), "render.tes:335:48 in function `render__draw_flat`"), 16i64, "render.tes:335:30 in function `render__draw_flat`"), "render.tes:335:28 in function `render__draw_flat`"), 16i64, "render.tes:335:10 in function `render__draw_flat`");
-            let v_texel: i64 = t_bytes_index(&v_texels.clone(), t_add(t_mul(t_sub(63i64, (v_wy.clone() & 63i64), "render.tes:336:24 in function `render__draw_flat`"), 64i64, "render.tes:336:43 in function `render__draw_flat`"), (v_wx.clone() & 63i64), "render.tes:336:48 in function `render__draw_flat`"), "render.tes:336:13 in function `render__draw_flat`");
-            let v_shade: i64 = t_add(v_base_light.clone(), t_div(t_shift_right(v_distance.clone(), 16i64, "render.tes:337:26 in function `render__draw_flat`"), 96i64, "render.tes:337:52 in function `render__draw_flat`"), "render.tes:337:24 in function `render__draw_flat`");
+            let v_distance: i64 = t_div(v_scaled_height.clone(), v_below.clone(), "render.tes:361:30 in function `render__draw_flat`");
+            let v_wx: i64 = t_shift_right(t_add((v_cam.clone()).f_x.clone(), t_shift_right(t_mul(v_ray_x.clone(), v_distance.clone(), "render.tes:362:48 in function `render__draw_flat`"), 16i64, "render.tes:362:30 in function `render__draw_flat`"), "render.tes:362:28 in function `render__draw_flat`"), 16i64, "render.tes:362:10 in function `render__draw_flat`");
+            let v_wy: i64 = t_shift_right(t_add((v_cam.clone()).f_y.clone(), t_shift_right(t_mul(v_ray_y.clone(), v_distance.clone(), "render.tes:363:48 in function `render__draw_flat`"), 16i64, "render.tes:363:30 in function `render__draw_flat`"), "render.tes:363:28 in function `render__draw_flat`"), 16i64, "render.tes:363:10 in function `render__draw_flat`");
+            let v_texel: i64 = t_bytes_index(&v_texels.clone(), t_add(t_mul(t_sub(63i64, (v_wy.clone() & 63i64), "render.tes:364:24 in function `render__draw_flat`"), 64i64, "render.tes:364:43 in function `render__draw_flat`"), (v_wx.clone() & 63i64), "render.tes:364:48 in function `render__draw_flat`"), "render.tes:364:13 in function `render__draw_flat`");
+            let v_shade: i64 = t_add(v_base_light.clone(), t_div(t_shift_right(v_distance.clone(), 16i64, "render.tes:365:26 in function `render__draw_flat`"), 96i64, "render.tes:365:52 in function `render__draw_flat`"), "render.tes:365:24 in function `render__draw_flat`");
             { let t_place0: i64 = v_at.clone(); let t_value = t_bytes_index(&v_colormap.clone(), t_add(t_mul(if (v_shade.clone() > 31i64) {
                 31i64
             } else {
                 v_shade.clone()
-            }, 256i64, "render.tes:338:67 in function `render__draw_flat`"), v_texel.clone(), "render.tes:338:73 in function `render__draw_flat`"), "render.tes:338:20 in function `render__draw_flat`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:338:5 in function `render__draw_flat`") = t_value; }
-            { let t_place0: i64 = v_at.clone(); let t_value = v_distance.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_depth, t_place0, "render.tes:339:5 in function `render__draw_flat`") = t_value; }
+            }, 256i64, "render.tes:366:67 in function `render__draw_flat`"), v_texel.clone(), "render.tes:366:73 in function `render__draw_flat`"), "render.tes:366:20 in function `render__draw_flat`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:366:5 in function `render__draw_flat`") = t_value; }
+            { let t_place0: i64 = v_at.clone(); let t_value = v_distance.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_depth, t_place0, "render.tes:367:5 in function `render__draw_flat`") = t_value; }
         };
-        v_at = t_add(v_at.clone(), v_width.clone(), "render.tes:341:8 in function `render__draw_flat`");
+        v_at = t_add(v_at.clone(), v_width.clone(), "render.tes:369:8 in function `render__draw_flat`");
     }
-    v_c.clone()
+    v_c
 }
 
 // note: Sky rows of one column: the sky texture turns with the view (1024 texture columns per full turn) and is not darkened.
 fn f_render__draw_sky(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_x: i64, v_from: i64, v_to: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:347:4 in function `render__draw_sky`");
+    t_enter("render.tes:375:4 in function `render__draw_sky`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     let v_sky: i64 = ((v_view.clone()).f_scene.clone()).f_sky.clone();
     if ((v_sky.clone() < 0i64) || (v_from.clone() > v_to.clone())) {
-        return v_c.clone()
+        return v_c
     };
-    let v_picture: Rc<T_art__Picture> = t_index(&(((v_view.clone()).f_scene.clone()).f_art.clone()).f_textures.clone(), v_sky.clone(), "render.tes:353:15 in function `render__draw_sky`");
+    let v_picture: Rc<T_art__Picture> = t_index(&(((v_view.clone()).f_scene.clone()).f_art.clone()).f_textures.clone(), v_sky.clone(), "render.tes:381:15 in function `render__draw_sky`");
     let v_pixels: Rc<Vec<i64>> = (v_picture.clone()).f_pixels.clone();
     let v_h: i64 = (v_picture.clone()).f_height.clone();
-    let v_u: i64 = t_rem(t_add(t_rem(t_sub(t_div(t_mul(v_x.clone(), 256i64, "render.tes:356:13 in function `render__draw_sky`"), f_geometry__screen_width(), "render.tes:356:19 in function `render__draw_sky`"), t_div(t_mul(((v_view.clone()).f_camera.clone()).f_angle.clone(), 1024i64, "render.tes:356:65 in function `render__draw_sky`"), f_geometry__fine_angles(), "render.tes:356:72 in function `render__draw_sky`"), "render.tes:356:45 in function `render__draw_sky`"), (v_picture.clone()).f_width.clone(), "render.tes:356:98 in function `render__draw_sky`"), (v_picture.clone()).f_width.clone(), "render.tes:356:114 in function `render__draw_sky`"), (v_picture.clone()).f_width.clone(), "render.tes:356:131 in function `render__draw_sky`");
-    for v_y in t_iter(t_range(v_from.clone(), t_add(v_to.clone(), 1i64, "render.tes:357:25 in function `render__draw_sky`"), "render.tes:357:10 in function `render__draw_sky`")) {
-        t_tick("render.tes:357:30 in function `render__draw_sky`");
-        let v_row: i64 = f_std__math__min(t_div(t_mul(v_y.clone(), v_h.clone(), "render.tes:358:22 in function `render__draw_sky`"), t_add(t_div(f_geometry__screen_height(), 2i64, "render.tes:358:54 in function `render__draw_sky`"), 20i64, "render.tes:358:58 in function `render__draw_sky`"), "render.tes:358:26 in function `render__draw_sky`"), t_sub(v_h.clone(), 1i64, "render.tes:358:67 in function `render__draw_sky`"));
-        let v_texel: i64 = t_index(&v_pixels.clone(), t_add(t_mul(v_u.clone(), v_h.clone(), "render.tes:359:22 in function `render__draw_sky`"), v_row.clone(), "render.tes:359:26 in function `render__draw_sky`"), "render.tes:359:13 in function `render__draw_sky`");
+    let v_u: i64 = t_rem(t_add(t_rem(t_sub(t_div(t_mul(v_x.clone(), 256i64, "render.tes:384:13 in function `render__draw_sky`"), f_geometry__screen_width(), "render.tes:384:19 in function `render__draw_sky`"), t_div(t_mul(((v_view.clone()).f_camera.clone()).f_angle.clone(), 1024i64, "render.tes:384:65 in function `render__draw_sky`"), f_geometry__fine_angles(), "render.tes:384:72 in function `render__draw_sky`"), "render.tes:384:45 in function `render__draw_sky`"), (v_picture.clone()).f_width.clone(), "render.tes:384:98 in function `render__draw_sky`"), (v_picture.clone()).f_width.clone(), "render.tes:384:114 in function `render__draw_sky`"), (v_picture.clone()).f_width.clone(), "render.tes:384:131 in function `render__draw_sky`");
+    for v_y in t_iter(t_range(v_from.clone(), t_add(v_to.clone(), 1i64, "render.tes:385:25 in function `render__draw_sky`"), "render.tes:385:10 in function `render__draw_sky`")) {
+        t_tick("render.tes:385:30 in function `render__draw_sky`");
+        let v_row: i64 = f_std__math__min(t_div(t_mul(v_y.clone(), v_h.clone(), "render.tes:386:22 in function `render__draw_sky`"), t_add(t_div(f_geometry__screen_height(), 2i64, "render.tes:386:54 in function `render__draw_sky`"), 20i64, "render.tes:386:58 in function `render__draw_sky`"), "render.tes:386:26 in function `render__draw_sky`"), t_sub(v_h.clone(), 1i64, "render.tes:386:67 in function `render__draw_sky`"));
+        let v_texel: i64 = t_index(&v_pixels.clone(), t_add(t_mul(v_u.clone(), v_h.clone(), "render.tes:387:22 in function `render__draw_sky`"), v_row.clone(), "render.tes:387:26 in function `render__draw_sky`"), "render.tes:387:13 in function `render__draw_sky`");
         if (v_texel.clone() >= 0i64) {
-            { let t_place0: i64 = t_add(t_mul(v_y.clone(), f_geometry__screen_width(), "render.tes:361:16 in function `render__draw_sky`"), v_x.clone(), "render.tes:361:42 in function `render__draw_sky`"); let t_value = v_texel.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:361:5 in function `render__draw_sky`") = t_value; }
+            { let t_place0: i64 = t_add(t_mul(v_y.clone(), f_geometry__screen_width(), "render.tes:389:16 in function `render__draw_sky`"), v_x.clone(), "render.tes:389:42 in function `render__draw_sky`"); let t_value = v_texel.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:389:5 in function `render__draw_sky`") = t_value; }
         }
     }
-    v_c.clone()
+    v_c
 }
 
 // note: Records the distance of the wall covering rows `from` to `to` of a column, for hiding sprites behind it.
 fn f_render__mark_depth(v_canvas: Rc<T_render__Canvas>, v_x: i64, v_from: i64, v_to: i64, v_distance: i64) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:368:4 in function `render__mark_depth`");
+    t_enter("render.tes:396:4 in function `render__mark_depth`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     let v_first: i64 = f_std__math__max(v_from.clone(), 0i64);
-    let v_last: i64 = f_std__math__min(v_to.clone(), t_sub(f_geometry__screen_height(), 1i64, "render.tes:371:50 in function `render__mark_depth`"));
+    let v_last: i64 = f_std__math__min(v_to.clone(), t_sub(f_geometry__screen_height(), 1i64, "render.tes:399:50 in function `render__mark_depth`"));
     if (v_first.clone() > v_last.clone()) {
-        return v_c.clone()
+        return v_c
     };
-    let mut v_at: i64 = t_add(t_mul(v_first.clone(), f_geometry__screen_width(), "render.tes:375:16 in function `render__mark_depth`"), v_x.clone(), "render.tes:375:42 in function `render__mark_depth`");
-    for _ in t_iter(t_range(v_first.clone(), t_add(v_last.clone(), 1i64, "render.tes:376:28 in function `render__mark_depth`"), "render.tes:376:10 in function `render__mark_depth`")) {
-        t_tick("render.tes:376:33 in function `render__mark_depth`");
-        { let t_place0: i64 = v_at.clone(); let t_value = v_distance.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_depth, t_place0, "render.tes:377:5 in function `render__mark_depth`") = t_value; }
-        v_at = t_add(v_at.clone(), f_geometry__screen_width(), "render.tes:378:8 in function `render__mark_depth`");
+    let mut v_at: i64 = t_add(t_mul(v_first.clone(), f_geometry__screen_width(), "render.tes:403:16 in function `render__mark_depth`"), v_x.clone(), "render.tes:403:42 in function `render__mark_depth`");
+    for _ in t_iter(t_range(v_first.clone(), t_add(v_last.clone(), 1i64, "render.tes:404:28 in function `render__mark_depth`"), "render.tes:404:10 in function `render__mark_depth`")) {
+        t_tick("render.tes:404:33 in function `render__mark_depth`");
+        { let t_place0: i64 = v_at.clone(); let t_value = v_distance.clone(); *t_slot(&mut Rc::make_mut(&mut v_c).f_depth, t_place0, "render.tes:405:5 in function `render__mark_depth`") = t_value; }
+        v_at = t_add(v_at.clone(), f_geometry__screen_width(), "render.tes:406:8 in function `render__mark_depth`");
     }
-    v_c.clone()
+    v_c
 }
 
 fn f_render__projected_depth(v_p: Rc<T_render__Projected>) -> i64 {
-    t_enter("render.tes:383:4 in function `render__projected_depth`");
-    t_neg((v_p.clone()).f_depth.clone(), "render.tes:383:43 in function `render__projected_depth`")
+    t_enter("render.tes:411:4 in function `render__projected_depth`");
+    t_neg((v_p).f_depth.clone(), "render.tes:411:43 in function `render__projected_depth`")
 }
 
 // note: Which of the 8 rotations of a sprite faces the viewer: rotation 1 shows the front. The direction from the thing to the viewer is compared with the 8 directions the rotations stand for; integer arithmetic only.
 fn f_render__rotation(v_trig: Rc<T_geometry__Trig>, v_thing_angle: i64, v_to_viewer_x: i64, v_to_viewer_y: i64) -> i64 {
-    t_enter("render.tes:386:4 in function `render__rotation`");
+    t_enter("render.tes:414:4 in function `render__rotation`");
     let mut v_best: i64 = 0i64;
     let mut v_best_dot: i64 = 0i64;
-    for v_k in t_iter(t_range(0i64, 8i64, "render.tes:389:10 in function `render__rotation`")) {
-        t_tick("render.tes:389:22 in function `render__rotation`");
-        let v_a: i64 = f_geometry__wrap_angle(t_add(v_thing_angle.clone(), t_div(t_mul(v_k.clone(), f_geometry__fine_angles(), "render.tes:390:45 in function `render__rotation`"), 8i64, "render.tes:390:70 in function `render__rotation`"), "render.tes:390:41 in function `render__rotation`"));
-        let v_dot: i64 = t_add(t_mul(t_shift_right(v_to_viewer_x.clone(), 8i64, "render.tes:391:11 in function `render__rotation`"), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), v_a.clone(), "render.tes:391:53 in function `render__rotation`"), 8i64, "render.tes:391:41 in function `render__rotation`"), "render.tes:391:39 in function `render__rotation`"), t_mul(t_shift_right(v_to_viewer_y.clone(), 8i64, "render.tes:391:74 in function `render__rotation`"), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), v_a.clone(), "render.tes:391:116 in function `render__rotation`"), 8i64, "render.tes:391:104 in function `render__rotation`"), "render.tes:391:102 in function `render__rotation`"), "render.tes:391:72 in function `render__rotation`");
+    for v_k in t_iter(t_range(0i64, 8i64, "render.tes:417:10 in function `render__rotation`")) {
+        t_tick("render.tes:417:22 in function `render__rotation`");
+        let v_a: i64 = f_geometry__wrap_angle(t_add(v_thing_angle.clone(), t_div(t_mul(v_k.clone(), f_geometry__fine_angles(), "render.tes:418:45 in function `render__rotation`"), 8i64, "render.tes:418:70 in function `render__rotation`"), "render.tes:418:41 in function `render__rotation`"));
+        let v_dot: i64 = t_add(t_mul(t_shift_right(v_to_viewer_x.clone(), 8i64, "render.tes:419:11 in function `render__rotation`"), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), v_a.clone(), "render.tes:419:53 in function `render__rotation`"), 8i64, "render.tes:419:41 in function `render__rotation`"), "render.tes:419:39 in function `render__rotation`"), t_mul(t_shift_right(v_to_viewer_y.clone(), 8i64, "render.tes:419:74 in function `render__rotation`"), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), v_a.clone(), "render.tes:419:116 in function `render__rotation`"), 8i64, "render.tes:419:104 in function `render__rotation`"), "render.tes:419:102 in function `render__rotation`"), "render.tes:419:72 in function `render__rotation`");
         if ((v_k.clone() == 0i64) || (v_dot.clone() > v_best_dot.clone())) {
             v_best = v_k.clone();
             v_best_dot = v_dot.clone();
         }
     }
-    t_add(v_best.clone(), 1i64, "render.tes:397:6 in function `render__rotation`")
+    t_add(v_best, 1i64, "render.tes:425:6 in function `render__rotation`")
 }
 
 fn f_render__draw_sprites(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_things: Rc<Vec<Rc<T_render__SpriteDraw>>>, v_sprites: Rc<T_art__Sprites>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:400:4 in function `render__draw_sprites`");
+    t_enter("render.tes:428:4 in function `render__draw_sprites`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     let v_cam: Rc<T_geometry__Camera> = (v_view.clone()).f_camera.clone();
-    let v_ahead_x: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:403:52 in function `render__draw_sprites`"), "render.tes:403:15 in function `render__draw_sprites`");
-    let v_ahead_y: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:404:52 in function `render__draw_sprites`"), "render.tes:404:15 in function `render__draw_sprites`");
+    let v_ahead_x: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dx.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:431:52 in function `render__draw_sprites`"), "render.tes:431:15 in function `render__draw_sprites`");
+    let v_ahead_y: i64 = t_index(&((v_view.clone()).f_rays.clone()).f_dy.clone(), t_div(f_geometry__screen_width(), 2i64, "render.tes:432:52 in function `render__draw_sprites`"), "render.tes:432:15 in function `render__draw_sprites`");
     let mut v_projected: Rc<Vec<Rc<T_render__Projected>>> = Rc::new(Vec::<Rc<T_render__Projected>>::new());
     for v_t in t_iter(v_things.clone()) {
-        t_tick("render.tes:406:17 in function `render__draw_sprites`");
-        let v_dx: i64 = t_sub((v_t.clone()).f_x.clone(), (v_cam.clone()).f_x.clone(), "render.tes:407:14 in function `render__draw_sprites`");
-        let v_dy: i64 = t_sub((v_t.clone()).f_y.clone(), (v_cam.clone()).f_y.clone(), "render.tes:408:14 in function `render__draw_sprites`");
-        let v_depth: i64 = t_add(f_std__fixed__mul(v_dx.clone(), v_ahead_x.clone()), f_std__fixed__mul(v_dy.clone(), v_ahead_y.clone()), "render.tes:409:36 in function `render__draw_sprites`");
+        t_tick("render.tes:434:17 in function `render__draw_sprites`");
+        let v_dx: i64 = t_sub((v_t.clone()).f_x.clone(), (v_cam.clone()).f_x.clone(), "render.tes:435:14 in function `render__draw_sprites`");
+        let v_dy: i64 = t_sub((v_t.clone()).f_y.clone(), (v_cam.clone()).f_y.clone(), "render.tes:436:14 in function `render__draw_sprites`");
+        let v_depth: i64 = t_add(f_std__fixed__mul(v_dx.clone(), v_ahead_x.clone()), f_std__fixed__mul(v_dy.clone(), v_ahead_y.clone()), "render.tes:437:36 in function `render__draw_sprites`");
         if ((v_depth.clone() > f_std__fixed__from_int(4i64)) && (v_depth.clone() < f_std__fixed__from_int(8192i64))) {
-            let v_side: i64 = t_sub(f_std__fixed__mul(v_dx.clone(), v_ahead_y.clone()), f_std__fixed__mul(v_dy.clone(), v_ahead_x.clone()), "render.tes:411:35 in function `render__draw_sprites`");
-            let v_center: i64 = t_add(t_div(f_geometry__screen_width(), 2i64, "render.tes:412:38 in function `render__draw_sprites`"), t_div(t_mul(v_side.clone(), f_geometry__focal(), "render.tes:412:49 in function `render__draw_sprites`"), v_depth.clone(), "render.tes:412:68 in function `render__draw_sprites`"), "render.tes:412:42 in function `render__draw_sprites`");
-            if ((v_center.clone() > (-200i64)) && (v_center.clone() < t_add(f_geometry__screen_width(), 200i64, "render.tes:413:55 in function `render__draw_sprites`"))) {
-                let v_rotated: Option<i64> = t_map_get(&(v_sprites.clone()).f_frames.clone(), &t_concat(t_concat((v_t.clone()).f_sprite.clone(), (v_t.clone()).f_frame.clone()), t_int_to_text(f_render__rotation(v_trig.clone(), (v_t.clone()).f_angle.clone(), t_neg(v_dx.clone(), "render.tes:414:88 in function `render__draw_sprites`"), t_neg(v_dy.clone(), "render.tes:414:93 in function `render__draw_sprites`")))));
+            let v_side: i64 = t_sub(f_std__fixed__mul(v_dx.clone(), v_ahead_y.clone()), f_std__fixed__mul(v_dy.clone(), v_ahead_x.clone()), "render.tes:439:35 in function `render__draw_sprites`");
+            let v_center: i64 = t_add(t_div(f_geometry__screen_width(), 2i64, "render.tes:440:38 in function `render__draw_sprites`"), t_div(t_mul(v_side.clone(), f_geometry__focal(), "render.tes:440:49 in function `render__draw_sprites`"), v_depth.clone(), "render.tes:440:68 in function `render__draw_sprites`"), "render.tes:440:42 in function `render__draw_sprites`");
+            if ((v_center.clone() > (-200i64)) && (v_center.clone() < t_add(f_geometry__screen_width(), 200i64, "render.tes:441:55 in function `render__draw_sprites`"))) {
+                let v_rotated: Option<i64> = t_map_get(&(v_sprites.clone()).f_frames.clone(), &t_concat(t_concat((v_t.clone()).f_sprite.clone(), (v_t.clone()).f_frame.clone()), t_int_to_text(f_render__rotation(v_trig.clone(), (v_t.clone()).f_angle.clone(), t_neg(v_dx.clone(), "render.tes:442:88 in function `render__draw_sprites`"), t_neg(v_dy.clone(), "render.tes:442:93 in function `render__draw_sprites`")))));
                 let v_entry: Option<i64> = match &(v_rotated.clone()) {
                     Some(t1) => { let v_e = t1.clone(); Some(v_e.clone()) }
                     None => { t_map_get(&(v_sprites.clone()).f_frames.clone(), &t_concat(t_concat((v_t.clone()).f_sprite.clone(), (v_t.clone()).f_frame.clone()), t_text("0"))) }
                 };
                 match &(v_entry.clone()) {
                     Some(t2) => { let v_e = t2.clone(); {
-                        v_projected = t_concat_lists(std::mem::take(&mut v_projected), Rc::new(vec![Rc::new(T_render__Projected { f_depth: v_depth.clone(), f_center: v_center.clone(), f_z: (v_t.clone()).f_z.clone(), f_picture: t_div(v_e.clone(), 2i64, "render.tes:421:80 in function `render__draw_sprites`"), f_flipped: (t_rem(v_e.clone(), 2i64, "render.tes:421:96 in function `render__draw_sprites`") == 1i64), f_light: (v_t.clone()).f_light.clone() })]));
+                        v_projected = t_concat_lists(std::mem::take(&mut v_projected), Rc::new(vec![Rc::new(T_render__Projected { f_depth: v_depth.clone(), f_center: v_center.clone(), f_z: (v_t.clone()).f_z.clone(), f_picture: t_div(v_e.clone(), 2i64, "render.tes:449:80 in function `render__draw_sprites`"), f_flipped: (t_rem(v_e.clone(), 2i64, "render.tes:449:96 in function `render__draw_sprites`") == 1i64), f_light: (v_t.clone()).f_light.clone() })]));
                     } }
                     None => { {
                     } }
@@ -5121,143 +5382,143 @@ fn f_render__draw_sprites(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Can
         }
     }
     for v_p in t_iter(t_sort_by(v_projected.clone(), (f_render__projected_depth as fn(Rc<T_render__Projected>) -> i64))) {
-        t_tick("render.tes:428:46 in function `render__draw_sprites`");
-        v_c = f_render__draw_sprite(v_view.clone(), v_c, t_index(&(v_sprites.clone()).f_pictures.clone(), (v_p.clone()).f_picture.clone(), "render.tes:429:30 in function `render__draw_sprites`"), v_p.clone());
+        t_tick("render.tes:456:46 in function `render__draw_sprites`");
+        v_c = f_render__draw_sprite(v_view.clone(), v_c, t_index(&(v_sprites.clone()).f_pictures.clone(), (v_p.clone()).f_picture.clone(), "render.tes:457:30 in function `render__draw_sprites`"), v_p.clone());
     }
-    v_c.clone()
+    v_c
 }
 
 fn f_render__draw_sprite(v_view: Rc<T_render__View>, v_canvas: Rc<T_render__Canvas>, v_picture: Rc<T_art__Picture>, v_p: Rc<T_render__Projected>) -> Rc<T_render__Canvas> {
-    t_enter("render.tes:434:4 in function `render__draw_sprite`");
+    t_enter("render.tes:462:4 in function `render__draw_sprite`");
     let mut v_c: Rc<T_render__Canvas> = v_canvas;
     let v_width: i64 = f_geometry__screen_width();
     let v_height: i64 = f_geometry__screen_height();
-    let v_per_unit: i64 = t_div(t_mul(f_geometry__focal(), t_shift_left(1i64, 32i64, "render.tes:439:35 in function `render__draw_sprite`"), "render.tes:439:33 in function `render__draw_sprite`"), (v_p.clone()).f_depth.clone(), "render.tes:439:53 in function `render__draw_sprite`");
+    let v_per_unit: i64 = t_div(t_mul(f_geometry__focal(), t_shift_left(1i64, 32i64, "render.tes:467:35 in function `render__draw_sprite`"), "render.tes:467:33 in function `render__draw_sprite`"), (v_p.clone()).f_depth.clone(), "render.tes:467:53 in function `render__draw_sprite`");
     if (v_per_unit.clone() <= 0i64) {
-        return v_c.clone()
+        return v_c
     };
-    let v_per_pixel: i64 = t_div(t_shift_left(1i64, 32i64, "render.tes:443:17 in function `render__draw_sprite`"), v_per_unit.clone(), "render.tes:443:35 in function `render__draw_sprite`");
-    let v_left: i64 = t_sub((v_p.clone()).f_center.clone(), t_shift_right(t_mul((v_picture.clone()).f_left.clone(), v_per_unit.clone(), "render.tes:444:48 in function `render__draw_sprite`"), 16i64, "render.tes:444:23 in function `render__draw_sprite`"), "render.tes:444:21 in function `render__draw_sprite`");
-    let v_right: i64 = t_add(v_left.clone(), t_shift_right(t_mul((v_picture.clone()).f_width.clone(), v_per_unit.clone(), "render.tes:445:46 in function `render__draw_sprite`"), 16i64, "render.tes:445:20 in function `render__draw_sprite`"), "render.tes:445:18 in function `render__draw_sprite`");
-    let v_top_z: i64 = t_add((v_p.clone()).f_z.clone(), f_std__fixed__from_int((v_picture.clone()).f_top.clone()), "render.tes:446:17 in function `render__draw_sprite`");
-    let v_top: i64 = t_sub(t_div(v_height.clone(), 2i64, "render.tes:447:18 in function `render__draw_sprite`"), t_div(t_mul(t_sub(v_top_z.clone(), ((v_view.clone()).f_camera.clone()).f_z.clone(), "render.tes:447:31 in function `render__draw_sprite`"), f_geometry__focal(), "render.tes:447:48 in function `render__draw_sprite`"), (v_p.clone()).f_depth.clone(), "render.tes:447:67 in function `render__draw_sprite`"), "render.tes:447:22 in function `render__draw_sprite`");
-    let v_bottom: i64 = t_add(v_top.clone(), t_shift_right(t_mul((v_picture.clone()).f_height.clone(), v_per_unit.clone(), "render.tes:448:47 in function `render__draw_sprite`"), 16i64, "render.tes:448:20 in function `render__draw_sprite`"), "render.tes:448:18 in function `render__draw_sprite`");
+    let v_per_pixel: i64 = t_div(t_shift_left(1i64, 32i64, "render.tes:471:17 in function `render__draw_sprite`"), v_per_unit.clone(), "render.tes:471:35 in function `render__draw_sprite`");
+    let v_left: i64 = t_sub((v_p.clone()).f_center.clone(), t_shift_right(t_mul((v_picture.clone()).f_left.clone(), v_per_unit.clone(), "render.tes:472:48 in function `render__draw_sprite`"), 16i64, "render.tes:472:23 in function `render__draw_sprite`"), "render.tes:472:21 in function `render__draw_sprite`");
+    let v_right: i64 = t_add(v_left.clone(), t_shift_right(t_mul((v_picture.clone()).f_width.clone(), v_per_unit.clone(), "render.tes:473:46 in function `render__draw_sprite`"), 16i64, "render.tes:473:20 in function `render__draw_sprite`"), "render.tes:473:18 in function `render__draw_sprite`");
+    let v_top_z: i64 = t_add((v_p.clone()).f_z.clone(), f_std__fixed__from_int((v_picture.clone()).f_top.clone()), "render.tes:474:17 in function `render__draw_sprite`");
+    let v_top: i64 = t_sub(t_div(v_height.clone(), 2i64, "render.tes:475:18 in function `render__draw_sprite`"), t_div(t_mul(t_sub(v_top_z.clone(), ((v_view.clone()).f_camera.clone()).f_z.clone(), "render.tes:475:31 in function `render__draw_sprite`"), f_geometry__focal(), "render.tes:475:48 in function `render__draw_sprite`"), (v_p.clone()).f_depth.clone(), "render.tes:475:67 in function `render__draw_sprite`"), "render.tes:475:22 in function `render__draw_sprite`");
+    let v_bottom: i64 = t_add(v_top.clone(), t_shift_right(t_mul((v_picture.clone()).f_height.clone(), v_per_unit.clone(), "render.tes:476:47 in function `render__draw_sprite`"), 16i64, "render.tes:476:20 in function `render__draw_sprite`"), "render.tes:476:18 in function `render__draw_sprite`");
     let v_colormap: Rc<Vec<u8>> = (((v_view.clone()).f_scene.clone()).f_art.clone()).f_colormap.clone();
-    let v_shade: i64 = t_mul(f_std__math__clamp(t_add(t_div(t_sub(255i64, (v_p.clone()).f_light.clone(), "render.tes:450:29 in function `render__draw_sprite`"), 8i64, "render.tes:450:40 in function `render__draw_sprite`"), t_div(f_std__fixed__floor_int((v_p.clone()).f_depth.clone()), 96i64, "render.tes:450:71 in function `render__draw_sprite`"), "render.tes:450:44 in function `render__draw_sprite`"), 0i64, 31i64), 256i64, "render.tes:450:84 in function `render__draw_sprite`");
+    let v_shade: i64 = t_mul(f_std__math__clamp(t_add(t_div(t_sub(255i64, (v_p.clone()).f_light.clone(), "render.tes:478:29 in function `render__draw_sprite`"), 8i64, "render.tes:478:40 in function `render__draw_sprite`"), t_div(f_std__fixed__floor_int((v_p.clone()).f_depth.clone()), 96i64, "render.tes:478:71 in function `render__draw_sprite`"), "render.tes:478:44 in function `render__draw_sprite`"), 0i64, 31i64), 256i64, "render.tes:478:84 in function `render__draw_sprite`");
     let v_pixels: Rc<Vec<i64>> = (v_picture.clone()).f_pixels.clone();
     let v_first_x: i64 = f_std__math__max(v_left.clone(), 0i64);
     let v_last_x: i64 = f_std__math__min(v_right.clone(), v_width.clone());
     let v_first_y: i64 = f_std__math__max(v_top.clone(), 0i64);
     let v_last_y: i64 = f_std__math__min(v_bottom.clone(), v_height.clone());
     if ((v_first_x.clone() >= v_last_x.clone()) || (v_first_y.clone() >= v_last_y.clone())) {
-        return v_c.clone()
+        return v_c
     };
-    for v_x in t_iter(t_range(v_first_x.clone(), v_last_x.clone(), "render.tes:460:10 in function `render__draw_sprite`")) {
-        t_tick("render.tes:460:33 in function `render__draw_sprite`");
-        let mut v_u: i64 = t_shift_right(t_add(t_mul(t_sub(v_x.clone(), v_left.clone(), "render.tes:461:24 in function `render__draw_sprite`"), v_per_pixel.clone(), "render.tes:461:32 in function `render__draw_sprite`"), t_div(v_per_pixel.clone(), 2i64, "render.tes:461:56 in function `render__draw_sprite`"), "render.tes:461:44 in function `render__draw_sprite`"), 16i64, "render.tes:461:9 in function `render__draw_sprite`");
+    for v_x in t_iter(t_range(v_first_x.clone(), v_last_x.clone(), "render.tes:488:10 in function `render__draw_sprite`")) {
+        t_tick("render.tes:488:33 in function `render__draw_sprite`");
+        let mut v_u: i64 = t_shift_right(t_add(t_mul(t_sub(v_x.clone(), v_left.clone(), "render.tes:489:24 in function `render__draw_sprite`"), v_per_pixel.clone(), "render.tes:489:32 in function `render__draw_sprite`"), t_div(v_per_pixel.clone(), 2i64, "render.tes:489:56 in function `render__draw_sprite`"), "render.tes:489:44 in function `render__draw_sprite`"), 16i64, "render.tes:489:9 in function `render__draw_sprite`");
         if (v_u.clone() >= (v_picture.clone()).f_width.clone()) {
-            v_u = t_sub((v_picture.clone()).f_width.clone(), 1i64, "render.tes:463:23 in function `render__draw_sprite`");
+            v_u = t_sub((v_picture.clone()).f_width.clone(), 1i64, "render.tes:491:23 in function `render__draw_sprite`");
         };
         if (v_p.clone()).f_flipped.clone() {
-            v_u = t_sub(t_sub((v_picture.clone()).f_width.clone(), 1i64, "render.tes:466:23 in function `render__draw_sprite`"), v_u.clone(), "render.tes:466:27 in function `render__draw_sprite`");
+            v_u = t_sub(t_sub((v_picture.clone()).f_width.clone(), 1i64, "render.tes:494:23 in function `render__draw_sprite`"), v_u.clone(), "render.tes:494:27 in function `render__draw_sprite`");
         };
-        let v_column: i64 = t_mul(v_u.clone(), (v_picture.clone()).f_height.clone(), "render.tes:468:16 in function `render__draw_sprite`");
-        for v_y in t_iter(t_range(v_first_y.clone(), v_last_y.clone(), "render.tes:469:10 in function `render__draw_sprite`")) {
-            t_tick("render.tes:469:33 in function `render__draw_sprite`");
-            let v_at: i64 = t_add(t_mul(v_y.clone(), v_width.clone(), "render.tes:470:12 in function `render__draw_sprite`"), v_x.clone(), "render.tes:470:20 in function `render__draw_sprite`");
-            if ((v_p.clone()).f_depth.clone() < t_index(&(v_c.clone()).f_depth.clone(), v_at.clone(), "render.tes:471:14 in function `render__draw_sprite`")) {
-                let v_v: i64 = f_std__math__min(t_shift_right(t_add(t_mul(t_sub(v_y.clone(), v_top.clone(), "render.tes:472:33 in function `render__draw_sprite`"), v_per_pixel.clone(), "render.tes:472:40 in function `render__draw_sprite`"), t_div(v_per_pixel.clone(), 2i64, "render.tes:472:64 in function `render__draw_sprite`"), "render.tes:472:52 in function `render__draw_sprite`"), 16i64, "render.tes:472:18 in function `render__draw_sprite`"), t_sub((v_picture.clone()).f_height.clone(), 1i64, "render.tes:472:89 in function `render__draw_sprite`"));
-                let v_texel: i64 = t_index(&v_pixels.clone(), t_add(v_column.clone(), v_v.clone(), "render.tes:473:27 in function `render__draw_sprite`"), "render.tes:473:13 in function `render__draw_sprite`");
+        let v_column: i64 = t_mul(v_u.clone(), (v_picture.clone()).f_height.clone(), "render.tes:496:16 in function `render__draw_sprite`");
+        for v_y in t_iter(t_range(v_first_y.clone(), v_last_y.clone(), "render.tes:497:10 in function `render__draw_sprite`")) {
+            t_tick("render.tes:497:33 in function `render__draw_sprite`");
+            let v_at: i64 = t_add(t_mul(v_y.clone(), v_width.clone(), "render.tes:498:12 in function `render__draw_sprite`"), v_x.clone(), "render.tes:498:20 in function `render__draw_sprite`");
+            if ((v_p.clone()).f_depth.clone() < t_index(&(v_c.clone()).f_depth.clone(), v_at.clone(), "render.tes:499:14 in function `render__draw_sprite`")) {
+                let v_v: i64 = f_std__math__min(t_shift_right(t_add(t_mul(t_sub(v_y.clone(), v_top.clone(), "render.tes:500:33 in function `render__draw_sprite`"), v_per_pixel.clone(), "render.tes:500:40 in function `render__draw_sprite`"), t_div(v_per_pixel.clone(), 2i64, "render.tes:500:64 in function `render__draw_sprite`"), "render.tes:500:52 in function `render__draw_sprite`"), 16i64, "render.tes:500:18 in function `render__draw_sprite`"), t_sub((v_picture.clone()).f_height.clone(), 1i64, "render.tes:500:89 in function `render__draw_sprite`"));
+                let v_texel: i64 = t_index(&v_pixels.clone(), t_add(v_column.clone(), v_v.clone(), "render.tes:501:27 in function `render__draw_sprite`"), "render.tes:501:13 in function `render__draw_sprite`");
                 if (v_texel.clone() >= 0i64) {
-                    { let t_place0: i64 = v_at.clone(); let t_value = t_bytes_index(&v_colormap.clone(), t_add(v_shade.clone(), v_texel.clone(), "render.tes:475:35 in function `render__draw_sprite`"), "render.tes:475:20 in function `render__draw_sprite`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:475:5 in function `render__draw_sprite`") = t_value; }
+                    { let t_place0: i64 = v_at.clone(); let t_value = t_bytes_index(&v_colormap.clone(), t_add(v_shade.clone(), v_texel.clone(), "render.tes:503:35 in function `render__draw_sprite`"), "render.tes:503:20 in function `render__draw_sprite`"); *t_slot(&mut Rc::make_mut(&mut v_c).f_pixels, t_place0, "render.tes:503:5 in function `render__draw_sprite`") = t_value; }
                 }
             }
         }
     }
-    v_c.clone()
+    v_c
 }
 
 // note: Decodes a picture lump. Posts that run past the bottom are cut off.
 fn f_art__decode_picture(v_name: Rc<String>, v_data: Rc<Vec<u8>>) -> Rc<T_art__Picture> {
-    t_enter("art.tes:30:8 in function `art__decode_picture`");
+    t_enter("art.tes:33:8 in function `art__decode_picture`");
     let v_width: i64 = f_std__bytes__read_u16_le(v_data.clone(), 0i64);
     let v_height: i64 = f_std__bytes__read_u16_le(v_data.clone(), 2i64);
-    let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![(-1i64)]), t_mul(v_width.clone(), v_height.clone(), "art.tes:33:33 in function `art__decode_picture`"), "art.tes:33:14 in function `art__decode_picture`");
-    for v_x in t_iter(t_range(0i64, v_width.clone(), "art.tes:34:10 in function `art__decode_picture`")) {
-        t_tick("art.tes:34:26 in function `art__decode_picture`");
-        let mut v_at: i64 = f_std__bytes__read_u32_le(v_data.clone(), t_add(8i64, t_mul(v_x.clone(), 4i64, "art.tes:35:40 in function `art__decode_picture`"), "art.tes:35:36 in function `art__decode_picture`"));
-        while ((v_at.clone() < t_list_length(&v_data.clone())) && (t_bytes_index(&v_data.clone(), v_at.clone(), "art.tes:36:29 in function `art__decode_picture`") != 255i64)) {
-            t_tick("art.tes:36:45 in function `art__decode_picture`");
-            let v_first: i64 = t_bytes_index(&v_data.clone(), v_at.clone(), "art.tes:37:13 in function `art__decode_picture`");
-            let v_count: i64 = t_bytes_index(&v_data.clone(), t_add(v_at.clone(), 1i64, "art.tes:38:21 in function `art__decode_picture`"), "art.tes:38:13 in function `art__decode_picture`");
-            for v_i in t_iter(t_range(0i64, v_count.clone(), "art.tes:39:10 in function `art__decode_picture`")) {
-                t_tick("art.tes:39:26 in function `art__decode_picture`");
-                let v_y: i64 = t_add(v_first.clone(), v_i.clone(), "art.tes:40:15 in function `art__decode_picture`");
+    let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![(-1i64)]), t_mul(v_width.clone(), v_height.clone(), "art.tes:36:33 in function `art__decode_picture`"), "art.tes:36:14 in function `art__decode_picture`");
+    for v_x in t_iter(t_range(0i64, v_width.clone(), "art.tes:37:10 in function `art__decode_picture`")) {
+        t_tick("art.tes:37:26 in function `art__decode_picture`");
+        let mut v_at: i64 = f_std__bytes__read_u32_le(v_data.clone(), t_add(8i64, t_mul(v_x.clone(), 4i64, "art.tes:38:40 in function `art__decode_picture`"), "art.tes:38:36 in function `art__decode_picture`"));
+        while ((v_at.clone() < t_list_length(&v_data.clone())) && (t_bytes_index(&v_data.clone(), v_at.clone(), "art.tes:39:29 in function `art__decode_picture`") != 255i64)) {
+            t_tick("art.tes:39:45 in function `art__decode_picture`");
+            let v_first: i64 = t_bytes_index(&v_data.clone(), v_at.clone(), "art.tes:40:13 in function `art__decode_picture`");
+            let v_count: i64 = t_bytes_index(&v_data.clone(), t_add(v_at.clone(), 1i64, "art.tes:41:21 in function `art__decode_picture`"), "art.tes:41:13 in function `art__decode_picture`");
+            for v_i in t_iter(t_range(0i64, v_count.clone(), "art.tes:42:10 in function `art__decode_picture`")) {
+                t_tick("art.tes:42:26 in function `art__decode_picture`");
+                let v_y: i64 = t_add(v_first.clone(), v_i.clone(), "art.tes:43:15 in function `art__decode_picture`");
                 if (v_y.clone() < v_height.clone()) {
-                    { let t_place0: i64 = t_add(t_mul(v_x.clone(), v_height.clone(), "art.tes:42:14 in function `art__decode_picture`"), v_y.clone(), "art.tes:42:23 in function `art__decode_picture`"); let t_value = t_bytes_index(&v_data.clone(), t_add(t_add(v_at.clone(), 3i64, "art.tes:42:38 in function `art__decode_picture`"), v_i.clone(), "art.tes:42:42 in function `art__decode_picture`"), "art.tes:42:30 in function `art__decode_picture`"); *t_slot(&mut v_pixels, t_place0, "art.tes:42:5 in function `art__decode_picture`") = t_value; }
+                    { let t_place0: i64 = t_add(t_mul(v_x.clone(), v_height.clone(), "art.tes:45:14 in function `art__decode_picture`"), v_y.clone(), "art.tes:45:23 in function `art__decode_picture`"); let t_value = t_bytes_index(&v_data.clone(), t_add(t_add(v_at.clone(), 3i64, "art.tes:45:38 in function `art__decode_picture`"), v_i.clone(), "art.tes:45:42 in function `art__decode_picture`"), "art.tes:45:30 in function `art__decode_picture`"); *t_slot(&mut v_pixels, t_place0, "art.tes:45:5 in function `art__decode_picture`") = t_value; }
                 }
             }
-            v_at = t_add(v_at.clone(), t_add(v_count.clone(), 4i64, "art.tes:45:17 in function `art__decode_picture`"), "art.tes:45:8 in function `art__decode_picture`");
+            v_at = t_add(v_at.clone(), t_add(v_count.clone(), 4i64, "art.tes:48:17 in function `art__decode_picture`"), "art.tes:48:8 in function `art__decode_picture`");
         }
     }
-    Rc::new(T_art__Picture { f_name: v_name.clone(), f_width: v_width.clone(), f_height: v_height.clone(), f_left: f_std__bytes__read_i16_le(v_data.clone(), 4i64), f_top: f_std__bytes__read_i16_le(v_data.clone(), 6i64), f_pixels: v_pixels.clone() })
+    Rc::new(T_art__Picture { f_name: v_name, f_width: v_width, f_height: v_height, f_left: f_std__bytes__read_i16_le(v_data.clone(), 4i64), f_top: f_std__bytes__read_i16_le(v_data.clone(), 6i64), f_pixels: v_pixels })
 }
 
 // note: Copies a picture onto a texture at (origin_x, origin_y); transparent pixels are skipped. Changes `pixels` in place when called as `set pixels = place(pixels, ...)`.
 fn f_art__place(v_pixels: Rc<Vec<i64>>, v_width: i64, v_height: i64, v_patch: Rc<T_art__Picture>, v_origin_x: i64, v_origin_y: i64) -> Rc<Vec<i64>> {
-    t_enter("art.tes:52:4 in function `art__place`");
+    t_enter("art.tes:55:4 in function `art__place`");
     let mut v_out: Rc<Vec<i64>> = v_pixels;
-    for v_px in t_iter(t_range(0i64, (v_patch.clone()).f_width.clone(), "art.tes:54:11 in function `art__place`")) {
-        t_tick("art.tes:54:33 in function `art__place`");
-        let v_x: i64 = t_add(v_origin_x.clone(), v_px.clone(), "art.tes:55:18 in function `art__place`");
+    for v_px in t_iter(t_range(0i64, (v_patch.clone()).f_width.clone(), "art.tes:57:11 in function `art__place`")) {
+        t_tick("art.tes:57:33 in function `art__place`");
+        let v_x: i64 = t_add(v_origin_x.clone(), v_px.clone(), "art.tes:58:18 in function `art__place`");
         if ((v_x.clone() >= 0i64) && (v_x.clone() < v_width.clone())) {
-            for v_py in t_iter(t_range(0i64, (v_patch.clone()).f_height.clone(), "art.tes:57:11 in function `art__place`")) {
-                t_tick("art.tes:57:34 in function `art__place`");
-                let v_y: i64 = t_add(v_origin_y.clone(), v_py.clone(), "art.tes:58:18 in function `art__place`");
-                let v_value: i64 = t_index(&(v_patch.clone()).f_pixels.clone(), t_add(t_mul(v_px.clone(), (v_patch.clone()).f_height.clone(), "art.tes:59:29 in function `art__place`"), v_py.clone(), "art.tes:59:44 in function `art__place`"), "art.tes:59:13 in function `art__place`");
+            for v_py in t_iter(t_range(0i64, (v_patch.clone()).f_height.clone(), "art.tes:60:11 in function `art__place`")) {
+                t_tick("art.tes:60:34 in function `art__place`");
+                let v_y: i64 = t_add(v_origin_y.clone(), v_py.clone(), "art.tes:61:18 in function `art__place`");
+                let v_value: i64 = t_index(&(v_patch.clone()).f_pixels.clone(), t_add(t_mul(v_px.clone(), (v_patch.clone()).f_height.clone(), "art.tes:62:29 in function `art__place`"), v_py.clone(), "art.tes:62:44 in function `art__place`"), "art.tes:62:13 in function `art__place`");
                 if (((v_value.clone() >= 0i64) && (v_y.clone() >= 0i64)) && (v_y.clone() < v_height.clone())) {
-                    { let t_place0: i64 = t_add(t_mul(v_x.clone(), v_height.clone(), "art.tes:61:11 in function `art__place`"), v_y.clone(), "art.tes:61:20 in function `art__place`"); let t_value = v_value.clone(); *t_slot(&mut v_out, t_place0, "art.tes:61:5 in function `art__place`") = t_value; }
+                    { let t_place0: i64 = t_add(t_mul(v_x.clone(), v_height.clone(), "art.tes:64:11 in function `art__place`"), v_y.clone(), "art.tes:64:20 in function `art__place`"); let t_value = v_value.clone(); *t_slot(&mut v_out, t_place0, "art.tes:64:5 in function `art__place`") = t_value; }
                 }
             }
         }
     }
-    v_out.clone()
+    v_out
 }
 
 fn f_art__patch_names(v_w: Rc<T_wad__Wad>) -> Rc<Vec<Rc<String>>> {
-    t_enter("art.tes:69:4 in function `art__patch_names`");
+    t_enter("art.tes:72:4 in function `art__patch_names`");
     let v_data: Rc<Vec<u8>> = match f_wad__lump(v_w.clone(), t_text("PNAMES")) { Some(t_value) => t_value, None => { return Rc::new(Vec::<Rc<String>>::new()) } };
     let mut v_names: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
-    for v_index in t_iter(t_range(0i64, f_std__bytes__read_i32_le(v_data.clone(), 0i64), "art.tes:72:14 in function `art__patch_names`")) {
-        t_tick("art.tes:72:51 in function `art__patch_names`");
-        v_names = t_concat_lists(std::mem::take(&mut v_names), Rc::new(vec![t_to_upper(&f_std__bytes__read_ascii(v_data.clone(), t_add(4i64, t_mul(v_index.clone(), 8i64, "art.tes:73:57 in function `art__patch_names`"), "art.tes:73:49 in function `art__patch_names`"), 8i64))]));
+    for v_index in t_iter(t_range(0i64, f_std__bytes__read_i32_le(v_data.clone(), 0i64), "art.tes:75:14 in function `art__patch_names`")) {
+        t_tick("art.tes:75:51 in function `art__patch_names`");
+        v_names = t_concat_lists(std::mem::take(&mut v_names), Rc::new(vec![t_to_upper(&f_std__bytes__read_ascii(v_data.clone(), t_add(4i64, t_mul(v_index.clone(), 8i64, "art.tes:76:57 in function `art__patch_names`"), "art.tes:76:49 in function `art__patch_names`"), 8i64))]));
     }
-    v_names.clone()
+    v_names
 }
 
 // note: Composes the textures named in `wanted` (other textures are skipped to save time and memory) from TEXTURE1 and TEXTURE2.
 fn f_art__load(v_w: Rc<T_wad__Wad>, v_wanted: Rc<Vec<Rc<String>>>) -> Rc<T_art__Art> {
-    t_enter("art.tes:79:8 in function `art__load`");
+    t_enter("art.tes:82:8 in function `art__load`");
     let v_names: Rc<Vec<Rc<String>>> = f_art__patch_names(v_w.clone());
     let mut v_patches: Rc<std::collections::BTreeMap<Rc<String>, Rc<T_art__Picture>>> = t_map_new::<Rc<String>, Rc<T_art__Picture>>(vec![]);
     let mut v_textures: Rc<Vec<Rc<T_art__Picture>>> = Rc::new(Vec::<Rc<T_art__Picture>>::new());
     let mut v_texture_index: Rc<std::collections::BTreeMap<Rc<String>, i64>> = t_map_new::<Rc<String>, i64>(vec![]);
     for v_lump_name in t_iter(Rc::new(vec![t_text("TEXTURE1"), t_text("TEXTURE2")])) {
-        t_tick("art.tes:84:43 in function `art__load`");
+        t_tick("art.tes:87:43 in function `art__load`");
         match &(f_wad__lump(v_w.clone(), v_lump_name.clone())) {
             Some(t1) => { let v_data = t1.clone(); {
-                for v_index in t_iter(t_range(0i64, f_std__bytes__read_i32_le(v_data.clone(), 0i64), "art.tes:87:14 in function `art__load`")) {
-                    t_tick("art.tes:87:51 in function `art__load`");
-                    let v_at: i64 = f_std__bytes__read_i32_le(v_data.clone(), t_add(4i64, t_mul(v_index.clone(), 4i64, "art.tes:88:44 in function `art__load`"), "art.tes:88:36 in function `art__load`"));
+                for v_index in t_iter(t_range(0i64, f_std__bytes__read_i32_le(v_data.clone(), 0i64), "art.tes:90:14 in function `art__load`")) {
+                    t_tick("art.tes:90:51 in function `art__load`");
+                    let v_at: i64 = f_std__bytes__read_i32_le(v_data.clone(), t_add(4i64, t_mul(v_index.clone(), 4i64, "art.tes:91:44 in function `art__load`"), "art.tes:91:36 in function `art__load`"));
                     let v_name: Rc<String> = t_to_upper(&f_std__bytes__read_ascii(v_data.clone(), v_at.clone(), 8i64));
                     if (t_contains(&v_wanted.clone(), &v_name.clone()) && (!t_map_contains(&v_texture_index.clone(), &v_name.clone()))) {
-                        let v_width: i64 = f_std__bytes__read_i16_le(v_data.clone(), t_add(v_at.clone(), 12i64, "art.tes:91:40 in function `art__load`"));
-                        let v_height: i64 = f_std__bytes__read_i16_le(v_data.clone(), t_add(v_at.clone(), 14i64, "art.tes:92:41 in function `art__load`"));
-                        let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), v_height.clone(), "art.tes:93:32 in function `art__load`"), "art.tes:93:14 in function `art__load`");
-                        for v_p in t_iter(t_range(0i64, f_std__bytes__read_i16_le(v_data.clone(), t_add(v_at.clone(), 20i64, "art.tes:94:46 in function `art__load`")), "art.tes:94:10 in function `art__load`")) {
-                            t_tick("art.tes:94:53 in function `art__load`");
-                            let v_entry: i64 = t_add(t_add(v_at.clone(), 22i64, "art.tes:95:16 in function `art__load`"), t_mul(v_p.clone(), 10i64, "art.tes:95:25 in function `art__load`"), "art.tes:95:21 in function `art__load`");
-                            let v_patch_name: Rc<String> = t_index(&v_names.clone(), f_std__bytes__read_i16_le(v_data.clone(), t_add(v_entry.clone(), 4i64, "art.tes:96:54 in function `art__load`")), "art.tes:96:18 in function `art__load`");
+                        let v_width: i64 = f_std__bytes__read_i16_le(v_data.clone(), t_add(v_at.clone(), 12i64, "art.tes:94:40 in function `art__load`"));
+                        let v_height: i64 = f_std__bytes__read_i16_le(v_data.clone(), t_add(v_at.clone(), 14i64, "art.tes:95:41 in function `art__load`"));
+                        let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), v_height.clone(), "art.tes:96:32 in function `art__load`"), "art.tes:96:14 in function `art__load`");
+                        for v_p in t_iter(t_range(0i64, f_std__bytes__read_i16_le(v_data.clone(), t_add(v_at.clone(), 20i64, "art.tes:97:46 in function `art__load`")), "art.tes:97:10 in function `art__load`")) {
+                            t_tick("art.tes:97:53 in function `art__load`");
+                            let v_entry: i64 = t_add(t_add(v_at.clone(), 22i64, "art.tes:98:16 in function `art__load`"), t_mul(v_p.clone(), 10i64, "art.tes:98:25 in function `art__load`"), "art.tes:98:21 in function `art__load`");
+                            let v_patch_name: Rc<String> = t_index(&v_names.clone(), f_std__bytes__read_i16_le(v_data.clone(), t_add(v_entry.clone(), 4i64, "art.tes:99:54 in function `art__load`")), "art.tes:99:18 in function `art__load`");
                             if (!t_map_contains(&v_patches.clone(), &v_patch_name.clone())) {
                                 match &(f_wad__lump(v_w.clone(), v_patch_name.clone())) {
                                     Some(t2) => { let v_patch_data = t2.clone(); {
@@ -5269,7 +5530,7 @@ fn f_art__load(v_w: Rc<T_wad__Wad>, v_wanted: Rc<Vec<Rc<String>>>) -> Rc<T_art__
                             };
                             match &(t_map_get(&v_patches.clone(), &v_patch_name.clone())) {
                                 Some(t3) => { let v_patch = t3.clone(); {
-                                    v_pixels = f_art__place(std::mem::take(&mut v_pixels), v_width.clone(), v_height.clone(), v_patch.clone(), f_std__bytes__read_i16_le(v_data.clone(), v_entry.clone()), f_std__bytes__read_i16_le(v_data.clone(), t_add(v_entry.clone(), 2i64, "art.tes:107:112 in function `art__load`")));
+                                    v_pixels = f_art__place(std::mem::take(&mut v_pixels), v_width.clone(), v_height.clone(), v_patch.clone(), f_std__bytes__read_i16_le(v_data.clone(), v_entry.clone()), f_std__bytes__read_i16_le(v_data.clone(), t_add(v_entry.clone(), 2i64, "art.tes:110:112 in function `art__load`")));
                                 } }
                                 None => { {
                                 } }
@@ -5287,129 +5548,152 @@ fn f_art__load(v_w: Rc<T_wad__Wad>, v_wanted: Rc<Vec<Rc<String>>>) -> Rc<T_art__
     let mut v_flats: Rc<Vec<Rc<Vec<u8>>>> = Rc::new(Vec::<Rc<Vec<u8>>>::new());
     let mut v_flat_index: Rc<std::collections::BTreeMap<Rc<String>, i64>> = t_map_new::<Rc<String>, i64>(vec![]);
     for v_index in t_iter(f_wad__lumps_between(v_w.clone(), Rc::new(vec![t_text("F_START"), t_text("FF_START")]), Rc::new(vec![t_text("F_END"), t_text("FF_END")]))) {
-        t_tick("art.tes:122:81 in function `art__load`");
-        let v_lump: Rc<T_wad__Lump> = t_index(&(v_w.clone()).f_lumps.clone(), v_index.clone(), "art.tes:123:12 in function `art__load`");
+        t_tick("art.tes:125:81 in function `art__load`");
+        let v_lump: Rc<T_wad__Lump> = t_index(&(v_w.clone()).f_lumps.clone(), v_index.clone(), "art.tes:126:12 in function `art__load`");
         if (((v_lump.clone()).f_size.clone() == 4096i64) && (!t_map_contains(&v_flat_index.clone(), &(v_lump.clone()).f_name.clone()))) {
             v_flat_index = t_map_put(std::mem::take(&mut v_flat_index), (v_lump.clone()).f_name.clone(), t_list_length(&v_flats.clone()));
             v_flats = t_concat_lists(std::mem::take(&mut v_flats), Rc::new(vec![f_wad__lump_data(v_w.clone(), v_index.clone())]));
         }
     }
-    let v_colormap: Rc<Vec<u8>> = match f_wad__lump(v_w.clone(), t_text("COLORMAP")) { Some(t_value) => t_value, None => { return Rc::new(T_art__Art { f_textures: v_textures.clone(), f_texture_index: v_texture_index.clone(), f_flats: v_flats.clone(), f_flat_index: v_flat_index.clone(), f_colormap: t_bytes(t_repeat_list(Rc::new(vec![0i64]), t_mul(34i64, 256i64, "art.tes:129:177 in function `art__load`"), "art.tes:129:162 in function `art__load`"), "art.tes:129:156 in function `art__load`"), f_palette: t_bytes(t_repeat_list(Rc::new(vec![0i64]), 768i64, "art.tes:129:201 in function `art__load`"), "art.tes:129:195 in function `art__load`") }) } };
-    let v_palette: Rc<Vec<u8>> = match f_wad__lump(v_w.clone(), t_text("PLAYPAL")) { Some(t_value) => t_value, None => { return Rc::new(T_art__Art { f_textures: v_textures.clone(), f_texture_index: v_texture_index.clone(), f_flats: v_flats.clone(), f_flat_index: v_flat_index.clone(), f_colormap: v_colormap.clone(), f_palette: t_bytes(t_repeat_list(Rc::new(vec![0i64]), 768i64, "art.tes:130:179 in function `art__load`"), "art.tes:130:173 in function `art__load`") }) } };
-    Rc::new(T_art__Art { f_textures: v_textures.clone(), f_texture_index: v_texture_index.clone(), f_flats: v_flats.clone(), f_flat_index: v_flat_index.clone(), f_colormap: v_colormap.clone(), f_palette: v_palette.clone() })
+    let v_colormap: Rc<Vec<u8>> = match f_wad__lump(v_w.clone(), t_text("COLORMAP")) { Some(t_value) => t_value, None => { return Rc::new(T_art__Art { f_textures: v_textures, f_texture_index: v_texture_index, f_flats: v_flats, f_flat_index: v_flat_index, f_colormap: t_bytes(t_repeat_list(Rc::new(vec![0i64]), t_mul(34i64, 256i64, "art.tes:132:177 in function `art__load`"), "art.tes:132:162 in function `art__load`"), "art.tes:132:156 in function `art__load`"), f_palette: t_bytes(t_repeat_list(Rc::new(vec![0i64]), 768i64, "art.tes:132:201 in function `art__load`"), "art.tes:132:195 in function `art__load`") }) } };
+    let v_palette: Rc<Vec<u8>> = match f_wad__lump(v_w.clone(), t_text("PLAYPAL")) { Some(t_value) => t_value, None => { return Rc::new(T_art__Art { f_textures: v_textures, f_texture_index: v_texture_index, f_flats: v_flats, f_flat_index: v_flat_index, f_colormap: v_colormap, f_palette: t_bytes(t_repeat_list(Rc::new(vec![0i64]), 768i64, "art.tes:133:179 in function `art__load`"), "art.tes:133:173 in function `art__load`") }) } };
+    Rc::new(T_art__Art { f_textures: v_textures, f_texture_index: v_texture_index, f_flats: v_flats, f_flat_index: v_flat_index, f_colormap: v_colormap, f_palette: v_palette })
 }
 
 // note: Index of a texture, or -1 for `-` and unknown names.
 fn f_art__texture(v_a: Rc<T_art__Art>, v_name: Rc<String>) -> i64 {
-    t_enter("art.tes:135:8 in function `art__texture`");
-    t_value_or(t_map_get(&(v_a.clone()).f_texture_index.clone(), &v_name.clone()), (-1i64))
+    t_enter("art.tes:138:8 in function `art__texture`");
+    t_value_or(t_map_get(&(v_a).f_texture_index.clone(), &v_name), (-1i64))
 }
 
 fn f_art__flat(v_a: Rc<T_art__Art>, v_name: Rc<String>) -> i64 {
-    t_enter("art.tes:137:8 in function `art__flat`");
-    t_value_or(t_map_get(&(v_a.clone()).f_flat_index.clone(), &v_name.clone()), (-1i64))
+    t_enter("art.tes:140:8 in function `art__flat`");
+    t_value_or(t_map_get(&(v_a).f_flat_index.clone(), &v_name), (-1i64))
 }
 
 fn f_art__load_sprites(v_w: Rc<T_wad__Wad>) -> Rc<T_art__Sprites> {
-    t_enter("art.tes:145:8 in function `art__load_sprites`");
+    t_enter("art.tes:148:8 in function `art__load_sprites`");
     let mut v_pictures: Rc<Vec<Rc<T_art__Picture>>> = Rc::new(Vec::<Rc<T_art__Picture>>::new());
     let mut v_frames: Rc<std::collections::BTreeMap<Rc<String>, i64>> = t_map_new::<Rc<String>, i64>(vec![]);
     for v_index in t_iter(f_wad__lumps_between(v_w.clone(), Rc::new(vec![t_text("S_START"), t_text("SS_START")]), Rc::new(vec![t_text("S_END"), t_text("SS_END")]))) {
-        t_tick("art.tes:148:81 in function `art__load_sprites`");
-        let v_name: Rc<String> = (t_index(&(v_w.clone()).f_lumps.clone(), v_index.clone(), "art.tes:149:12 in function `art__load_sprites`")).f_name.clone();
+        t_tick("art.tes:151:81 in function `art__load_sprites`");
+        let v_name: Rc<String> = (t_index(&(v_w.clone()).f_lumps.clone(), v_index.clone(), "art.tes:152:12 in function `art__load_sprites`")).f_name.clone();
         let v_codes: Rc<Vec<i64>> = t_code_points(&v_name.clone());
         if (t_list_length(&v_codes.clone()) >= 6i64) {
             let v_picture: i64 = t_list_length(&v_pictures.clone());
             v_pictures = t_concat_lists(std::mem::take(&mut v_pictures), Rc::new(vec![f_art__decode_picture(v_name.clone(), f_wad__lump_data(v_w.clone(), v_index.clone()))]));
-            v_frames = t_map_put(std::mem::take(&mut v_frames), t_from_code_points(&t_slice(v_codes.clone(), 0i64, 6i64, "art.tes:154:43 in function `art__load_sprites`"), "art.tes:154:26 in function `art__load_sprites`"), t_mul(v_picture.clone(), 2i64, "art.tes:154:72 in function `art__load_sprites`"));
+            v_frames = t_map_put(std::mem::take(&mut v_frames), t_from_code_points(&t_slice(v_codes.clone(), 0i64, 6i64, "art.tes:157:43 in function `art__load_sprites`"), "art.tes:157:26 in function `art__load_sprites`"), t_mul(v_picture.clone(), 2i64, "art.tes:157:72 in function `art__load_sprites`"));
             if (t_list_length(&v_codes.clone()) >= 8i64) {
-                v_frames = t_map_put(std::mem::take(&mut v_frames), t_from_code_points(&t_concat_lists(t_slice(v_codes.clone(), 0i64, 4i64, "art.tes:156:43 in function `art__load_sprites`"), t_slice(v_codes.clone(), 6i64, 8i64, "art.tes:156:64 in function `art__load_sprites`")), "art.tes:156:26 in function `art__load_sprites`"), t_add(t_mul(v_picture.clone(), 2i64, "art.tes:156:93 in function `art__load_sprites`"), 1i64, "art.tes:156:97 in function `art__load_sprites`"));
+                v_frames = t_map_put(std::mem::take(&mut v_frames), t_from_code_points(&t_concat_lists(t_slice(v_codes.clone(), 0i64, 4i64, "art.tes:159:43 in function `art__load_sprites`"), t_slice(v_codes.clone(), 6i64, 8i64, "art.tes:159:64 in function `art__load_sprites`")), "art.tes:159:26 in function `art__load_sprites`"), t_add(t_mul(v_picture.clone(), 2i64, "art.tes:159:93 in function `art__load_sprites`"), 1i64, "art.tes:159:97 in function `art__load_sprites`"));
             }
         }
     }
-    Rc::new(T_art__Sprites { f_pictures: v_pictures.clone(), f_frames: v_frames.clone() })
+    Rc::new(T_art__Sprites { f_pictures: v_pictures, f_frames: v_frames })
+}
+
+// note: Every sound effect lump (names starting with DS, format 3): an 8-byte header with the sample rate and count, then the samples, of which the first and last 16 are padding.
+fn f_art__load_sounds(v_w: Rc<T_wad__Wad>) -> Rc<std::collections::BTreeMap<Rc<String>, Rc<T_std__sound__Sound>>> {
+    t_enter("art.tes:167:8 in function `art__load_sounds`");
+    let mut v_sounds: Rc<std::collections::BTreeMap<Rc<String>, Rc<T_std__sound__Sound>>> = t_map_new::<Rc<String>, Rc<T_std__sound__Sound>>(vec![]);
+    for v_index in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_lumps.clone()), "art.tes:169:14 in function `art__load_sounds`")) {
+        t_tick("art.tes:169:40 in function `art__load_sounds`");
+        let v_lump: Rc<T_wad__Lump> = t_index(&(v_w.clone()).f_lumps.clone(), v_index.clone(), "art.tes:170:12 in function `art__load_sounds`");
+        if (t_starts_with(&(v_lump.clone()).f_name.clone(), &t_text("DS")) && ((v_lump.clone()).f_size.clone() > 40i64)) {
+            let v_data: Rc<Vec<u8>> = f_wad__lump_data(v_w.clone(), v_index.clone());
+            if (f_std__bytes__read_u16_le(v_data.clone(), 0i64) == 3i64) {
+                let v_count: i64 = f_std__math__min(f_std__bytes__read_u32_le(v_data.clone(), 4i64), t_sub(t_list_length(&v_data.clone()), 8i64, "art.tes:174:63 in function `art__load_sounds`"));
+                if (v_count.clone() > 32i64) {
+                    v_sounds = t_map_put(std::mem::take(&mut v_sounds), (v_lump.clone()).f_name.clone(), Rc::new(T_std__sound__Sound { f_samples: t_slice(v_data.clone(), 24i64, t_sub(t_add(8i64, v_count.clone(), "art.tes:176:78 in function `art__load_sounds`"), 16i64, "art.tes:176:86 in function `art__load_sounds`"), "art.tes:176:60 in function `art__load_sounds`"), f_rate: f_std__bytes__read_u16_le(v_data.clone(), 2i64) }));
+                }
+            }
+        }
+    }
+    v_sounds
+}
+
+// note: A picture lump by name, such as a menu graphic (`M_DOOM`) or a font character (`STCFN065`).
+fn f_art__picture(v_w: Rc<T_wad__Wad>, v_name: Rc<String>) -> Option<Rc<T_art__Picture>> {
+    t_enter("art.tes:185:8 in function `art__picture`");
+    let v_data: Rc<Vec<u8>> = match f_wad__lump(v_w.clone(), v_name.clone()) { Some(t_value) => t_value, None => { return Option::<Rc<T_art__Picture>>::None } };
+    Some(f_art__decode_picture(v_name, v_data))
+}
+
+fn f_art__graphic(v_p: Rc<T_art__Picture>) -> Rc<T_art__Graphic> {
+    t_enter("art.tes:197:8 in function `art__graphic`");
+    let mut v_pixels: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![(-1i64)]), t_mul((v_p.clone()).f_width.clone(), (v_p.clone()).f_height.clone(), "art.tes:198:35 in function `art__graphic`"), "art.tes:198:14 in function `art__graphic`");
+    for v_x in t_iter(t_range(0i64, (v_p.clone()).f_width.clone(), "art.tes:199:10 in function `art__graphic`")) {
+        t_tick("art.tes:199:28 in function `art__graphic`");
+        for v_y in t_iter(t_range(0i64, (v_p.clone()).f_height.clone(), "art.tes:200:10 in function `art__graphic`")) {
+            t_tick("art.tes:200:29 in function `art__graphic`");
+            { let t_place0: i64 = t_add(t_mul(v_y.clone(), (v_p.clone()).f_width.clone(), "art.tes:201:14 in function `art__graphic`"), v_x.clone(), "art.tes:201:24 in function `art__graphic`"); let t_value = t_index(&(v_p.clone()).f_pixels.clone(), t_add(t_mul(v_x.clone(), (v_p.clone()).f_height.clone(), "art.tes:201:42 in function `art__graphic`"), v_y.clone(), "art.tes:201:53 in function `art__graphic`"), "art.tes:201:31 in function `art__graphic`"); *t_slot(&mut v_pixels, t_place0, "art.tes:201:5 in function `art__graphic`") = t_value; }
+        }
+    }
+    Rc::new(T_art__Graphic { f_image: Rc::new(T_std__raster__Image { f_width: (v_p.clone()).f_width.clone(), f_height: (v_p.clone()).f_height.clone(), f_pixels: v_pixels }), f_left: (v_p.clone()).f_left.clone(), f_top: (v_p.clone()).f_top.clone() })
 }
 
 fn f_movement__radius() -> i64 {
-    t_enter("movement.tes:13:8 in function `movement__radius`");
+    t_enter("movement.tes:14:8 in function `movement__radius`");
     16i64
 }
 
 fn f_movement__player_height() -> i64 {
-    t_enter("movement.tes:15:8 in function `movement__player_height`");
+    t_enter("movement.tes:16:8 in function `movement__player_height`");
     56i64
 }
 
 fn f_movement__max_step() -> i64 {
-    t_enter("movement.tes:17:8 in function `movement__max_step`");
+    t_enter("movement.tes:18:8 in function `movement__max_step`");
     24i64
 }
 
 fn f_movement__start(v_l: Rc<T_level__Level>) -> Rc<T_movement__Player> {
-    t_enter("movement.tes:26:8 in function `movement__start`");
+    t_enter("movement.tes:27:8 in function `movement__start`");
     let v_c: Rc<T_geometry__Camera> = f_geometry__start_camera(v_l.clone());
-    Rc::new(T_movement__Player { f_x: (v_c.clone()).f_x.clone(), f_y: (v_c.clone()).f_y.clone(), f_angle: (v_c.clone()).f_angle.clone(), f_sector: f_geometry__sector_at(v_l.clone(), (v_c.clone()).f_x.clone(), (v_c.clone()).f_y.clone()) })
+    Rc::new(T_movement__Player { f_x: (v_c.clone()).f_x.clone(), f_y: (v_c.clone()).f_y.clone(), f_angle: (v_c.clone()).f_angle.clone(), f_sector: f_geometry__sector_at(v_l, (v_c.clone()).f_x.clone(), (v_c.clone()).f_y.clone()) })
 }
 
 fn f_movement__camera(v_l: Rc<T_level__Level>, v_p: Rc<T_movement__Player>) -> Rc<T_geometry__Camera> {
-    t_enter("movement.tes:31:8 in function `movement__camera`");
-    Rc::new(T_geometry__Camera { f_x: (v_p.clone()).f_x.clone(), f_y: (v_p.clone()).f_y.clone(), f_z: f_std__fixed__from_int(t_add((t_index(&(v_l.clone()).f_sectors.clone(), (v_p.clone()).f_sector.clone(), "movement.tes:32:53 in function `movement__camera`")).f_floor.clone(), f_geometry__eye_height(), "movement.tes:32:79 in function `movement__camera`")), f_angle: (v_p.clone()).f_angle.clone() })
+    t_enter("movement.tes:32:8 in function `movement__camera`");
+    Rc::new(T_geometry__Camera { f_x: (v_p.clone()).f_x.clone(), f_y: (v_p.clone()).f_y.clone(), f_z: f_std__fixed__from_int(t_add((t_index(&(v_l).f_sectors.clone(), (v_p.clone()).f_sector.clone(), "movement.tes:33:53 in function `movement__camera`")).f_floor.clone(), f_geometry__eye_height(), "movement.tes:33:79 in function `movement__camera`")), f_angle: (v_p.clone()).f_angle.clone() })
 }
 
 // note: Whether the player's circle at (x, y) (fixed) touches the segment a-b.
 fn f_movement__touches(v_x: i64, v_y: i64, v_a: Rc<T_level__Vertex>, v_b: Rc<T_level__Vertex>) -> bool {
-    t_enter("movement.tes:36:8 in function `movement__touches`");
-    f_movement__touches_radius(v_x.clone(), v_y.clone(), v_a.clone(), v_b.clone(), f_movement__radius())
+    t_enter("movement.tes:37:8 in function `movement__touches`");
+    f_movement__touches_radius(v_x, v_y, v_a, v_b, f_movement__radius())
 }
 
-// note: Whether a circle of `size` units at (x, y) (fixed) touches the segment a-b. Distances are compared with 8 fraction bits, so squares stay below 2^52.
+// note: Whether a circle of `size` units at (x, y) (fixed) touches the segment a-b (std/plane).
 fn f_movement__touches_radius(v_x: i64, v_y: i64, v_a: Rc<T_level__Vertex>, v_b: Rc<T_level__Vertex>, v_size: i64) -> bool {
-    t_enter("movement.tes:39:8 in function `movement__touches_radius`");
-    let v_r: i64 = f_std__fixed__from_int(v_size.clone());
-    if ((((t_add(v_x.clone(), v_r.clone(), "movement.tes:42:6 in function `movement__touches_radius`") <= f_std__fixed__from_int(f_std__math__min((v_a.clone()).f_x.clone(), (v_b.clone()).f_x.clone()))) || (t_sub(v_x.clone(), v_r.clone(), "movement.tes:42:53 in function `movement__touches_radius`") >= f_std__fixed__from_int(f_std__math__max((v_a.clone()).f_x.clone(), (v_b.clone()).f_x.clone())))) || (t_add(v_y.clone(), v_r.clone(), "movement.tes:42:100 in function `movement__touches_radius`") <= f_std__fixed__from_int(f_std__math__min((v_a.clone()).f_y.clone(), (v_b.clone()).f_y.clone())))) || (t_sub(v_y.clone(), v_r.clone(), "movement.tes:42:147 in function `movement__touches_radius`") >= f_std__fixed__from_int(f_std__math__max((v_a.clone()).f_y.clone(), (v_b.clone()).f_y.clone())))) {
-        return false
-    };
-    let v_lx: i64 = t_sub((v_b.clone()).f_x.clone(), (v_a.clone()).f_x.clone(), "movement.tes:45:14 in function `movement__touches_radius`");
-    let v_ly: i64 = t_sub((v_b.clone()).f_y.clone(), (v_a.clone()).f_y.clone(), "movement.tes:46:14 in function `movement__touches_radius`");
-    let v_ex: i64 = t_sub(v_x.clone(), f_std__fixed__from_int((v_a.clone()).f_x.clone()), "movement.tes:47:12 in function `movement__touches_radius`");
-    let v_ey: i64 = t_sub(v_y.clone(), f_std__fixed__from_int((v_a.clone()).f_y.clone()), "movement.tes:48:12 in function `movement__touches_radius`");
-    let v_length_squared: i64 = t_add(t_mul(v_lx.clone(), v_lx.clone(), "movement.tes:49:25 in function `movement__touches_radius`"), t_mul(v_ly.clone(), v_ly.clone(), "movement.tes:49:35 in function `movement__touches_radius`"), "movement.tes:49:30 in function `movement__touches_radius`");
-    let v_t: i64 = if (v_length_squared.clone() == 0i64) {
-        0i64
-    } else {
-        f_std__math__clamp(t_div(t_add(t_mul(v_ex.clone(), v_lx.clone(), "movement.tes:51:60 in function `movement__touches_radius`"), t_mul(v_ey.clone(), v_ly.clone(), "movement.tes:51:70 in function `movement__touches_radius`"), "movement.tes:51:65 in function `movement__touches_radius`"), v_length_squared.clone(), "movement.tes:51:76 in function `movement__touches_radius`"), 0i64, f_std__fixed__one())
-    };
-    let v_nx: i64 = t_shift_right(t_sub(v_ex.clone(), t_mul(v_lx.clone(), v_t.clone(), "movement.tes:52:30 in function `movement__touches_radius`"), "movement.tes:52:25 in function `movement__touches_radius`"), 8i64, "movement.tes:52:10 in function `movement__touches_radius`");
-    let v_ny: i64 = t_shift_right(t_sub(v_ey.clone(), t_mul(v_ly.clone(), v_t.clone(), "movement.tes:53:30 in function `movement__touches_radius`"), "movement.tes:53:25 in function `movement__touches_radius`"), 8i64, "movement.tes:53:10 in function `movement__touches_radius`");
-    let v_limit: i64 = t_shift_right(v_r.clone(), 8i64, "movement.tes:54:13 in function `movement__touches_radius`");
-    (t_add(t_mul(v_nx.clone(), v_nx.clone(), "movement.tes:55:4 in function `movement__touches_radius`"), t_mul(v_ny.clone(), v_ny.clone(), "movement.tes:55:14 in function `movement__touches_radius`"), "movement.tes:55:9 in function `movement__touches_radius`") < t_mul(v_limit.clone(), v_limit.clone(), "movement.tes:55:27 in function `movement__touches_radius`"))
+    t_enter("movement.tes:40:8 in function `movement__touches_radius`");
+    f_std__plane__circle_touches(v_x, v_y, v_size, (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone())
 }
 
 // note: Whether a line stops a player whose feet are at `floor` (whole units).
 fn f_movement__blocks(v_l: Rc<T_level__Level>, v_line: Rc<T_level__Linedef>, v_floor: i64) -> bool {
-    t_enter("movement.tes:59:8 in function `movement__blocks`");
+    t_enter("movement.tes:43:8 in function `movement__blocks`");
     if (((v_line.clone()).f_back.clone() < 0i64) || (((v_line.clone()).f_flags.clone() & 1i64) != 0i64)) {
         return true
     };
-    let v_front: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "movement.tes:63:23 in function `movement__blocks`")).f_sector.clone(), "movement.tes:63:13 in function `movement__blocks`");
-    let v_back: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "movement.tes:64:22 in function `movement__blocks`")).f_sector.clone(), "movement.tes:64:12 in function `movement__blocks`");
+    let v_front: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "movement.tes:47:23 in function `movement__blocks`")).f_sector.clone(), "movement.tes:47:13 in function `movement__blocks`");
+    let v_back: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "movement.tes:48:22 in function `movement__blocks`")).f_sector.clone(), "movement.tes:48:12 in function `movement__blocks`");
     let v_opening_top: i64 = f_std__math__min((v_front.clone()).f_ceiling.clone(), (v_back.clone()).f_ceiling.clone());
     let v_opening_bottom: i64 = f_std__math__max((v_front.clone()).f_floor.clone(), (v_back.clone()).f_floor.clone());
-    (((t_sub(v_opening_top.clone(), v_opening_bottom.clone(), "movement.tes:67:13 in function `movement__blocks`") < f_movement__player_height()) || (t_sub(v_opening_bottom.clone(), v_floor.clone(), "movement.tes:67:66 in function `movement__blocks`") > f_movement__max_step())) || (t_sub(v_opening_top.clone(), f_std__math__max(v_floor.clone(), v_opening_bottom.clone()), "movement.tes:67:102 in function `movement__blocks`") < f_movement__player_height()))
+    (((t_sub(v_opening_top.clone(), v_opening_bottom.clone(), "movement.tes:51:13 in function `movement__blocks`") < f_movement__player_height()) || (t_sub(v_opening_bottom.clone(), v_floor.clone(), "movement.tes:51:66 in function `movement__blocks`") > f_movement__max_step())) || (t_sub(v_opening_top.clone(), f_std__math__max(v_floor.clone(), v_opening_bottom.clone()), "movement.tes:51:102 in function `movement__blocks`") < f_movement__player_height()))
 }
 
 // note: Whether the player fits at (x, y) coming from a sector with this floor.
 fn f_movement__fits(v_l: Rc<T_level__Level>, v_x: i64, v_y: i64, v_floor: i64) -> bool {
-    t_enter("movement.tes:71:8 in function `movement__fits`");
-    f_movement__fits_radius(v_l.clone(), v_x.clone(), v_y.clone(), v_floor.clone(), f_movement__radius())
+    t_enter("movement.tes:55:8 in function `movement__fits`");
+    f_movement__fits_radius(v_l, v_x, v_y, v_floor, f_movement__radius())
 }
 
 // note: Whether a circle of `size` units fits at (x, y) coming from a sector with this floor.
 fn f_movement__fits_radius(v_l: Rc<T_level__Level>, v_x: i64, v_y: i64, v_floor: i64, v_size: i64) -> bool {
-    t_enter("movement.tes:74:8 in function `movement__fits_radius`");
+    t_enter("movement.tes:58:8 in function `movement__fits_radius`");
     for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
-        t_tick("movement.tes:75:24 in function `movement__fits_radius`");
-        if (f_movement__touches_radius(v_x.clone(), v_y.clone(), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "movement.tes:76:25 in function `movement__fits_radius`"), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "movement.tes:76:49 in function `movement__fits_radius`"), v_size.clone()) && f_movement__blocks(v_l.clone(), v_line.clone(), v_floor.clone())) {
+        t_tick("movement.tes:59:24 in function `movement__fits_radius`");
+        if (f_movement__touches_radius(v_x.clone(), v_y.clone(), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "movement.tes:60:25 in function `movement__fits_radius`"), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "movement.tes:60:49 in function `movement__fits_radius`"), v_size.clone()) && f_movement__blocks(v_l.clone(), v_line.clone(), v_floor.clone())) {
             return false
         }
     }
@@ -5417,216 +5701,657 @@ fn f_movement__fits_radius(v_l: Rc<T_level__Level>, v_x: i64, v_y: i64, v_floor:
 }
 
 fn f_movement__step(v_l: Rc<T_level__Level>, v_p: Rc<T_movement__Player>, v_dx: i64, v_dy: i64) -> Rc<T_movement__Player> {
-    t_enter("movement.tes:83:4 in function `movement__step`");
-    let v_floor: i64 = (t_index(&(v_l.clone()).f_sectors.clone(), (v_p.clone()).f_sector.clone(), "movement.tes:84:13 in function `movement__step`")).f_floor.clone();
+    t_enter("movement.tes:67:4 in function `movement__step`");
+    let v_floor: i64 = (t_index(&(v_l.clone()).f_sectors.clone(), (v_p.clone()).f_sector.clone(), "movement.tes:68:13 in function `movement__step`")).f_floor.clone();
     for v_attempt in t_iter(Rc::new(vec![Rc::new(vec![v_dx.clone(), v_dy.clone()]), Rc::new(vec![v_dx.clone(), 0i64]), Rc::new(vec![0i64, v_dy.clone()])])) {
-        t_tick("movement.tes:85:45 in function `movement__step`");
-        let v_x: i64 = t_add((v_p.clone()).f_x.clone(), t_index(&v_attempt.clone(), 0i64, "movement.tes:86:15 in function `movement__step`"), "movement.tes:86:13 in function `movement__step`");
-        let v_y: i64 = t_add((v_p.clone()).f_y.clone(), t_index(&v_attempt.clone(), 1i64, "movement.tes:87:15 in function `movement__step`"), "movement.tes:87:13 in function `movement__step`");
-        if (((t_index(&v_attempt.clone(), 0i64, "movement.tes:88:5 in function `movement__step`") != 0i64) || (t_index(&v_attempt.clone(), 1i64, "movement.tes:88:24 in function `movement__step`") != 0i64)) && f_movement__fits(v_l.clone(), v_x.clone(), v_y.clone(), v_floor.clone())) {
-            return { let mut t1 = Rc::unwrap_or_clone(v_p.clone()); t1.f_x = v_x.clone(); t1.f_y = v_y.clone(); t1.f_sector = f_geometry__sector_at(v_l.clone(), v_x.clone(), v_y.clone()); Rc::new(t1) }
+        t_tick("movement.tes:69:45 in function `movement__step`");
+        let v_x: i64 = t_add((v_p.clone()).f_x.clone(), t_index(&v_attempt.clone(), 0i64, "movement.tes:70:15 in function `movement__step`"), "movement.tes:70:13 in function `movement__step`");
+        let v_y: i64 = t_add((v_p.clone()).f_y.clone(), t_index(&v_attempt.clone(), 1i64, "movement.tes:71:15 in function `movement__step`"), "movement.tes:71:13 in function `movement__step`");
+        if (((t_index(&v_attempt.clone(), 0i64, "movement.tes:72:5 in function `movement__step`") != 0i64) || (t_index(&v_attempt.clone(), 1i64, "movement.tes:72:24 in function `movement__step`") != 0i64)) && f_movement__fits(v_l.clone(), v_x.clone(), v_y.clone(), v_floor.clone())) {
+            return { let mut t1 = Rc::unwrap_or_clone(v_p); t1.f_x = v_x.clone(); t1.f_y = v_y.clone(); t1.f_sector = f_geometry__sector_at(v_l, v_x.clone(), v_y.clone()); Rc::new(t1) }
         }
     }
-    v_p.clone()
+    v_p
 }
 
 // note: Moves `forward` units ahead and `sideways` units to the right (fixed), in steps of at most 8 units.
 fn f_movement__walk(v_l: Rc<T_level__Level>, v_trig: Rc<T_geometry__Trig>, v_start: Rc<T_movement__Player>, v_forward: i64, v_sideways: i64) -> Rc<T_movement__Player> {
-    t_enter("movement.tes:96:8 in function `movement__walk`");
+    t_enter("movement.tes:80:8 in function `movement__walk`");
     let mut v_p: Rc<T_movement__Player> = v_start;
-    let v_c: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "movement.tes:98:9 in function `movement__walk`");
-    let v_s: i64 = t_index(&(v_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "movement.tes:99:9 in function `movement__walk`");
-    let v_dx: i64 = t_add(f_std__fixed__mul(v_forward.clone(), v_c.clone()), f_std__fixed__mul(v_sideways.clone(), v_s.clone()), "movement.tes:100:32 in function `movement__walk`");
-    let v_dy: i64 = t_sub(f_std__fixed__mul(v_forward.clone(), v_s.clone()), f_std__fixed__mul(v_sideways.clone(), v_c.clone()), "movement.tes:101:32 in function `movement__walk`");
+    let v_c: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "movement.tes:82:9 in function `movement__walk`");
+    let v_s: i64 = t_index(&(v_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "movement.tes:83:9 in function `movement__walk`");
+    let v_dx: i64 = t_add(f_std__fixed__mul(v_forward.clone(), v_c.clone()), f_std__fixed__mul(v_sideways.clone(), v_s.clone()), "movement.tes:84:32 in function `movement__walk`");
+    let v_dy: i64 = t_sub(f_std__fixed__mul(v_forward.clone(), v_s.clone()), f_std__fixed__mul(v_sideways.clone(), v_c.clone()), "movement.tes:85:32 in function `movement__walk`");
     let v_distance: i64 = f_std__math__max(f_std__math__abs(v_dx.clone()), f_std__math__abs(v_dy.clone()));
-    let v_steps: i64 = f_std__math__max(1i64, t_div(t_sub(t_add(v_distance.clone(), f_std__fixed__from_int(8i64), "movement.tes:103:35 in function `movement__walk`"), 1i64, "movement.tes:103:55 in function `movement__walk`"), f_std__fixed__from_int(8i64), "movement.tes:103:60 in function `movement__walk`"));
-    for v_i in t_iter(t_range(0i64, v_steps.clone(), "movement.tes:104:10 in function `movement__walk`")) {
-        t_tick("movement.tes:104:26 in function `movement__walk`");
-        let v_step_x: i64 = t_sub(t_div(t_mul(v_dx.clone(), t_add(v_i.clone(), 1i64, "movement.tes:106:22 in function `movement__walk`"), "movement.tes:106:17 in function `movement__walk`"), v_steps.clone(), "movement.tes:106:27 in function `movement__walk`"), t_div(t_mul(v_dx.clone(), v_i.clone(), "movement.tes:106:40 in function `movement__walk`"), v_steps.clone(), "movement.tes:106:44 in function `movement__walk`"), "movement.tes:106:35 in function `movement__walk`");
-        let v_step_y: i64 = t_sub(t_div(t_mul(v_dy.clone(), t_add(v_i.clone(), 1i64, "movement.tes:107:22 in function `movement__walk`"), "movement.tes:107:17 in function `movement__walk`"), v_steps.clone(), "movement.tes:107:27 in function `movement__walk`"), t_div(t_mul(v_dy.clone(), v_i.clone(), "movement.tes:107:40 in function `movement__walk`"), v_steps.clone(), "movement.tes:107:44 in function `movement__walk`"), "movement.tes:107:35 in function `movement__walk`");
+    let v_steps: i64 = f_std__math__max(1i64, t_div(t_sub(t_add(v_distance.clone(), f_std__fixed__from_int(8i64), "movement.tes:87:35 in function `movement__walk`"), 1i64, "movement.tes:87:55 in function `movement__walk`"), f_std__fixed__from_int(8i64), "movement.tes:87:60 in function `movement__walk`"));
+    for v_i in t_iter(t_range(0i64, v_steps.clone(), "movement.tes:88:10 in function `movement__walk`")) {
+        t_tick("movement.tes:88:26 in function `movement__walk`");
+        let v_step_x: i64 = t_sub(t_div(t_mul(v_dx.clone(), t_add(v_i.clone(), 1i64, "movement.tes:90:22 in function `movement__walk`"), "movement.tes:90:17 in function `movement__walk`"), v_steps.clone(), "movement.tes:90:27 in function `movement__walk`"), t_div(t_mul(v_dx.clone(), v_i.clone(), "movement.tes:90:40 in function `movement__walk`"), v_steps.clone(), "movement.tes:90:44 in function `movement__walk`"), "movement.tes:90:35 in function `movement__walk`");
+        let v_step_y: i64 = t_sub(t_div(t_mul(v_dy.clone(), t_add(v_i.clone(), 1i64, "movement.tes:91:22 in function `movement__walk`"), "movement.tes:91:17 in function `movement__walk`"), v_steps.clone(), "movement.tes:91:27 in function `movement__walk`"), t_div(t_mul(v_dy.clone(), v_i.clone(), "movement.tes:91:40 in function `movement__walk`"), v_steps.clone(), "movement.tes:91:44 in function `movement__walk`"), "movement.tes:91:35 in function `movement__walk`");
         v_p = f_movement__step(v_l.clone(), v_p, v_step_x.clone(), v_step_y.clone());
     }
-    v_p.clone()
+    v_p
 }
 
 fn f_movement__turn(v_p: Rc<T_movement__Player>, v_fine: i64) -> Rc<T_movement__Player> {
-    t_enter("movement.tes:113:8 in function `movement__turn`");
-    { let mut t1 = Rc::unwrap_or_clone(v_p.clone()); t1.f_angle = f_geometry__wrap_angle(t_add((v_p.clone()).f_angle.clone(), v_fine.clone(), "movement.tes:113:91 in function `movement__turn`")); Rc::new(t1) }
+    t_enter("movement.tes:97:8 in function `movement__turn`");
+    { let mut t1 = Rc::unwrap_or_clone(v_p.clone()); t1.f_angle = f_geometry__wrap_angle(t_add((v_p.clone()).f_angle.clone(), v_fine, "movement.tes:97:91 in function `movement__turn`")); Rc::new(t1) }
 }
 
-fn f_play__no_controls() -> Rc<T_play__Controls> {
-    t_enter("play.tes:27:8 in function `play__no_controls`");
-    Rc::new(T_play__Controls { f_forward: false, f_back: false, f_turn_left: false, f_turn_right: false, f_step_left: false, f_step_right: false, f_run: false, f_use: false, f_fire: false, f_quit: false })
-}
-
-// note: Applies a key press (`down` true) or release to the held controls.
-fn f_play__press(v_start: Rc<T_play__Controls>, v_key: Rc<String>, v_down: bool) -> Rc<T_play__Controls> {
-    t_enter("play.tes:30:8 in function `play__press`");
-    let mut v_c: Rc<T_play__Controls> = v_start;
-    match (t_to_lower(&v_key.clone())).as_str() {
-        "up" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_forward = t_value; }
-        } }
-        "w" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_forward = t_value; }
-        } }
-        "down" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_back = t_value; }
-        } }
-        "s" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_back = t_value; }
-        } }
-        "left" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_turn_left = t_value; }
-        } }
-        "right" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_turn_right = t_value; }
-        } }
-        "a" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_step_left = t_value; }
-        } }
-        "," => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_step_left = t_value; }
-        } }
-        "d" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_step_right = t_value; }
-        } }
-        "." => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_step_right = t_value; }
-        } }
-        "shift" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_run = t_value; }
-        } }
-        " " => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_use = t_value; }
-        } }
-        "e" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_use = t_value; }
-        } }
-        "control" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_fire = t_value; }
-        } }
-        "f" => { {
-            { let t_value = v_down.clone(); *&mut Rc::make_mut(&mut v_c).f_fire = t_value; }
-        } }
-        "escape" => { {
-            { let t_value = ((v_c.clone()).f_quit.clone() || v_down.clone()); *&mut Rc::make_mut(&mut v_c).f_quit = t_value; }
-        } }
-        _ => { {
-        } }
-    };
-    v_c.clone()
-}
-
-// note: The world input for one tic, in the original game's units: forward 25 (50 running), sideways 24 (40), turning 80 fine angles (160).
-fn f_play__input(v_c: Rc<T_play__Controls>) -> Rc<T_world__Input> {
-    t_enter("play.tes:55:8 in function `play__input`");
-    let v_forward: i64 = if (v_c.clone()).f_run.clone() {
+// note: The world input for one tic from the keys held down (std/keys), in the original game's units: forward 25 (50 running), sideways 24 (40), turning 80 fine angles (160).
+fn f_play__input(v_k: Rc<T_std__keys__Keys>) -> Rc<T_state__Input> {
+    t_enter("play.tes:25:8 in function `play__input`");
+    let v_run: bool = f_std__keys__held(v_k.clone(), t_text("shift"));
+    let v_forward: i64 = if v_run.clone() {
         50i64
     } else {
         25i64
     };
-    let v_side: i64 = if (v_c.clone()).f_run.clone() {
+    let v_side: i64 = if v_run.clone() {
         40i64
     } else {
         24i64
     };
-    let v_turn: i64 = if (v_c.clone()).f_run.clone() {
+    let v_turn: i64 = if v_run.clone() {
         160i64
     } else {
         80i64
     };
-    let v_forward_move: i64 = t_sub(if (v_c.clone()).f_forward.clone() {
+    let v_forward_move: i64 = t_sub(if f_std__keys__any_held(v_k.clone(), Rc::new(vec![t_text("up"), t_text("w")])) {
         v_forward.clone()
     } else {
         0i64
-    }, if (v_c.clone()).f_back.clone() {
+    }, if f_std__keys__any_held(v_k.clone(), Rc::new(vec![t_text("down"), t_text("s")])) {
         v_forward.clone()
     } else {
         0i64
-    }, "play.tes:59:58 in function `play__input`");
-    let v_side_move: i64 = t_sub(if (v_c.clone()).f_step_right.clone() {
+    }, "play.tes:30:78 in function `play__input`");
+    let v_side_move: i64 = t_sub(if f_std__keys__any_held(v_k.clone(), Rc::new(vec![t_text("d"), t_text(".")])) {
         v_side.clone()
     } else {
         0i64
-    }, if (v_c.clone()).f_step_left.clone() {
+    }, if f_std__keys__any_held(v_k.clone(), Rc::new(vec![t_text("a"), t_text(",")])) {
         v_side.clone()
     } else {
         0i64
-    }, "play.tes:60:55 in function `play__input`");
-    let v_turning: i64 = t_sub(if (v_c.clone()).f_turn_left.clone() {
+    }, "play.tes:31:71 in function `play__input`");
+    let v_turning: i64 = t_sub(if f_std__keys__held(v_k.clone(), t_text("left")) {
         v_turn.clone()
     } else {
         0i64
-    }, if (v_c.clone()).f_turn_right.clone() {
+    }, if f_std__keys__held(v_k.clone(), t_text("right")) {
         v_turn.clone()
     } else {
         0i64
-    }, "play.tes:61:52 in function `play__input`");
-    { let mut t1 = Rc::unwrap_or_clone(f_world__no_input()); t1.f_forward_move = v_forward_move.clone(); t1.f_side_move = v_side_move.clone(); t1.f_turn = v_turning.clone(); t1.f_use = (v_c.clone()).f_use.clone(); t1.f_fire = (v_c.clone()).f_fire.clone(); Rc::new(t1) }
+    }, "play.tes:32:61 in function `play__input`");
+    { let mut t1 = Rc::unwrap_or_clone(f_state__no_input()); t1.f_forward_move = v_forward_move; t1.f_side_move = v_side_move; t1.f_turn = v_turning; t1.f_use = f_std__keys__any_held(v_k.clone(), Rc::new(vec![t_text(" "), t_text("e")])); t1.f_fire = f_std__keys__any_held(v_k.clone(), Rc::new(vec![t_text("control"), t_text("f")])); Rc::new(t1) }
 }
 
-// note: The status line: health, armor, ammunition, keys and the latest message.
-fn f_play__status(v_w: Rc<T_world__World>) -> Rc<String> {
-    t_enter("play.tes:66:8 in function `play__status`");
-    let v_keys: Rc<String> = if (t_list_length(&((v_w.clone()).f_stats.clone()).f_keys.clone()) == 0i64) {
-        t_text("")
-    } else {
-        t_concat(t_text("  KEYS "), (t_join(&((v_w.clone()).f_stats.clone()).f_keys.clone(), &t_text(" "))))
-    };
-    let v_message: Rc<String> = if ((v_w.clone()).f_message_time.clone() > 0i64) {
-        t_concat(t_text("   "), ((v_w.clone()).f_message.clone()))
-    } else {
-        t_text("")
-    };
-    t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("HEALTH "), t_int_to_text(((v_w.clone()).f_stats.clone()).f_health.clone())), t_text("%  ARMOR ")), t_int_to_text(((v_w.clone()).f_stats.clone()).f_armor.clone())), t_text("%  AMMO ")), t_int_to_text(((v_w.clone()).f_stats.clone()).f_ammo.clone())), t_text("")), (v_keys.clone())), t_text("")), (v_message.clone()))
+fn f_play__menu_pictures() -> Rc<Vec<Rc<String>>> {
+    t_enter("play.tes:51:4 in function `play__menu_pictures`");
+    Rc::new(vec![t_text("TITLEPIC"), t_text("HELP1"), t_text("M_DOOM"), t_text("M_NGAME"), t_text("M_LOADG"), t_text("M_SAVEG"), t_text("M_RDTHIS"), t_text("M_QUITG"), t_text("M_SKULL1"), t_text("M_SKULL2"), t_text("M_EPISOD"), t_text("M_EPI1"), t_text("M_EPI2"), t_text("M_EPI3"), t_text("M_EPI4"), t_text("M_NEWG"), t_text("M_SKILL"), t_text("M_JKILL"), t_text("M_ROUGH"), t_text("M_HURT"), t_text("M_ULTRA"), t_text("M_NMARE"), t_text("M_LSLEFT"), t_text("M_LSCNTR"), t_text("M_LSRGHT"), t_text("WIMAP0"), t_text("WIMAP1"), t_text("WIMAP2")])
 }
 
-// note: Converts palette indexes to colors into `colors`, which is changed in place when called as `set colors = to_colors(colors, ...)`.
-fn f_play__to_colors(v_colors: Rc<Vec<i64>>, v_pixels: Rc<Vec<i64>>, v_palette_colors: Rc<Vec<i64>>) -> Rc<Vec<i64>> {
-    t_enter("play.tes:73:8 in function `play__to_colors`");
-    let mut v_out: Rc<Vec<i64>> = v_colors;
-    for v_i in t_iter(t_range(0i64, t_list_length(&v_pixels.clone()), "play.tes:75:10 in function `play__to_colors`")) {
-        t_tick("play.tes:75:35 in function `play__to_colors`");
-        { let t_place0: i64 = v_i.clone(); let t_value = t_index(&v_palette_colors.clone(), t_index(&v_pixels.clone(), v_i.clone(), "play.tes:76:29 in function `play__to_colors`"), "play.tes:76:14 in function `play__to_colors`"); *t_slot(&mut v_out, t_place0, "play.tes:76:5 in function `play__to_colors`") = t_value; }
+fn f_play__load_assets(v_w: Rc<T_wad__Wad>) -> Rc<T_play__Assets> {
+    t_enter("play.tes:53:8 in function `play__load_assets`");
+    let mut v_pictures: Rc<std::collections::BTreeMap<Rc<String>, Rc<T_art__Graphic>>> = t_map_new::<Rc<String>, Rc<T_art__Graphic>>(vec![]);
+    for v_name in t_iter(f_play__menu_pictures()) {
+        t_tick("play.tes:55:29 in function `play__load_assets`");
+        match &(f_art__picture(v_w.clone(), v_name.clone())) {
+            Some(t1) => { let v_p = t1.clone(); {
+                v_pictures = t_map_put(std::mem::take(&mut v_pictures), v_name.clone(), f_art__graphic(v_p.clone()));
+            } }
+            None => { {
+            } }
+        }
     }
-    v_out.clone()
+    let mut v_glyphs: Rc<std::collections::BTreeMap<i64, Rc<T_std__raster__Image>>> = t_map_new::<i64, Rc<T_std__raster__Image>>(vec![]);
+    for v_code in t_iter(t_range(33i64, 96i64, "play.tes:63:13 in function `play__load_assets`")) {
+        t_tick("play.tes:63:27 in function `play__load_assets`");
+        match &(f_art__picture(v_w.clone(), t_concat(t_text("STCFN"), (t_pad_left(t_int_to_text(v_code.clone()), 3i64, t_text("0"), "play.tes:64:30 in function `play__load_assets`"))))) {
+            Some(t2) => { let v_p = t2.clone(); {
+                v_glyphs = t_map_put(std::mem::take(&mut v_glyphs), v_code.clone(), (f_art__graphic(v_p.clone())).f_image.clone());
+            } }
+            None => { {
+            } }
+        }
+    }
+    let v_colormap: Rc<Vec<u8>> = t_value_or(f_wad__lump(v_w.clone(), t_text("COLORMAP")), t_bytes(t_repeat_list(Rc::new(vec![0i64]), t_mul(34i64, 256i64, "play.tes:70:71 in function `play__load_assets`"), "play.tes:70:56 in function `play__load_assets`"), "play.tes:70:50 in function `play__load_assets`"));
+    let mut v_shades: Rc<Vec<Rc<Vec<i64>>>> = Rc::new(Vec::<Rc<Vec<i64>>>::new());
+    for v_row in t_iter(t_range(0i64, 32i64, "play.tes:72:12 in function `play__load_assets`")) {
+        t_tick("play.tes:72:25 in function `play__load_assets`");
+        v_shades = t_concat_lists(std::mem::take(&mut v_shades), Rc::new(vec![t_byte_values(&t_slice(v_colormap.clone(), t_mul(v_row.clone(), 256i64, "play.tes:73:48 in function `play__load_assets`"), t_add(t_mul(v_row.clone(), 256i64, "play.tes:73:59 in function `play__load_assets`"), 256i64, "play.tes:73:65 in function `play__load_assets`"), "play.tes:73:28 in function `play__load_assets`"))]));
+    }
+    let v_playpal: Rc<Vec<u8>> = t_value_or(f_wad__lump(v_w.clone(), t_text("PLAYPAL")), t_bytes(t_repeat_list(Rc::new(vec![0i64]), 768i64, "play.tes:75:54 in function `play__load_assets`"), "play.tes:75:48 in function `play__load_assets`"));
+    let mut v_palettes: Rc<Vec<Rc<Vec<i64>>>> = Rc::new(Vec::<Rc<Vec<i64>>>::new());
+    for v_index in t_iter(t_range(0i64, 14i64, "play.tes:77:14 in function `play__load_assets`")) {
+        t_tick("play.tes:77:27 in function `play__load_assets`");
+        v_palettes = t_concat_lists(std::mem::take(&mut v_palettes), Rc::new(vec![if (t_list_length(&v_playpal.clone()) >= t_mul(t_add(v_index.clone(), 1i64, "play.tes:78:47 in function `play__load_assets`"), 768i64, "play.tes:78:52 in function `play__load_assets`")) {
+            f_std__palette__read(v_playpal.clone(), t_mul(v_index.clone(), 768i64, "play.tes:78:88 in function `play__load_assets`"))
+        } else {
+            f_std__palette__read(v_playpal.clone(), 0i64)
+        }]));
+    }
+    Rc::new(T_play__Assets { f_wad: v_w.clone(), f_sprites: f_art__load_sprites(v_w.clone()), f_sounds: f_art__load_sounds(v_w.clone()), f_font: Rc::new(T_std__raster__Font { f_glyphs: v_glyphs, f_space: 4i64, f_transparent: (-1i64) }), f_pictures: v_pictures, f_palettes: v_palettes, f_shades: v_shades, f_trig: f_geometry__make_trig(), f_maps: f_wad__map_names(v_w.clone()) })
 }
 
-// note: Runs the game. `uncapped` renders as fast as possible (to measure the frame rate) instead of one frame per tic; `seconds` > 0 stops after that many seconds. Returns the number of frames shown and the time taken in milliseconds.
-fn f_play__run(v_scene: Rc<T_render__Scene>, v_sprites: Rc<T_art__Sprites>, v_playpal: Rc<Vec<u8>>, v_seconds: i64, v_uncapped: bool, v_monsters: bool) -> Rc<Vec<i64>> {
-    t_enter("play.tes:82:8 in function `play__run`");
-    let v_l: Rc<T_level__Level> = (v_scene.clone()).f_level.clone();
-    let v_trig: Rc<T_geometry__Trig> = f_geometry__make_trig();
+fn f_play__play(v_a: Rc<T_play__Assets>, v_name: Rc<String>, v_volume: i64, v_pan: i64) -> () {
+    t_enter("play.tes:85:4 in function `play__play`");
+    match &(t_map_get(&(v_a).f_sounds.clone(), &v_name)) {
+        Some(t1) => { let v_s = t1.clone(); f_std__sound__play(v_s, v_volume, v_pan) }
+        None => { {
+        } }
+    }
+}
+
+// note: Plays a tic's sounds where they happen (std/sound): quieter with distance (silent from 1,200 units) and panned to their side.
+fn f_play__play_world_sounds(v_a: Rc<T_play__Assets>, v_g: Rc<T_state__World>) -> () {
+    t_enter("play.tes:93:4 in function `play__play_world_sounds`");
+    let v_p: Rc<T_movement__Player> = (v_g.clone()).f_player.clone();
+    for v_s in t_iter((v_g.clone()).f_sounds.clone()) {
+        t_tick("play.tes:95:19 in function `play__play_world_sounds`");
+        let v_heard: Rc<Vec<i64>> = f_std__sound__position(t_shift_right(t_sub((v_s.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "play.tes:96:44 in function `play__play_world_sounds`"), 16i64, "play.tes:96:28 in function `play__play_world_sounds`"), t_shift_right(t_sub((v_s.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "play.tes:96:72 in function `play__play_world_sounds`"), 16i64, "play.tes:96:56 in function `play__play_world_sounds`"), t_index(&((v_a.clone()).f_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "play.tes:96:84 in function `play__play_world_sounds`"), t_neg(t_index(&((v_a.clone()).f_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "play.tes:96:107 in function `play__play_world_sounds`"), "play.tes:96:106 in function `play__play_world_sounds`"), 1200i64);
+        if (t_index(&v_heard.clone(), 0i64, "play.tes:97:4 in function `play__play_world_sounds`") > 0i64) {
+            f_play__play(v_a.clone(), (v_s.clone()).f_name.clone(), t_div(t_mul(t_index(&v_heard.clone(), 0i64, "play.tes:98:17 in function `play__play_world_sounds`"), 9i64, "play.tes:98:26 in function `play__play_world_sounds`"), 10i64, "play.tes:98:30 in function `play__play_world_sounds`"), t_index(&v_heard.clone(), 1i64, "play.tes:98:36 in function `play__play_world_sounds`"))
+        }
+    }
+}
+
+fn f_play__level_scene(v_a: Rc<T_play__Assets>, v_map: Rc<String>) -> Option<Rc<T_render__Scene>> {
+    t_enter("play.tes:121:4 in function `play__level_scene`");
+    match &(f_level__load((v_a.clone()).f_wad.clone(), v_map)) {
+        Ok(t1) => { let v_l = t1.clone(); Some(f_render__prepare(v_l.clone(), f_art__load((v_a.clone()).f_wad.clone(), f_render__wanted_textures(v_l.clone())))) }
+        Err(_) => { Option::<Rc<T_render__Scene>>::None }
+    }
+}
+
+// note: Starts a level with the given possessions.
+fn f_play__start_level(v_app: Rc<T_play__App>, v_a: Rc<T_play__Assets>, v_map: Rc<String>, v_skill: i64, v_stats: Rc<T_state__Stats>) -> Rc<T_play__App> {
+    t_enter("play.tes:129:4 in function `play__start_level`");
+    let mut v_next: Rc<T_play__App> = v_app.clone();
+    let v_scene: Rc<T_render__Scene> = match f_play__level_scene(v_a.clone(), v_map.clone()) { Some(t_value) => t_value, None => { return { let mut t1 = Rc::unwrap_or_clone(v_app); t1.f_message = t_concat(t_text("No map named "), (v_map)); Rc::new(t1) } } };
+    let mut v_game: Rc<T_state__World> = f_world__enter((v_scene.clone()).f_level.clone(), v_skill.clone(), v_stats.clone());
+    if (!(v_app.clone()).f_monsters.clone()) {
+        v_game = f_world__without_monsters(v_game);
+    };
+    v_next = { let mut t2 = Rc::unwrap_or_clone(v_next); t2.f_scene = v_scene.clone(); t2.f_game = f_state__say(v_game.clone(), v_map.clone()); t2.f_start_stats = (v_game.clone()).f_stats.clone(); t2.f_in_game = true; t2.f_screen = t_text("game"); t2.f_controls = f_std__keys__none(); t2.f_message = t_text(""); Rc::new(t2) };
+    v_next
+}
+
+fn f_play__slot_path(v_slot: i64) -> Rc<String> {
+    t_enter("play.tes:140:4 in function `play__slot_path`");
+    t_concat(t_concat(t_text("saves/tesseradoom-"), t_int_to_text(v_slot)), t_text(".sav"))
+}
+
+fn f_play__slot_descriptions() -> Rc<Vec<Rc<String>>> {
+    t_enter("play.tes:142:4 in function `play__slot_descriptions`");
+    let mut v_out: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
+    for v_slot in t_iter(t_range(0i64, 6i64, "play.tes:144:13 in function `play__slot_descriptions`")) {
+        t_tick("play.tes:144:25 in function `play__slot_descriptions`");
+        let v_description: Rc<String> = match &(t_read_text(f_play__slot_path(v_slot.clone()), "play.tes:145:25 in function `play__slot_descriptions`")) {
+            Ok(t1) => { let v_text = t1.clone(); f_save__describe(v_text.clone()) }
+            Err(_) => { t_text("") }
+        };
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![if (v_description.clone() == t_text("")) {
+            t_text("empty slot")
+        } else {
+            v_description.clone()
+        }]));
+    }
+    v_out
+}
+
+fn f_play__save_game(v_app: Rc<T_play__App>, v_slot: i64) -> Rc<T_play__App> {
+    t_enter("play.tes:154:4 in function `play__save_game`");
+    let _ = t_create_directory(t_text("saves"), "play.tes:155:9 in function `play__save_game`");
+    match &(t_write_text(f_play__slot_path(v_slot), f_save__write((v_app.clone()).f_game.clone()), "play.tes:156:7 in function `play__save_game`")) {
+        Ok(_) => { { let mut t1 = Rc::unwrap_or_clone(v_app.clone()); t1.f_screen = t_text("game"); t1.f_game = f_state__say((v_app.clone()).f_game.clone(), t_text("Game saved")); Rc::new(t1) } }
+        Err(_) => { { let mut t2 = Rc::unwrap_or_clone(v_app.clone()); t2.f_message = t_text("Could not save the game"); Rc::new(t2) } }
+    }
+}
+
+fn f_play__load_game(v_app: Rc<T_play__App>, v_a: Rc<T_play__Assets>, v_slot: i64) -> Rc<T_play__App> {
+    t_enter("play.tes:162:4 in function `play__load_game`");
+    let v_text: Rc<String> = match &(t_read_text(f_play__slot_path(v_slot.clone()), "play.tes:163:18 in function `play__load_game`")) {
+        Ok(t1) => { let v_t = t1.clone(); v_t.clone() }
+        Err(_) => { return { let mut t2 = Rc::unwrap_or_clone(v_app); t2.f_message = t_text("That slot is empty"); Rc::new(t2) } }
+    };
+    let v_h: Rc<Vec<Rc<String>>> = match f_save__header(v_text.clone()) { Some(t_value) => t_value, None => { return { let mut t3 = Rc::unwrap_or_clone(v_app); t3.f_message = t_text("Not a saved game"); Rc::new(t3) } } };
+    let v_scene: Rc<T_render__Scene> = match f_play__level_scene(v_a.clone(), t_index(&v_h.clone(), 0i64, "play.tes:168:28 in function `play__load_game`")) { Some(t_value) => t_value, None => { return { let mut t4 = Rc::unwrap_or_clone(v_app); t4.f_message = t_concat(t_text("No map named "), (t_index(&v_h, 0i64, "play.tes:168:82 in function `play__load_game`"))); Rc::new(t4) } } };
+    match &(f_save__read(v_text, (v_scene.clone()).f_level.clone())) {
+        Ok(t5) => { let v_game = t5.clone(); { let mut t6 = Rc::unwrap_or_clone(v_app); t6.f_scene = v_scene.clone(); t6.f_game = f_state__say(v_game.clone(), t_text("Game loaded")); t6.f_start_stats = (v_game.clone()).f_stats.clone(); t6.f_in_game = true; t6.f_screen = t_text("game"); t6.f_controls = f_std__keys__none(); t6.f_message = t_text(""); Rc::new(t6) } }
+        Err(t7) => { let v_message = t7.clone(); { let mut t8 = Rc::unwrap_or_clone(v_app); t8.f_message = v_message; Rc::new(t8) } }
+    }
+}
+
+// note: The maps of an episode that the WAD contains, in order (E1M1 to E1M9).
+fn f_play__episode_maps(v_a: Rc<T_play__Assets>, v_episode: i64) -> Rc<Vec<Rc<String>>> {
+    t_enter("play.tes:176:4 in function `play__episode_maps`");
+    let mut v_found: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
+    for v_name in t_iter((v_a.clone()).f_maps.clone()) {
+        t_tick("play.tes:178:20 in function `play__episode_maps`");
+        if t_starts_with(&v_name.clone(), &t_concat(t_concat(t_text("E"), t_int_to_text(v_episode.clone())), t_text("M"))) {
+            v_found = t_concat_lists(std::mem::take(&mut v_found), Rc::new(vec![v_name.clone()]));
+        }
+    }
+    t_sort(v_found)
+}
+
+fn f_play__menu_items(v_screen: Rc<String>) -> Rc<Vec<Rc<String>>> {
+    t_enter("play.tes:186:4 in function `play__menu_items`");
+    match (v_screen).as_str() {
+        "main" => { Rc::new(vec![t_text("M_NGAME"), t_text("M_LOADG"), t_text("M_SAVEG"), t_text("M_RDTHIS"), t_text("M_QUITG")]) }
+        "episode" => { Rc::new(vec![t_text("M_EPI1"), t_text("M_EPI2"), t_text("M_EPI3"), t_text("M_EPI4")]) }
+        "skill" => { Rc::new(vec![t_text("M_JKILL"), t_text("M_ROUGH"), t_text("M_HURT"), t_text("M_ULTRA"), t_text("M_NMARE")]) }
+        "load" => { Rc::new(vec![t_text("0"), t_text("1"), t_text("2"), t_text("3"), t_text("4"), t_text("5")]) }
+        "save" => { Rc::new(vec![t_text("0"), t_text("1"), t_text("2"), t_text("3"), t_text("4"), t_text("5")]) }
+        _ => { Rc::new(Vec::<Rc<String>>::new()) }
+    }
+}
+
+// note: A key press or release, by screen.
+fn f_play__key(v_app: Rc<T_play__App>, v_a: Rc<T_play__Assets>, v_name: Rc<String>, v_down: bool) -> Rc<T_play__App> {
+    t_enter("play.tes:198:4 in function `play__key`");
+    let mut v_next: Rc<T_play__App> = v_app.clone();
+    if ((v_app.clone()).f_screen.clone() == t_text("game")) {
+        if (v_down.clone() && (v_name.clone() == t_text("Escape"))) {
+            f_play__play(v_a.clone(), t_text("DSSWTCHN"), 80i64, 0i64);
+            return { let mut t1 = Rc::unwrap_or_clone(v_next); t1.f_screen = t_text("main"); t1.f_item = 0i64; t1.f_controls = f_std__keys__none(); Rc::new(t1) }
+        };
+        if (v_down.clone() && (v_name.clone() == t_text("F2"))) {
+            f_play__play(v_a.clone(), t_text("DSSWTCHN"), 80i64, 0i64);
+            return { let mut t2 = Rc::unwrap_or_clone(v_next); t2.f_screen = t_text("save"); t2.f_item = 0i64; t2.f_controls = f_std__keys__none(); Rc::new(t2) }
+        };
+        if (v_down.clone() && (v_name.clone() == t_text("F3"))) {
+            f_play__play(v_a.clone(), t_text("DSSWTCHN"), 80i64, 0i64);
+            return { let mut t3 = Rc::unwrap_or_clone(v_next); t3.f_screen = t_text("load"); t3.f_item = 0i64; t3.f_controls = f_std__keys__none(); Rc::new(t3) }
+        };
+        { let t_value = f_std__keys__update((v_app.clone()).f_controls.clone(), if v_down.clone() {
+            Rc::new(T_WindowEvent::V_Key(v_name.clone()))
+        } else {
+            Rc::new(T_WindowEvent::V_KeyUp(v_name.clone()))
+        }); *&mut Rc::make_mut(&mut v_next).f_controls = t_value; }
+        if f_std__keys__typed((v_next.clone()).f_controls.clone(), t_text("idkfa")) {
+            { let t_value = f_std__keys__forget_typed((v_next.clone()).f_controls.clone()); *&mut Rc::make_mut(&mut v_next).f_controls = t_value; }
+            { let t_value = { let mut t4 = Rc::unwrap_or_clone(((v_next.clone()).f_game.clone()).f_stats.clone()); t4.f_weapons = t_repeat_list(Rc::new(vec![true]), 8i64, "play.tes:217:55 in function `play__key`"); t4.f_ammo = (((v_next.clone()).f_game.clone()).f_stats.clone()).f_max_ammo.clone(); t4.f_keys = Rc::new(vec![t_text("blue"), t_text("yellow"), t_text("red")]); t4.f_armor = 200i64; t4.f_armor_class = 2i64; Rc::new(t4) }; *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_next).f_game).f_stats = t_value; }
+            { let t_value = f_state__say((v_next.clone()).f_game.clone(), t_text("Very happy ammo added")); *&mut Rc::make_mut(&mut v_next).f_game = t_value; }
+        };
+        if f_std__keys__typed((v_next.clone()).f_controls.clone(), t_text("iddqd")) {
+            { let t_value = f_std__keys__forget_typed((v_next.clone()).f_controls.clone()); *&mut Rc::make_mut(&mut v_next).f_controls = t_value; }
+            { let t_value = 1000000i64; *&mut Rc::make_mut(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_next).f_game).f_stats).f_invulnerable = t_value; }
+            { let t_value = f_state__say((v_next.clone()).f_game.clone(), t_text("Degreelessness mode on")); *&mut Rc::make_mut(&mut v_next).f_game = t_value; }
+        };
+        if v_down.clone() {
+            match &(t_parse_int(&v_name.clone())) {
+                Some(t5) => { let v_n = t5.clone(); if ((v_n.clone() >= 1i64) && (v_n.clone() <= 7i64)) {
+                    { let t_value = f_combat__select_weapon((v_next.clone()).f_game.clone(), t_sub(v_n.clone(), 1i64, "play.tes:228:51 in function `play__key`")); *&mut Rc::make_mut(&mut v_next).f_game = t_value; }
+                } }
+                None => { {
+                } }
+            }
+        };
+        return v_next
+    };
+    if (!v_down.clone()) {
+        return v_next
+    };
+    if (((v_app.clone()).f_screen.clone() == t_text("title")) || ((v_app.clone()).f_screen.clone() == t_text("help"))) {
+        f_play__play(v_a.clone(), t_text("DSSWTCHN"), 80i64, 0i64);
+        return { let mut t6 = Rc::unwrap_or_clone(v_next); t6.f_screen = t_text("main"); t6.f_item = 0i64; Rc::new(t6) }
+    };
+    if ((v_app.clone()).f_screen.clone() == t_text("intermission")) {
+        let v_following: Rc<String> = f_world__next_map((((v_app.clone()).f_game.clone()).f_level.clone()).f_name.clone(), (((v_app.clone()).f_game.clone()).f_exited.clone() == 2i64));
+        if (v_following.clone() == t_text("")) {
+            return { let mut t7 = Rc::unwrap_or_clone(v_next); t7.f_screen = t_text("main"); t7.f_item = 0i64; t7.f_in_game = false; t7.f_message = t_text("Episode complete. Well done!"); Rc::new(t7) }
+        };
+        return f_play__start_level(v_next, v_a, v_following, ((v_app.clone()).f_game.clone()).f_skill.clone(), ((v_app.clone()).f_game.clone()).f_stats.clone())
+    };
+    let v_count: i64 = if ((v_app.clone()).f_screen.clone() == t_text("level")) {
+        f_std__math__max(t_list_length(&f_play__episode_maps(v_a.clone(), (v_app.clone()).f_episode.clone())), 1i64)
+    } else {
+        t_list_length(&f_play__menu_items((v_app.clone()).f_screen.clone()))
+    };
+    match (v_name.clone()).as_str() {
+        "Up" => { {
+            f_play__play(v_a.clone(), t_text("DSPSTOP"), 60i64, 0i64);
+            return { let mut t8 = Rc::unwrap_or_clone(v_next); t8.f_item = t_rem(t_sub(t_add((v_app).f_item.clone(), v_count.clone(), "play.tes:253:36 in function `play__key`"), 1i64, "play.tes:253:44 in function `play__key`"), v_count.clone(), "play.tes:253:49 in function `play__key`"); t8.f_message = t_text(""); Rc::new(t8) }
+        } }
+        "Down" => { {
+            f_play__play(v_a.clone(), t_text("DSPSTOP"), 60i64, 0i64);
+            return { let mut t9 = Rc::unwrap_or_clone(v_next); t9.f_item = t_rem(t_add((v_app).f_item.clone(), 1i64, "play.tes:257:36 in function `play__key`"), v_count, "play.tes:257:41 in function `play__key`"); t9.f_message = t_text(""); Rc::new(t9) }
+        } }
+        "Escape" => { {
+            f_play__play(v_a.clone(), t_text("DSSWTCHX"), 80i64, 0i64);
+            let v_back: Rc<String> = match ((v_app.clone()).f_screen.clone()).as_str() {
+                "main" => { if (v_app.clone()).f_in_game.clone() {
+                    t_text("game")
+                } else {
+                    t_text("title")
+                } }
+                "skill" => { t_text("episode") }
+                "level" => { t_text("skill") }
+                _ => { t_text("main") }
+            };
+            let v_back_item: i64 = if (v_back.clone() == t_text("skill")) {
+                (v_app.clone()).f_skill.clone()
+            } else if (v_back.clone() == t_text("episode")) {
+                t_sub((v_app.clone()).f_episode.clone(), 1i64, "play.tes:267:90 in function `play__key`")
+            } else {
+                0i64
+            };
+            return { let mut t10 = Rc::unwrap_or_clone(v_next); t10.f_screen = v_back; t10.f_item = v_back_item; t10.f_message = t_text(""); Rc::new(t10) }
+        } }
+        "Enter" => { {
+        } }
+        _ => { return v_next }
+    };
+    f_play__play(v_a.clone(), t_text("DSPISTOL"), 80i64, 0i64);
+    match ((v_app.clone()).f_screen.clone()).as_str() {
+        "main" => { match (v_app.clone()).f_item.clone() {
+            0 => { return { let mut t11 = Rc::unwrap_or_clone(v_next); t11.f_screen = t_text("episode"); t11.f_item = 0i64; Rc::new(t11) } }
+            1 => { return { let mut t12 = Rc::unwrap_or_clone(v_next); t12.f_screen = t_text("load"); t12.f_item = 0i64; Rc::new(t12) } }
+            2 => { return if (v_app).f_in_game.clone() {
+                { let mut t13 = Rc::unwrap_or_clone(v_next); t13.f_screen = t_text("save"); t13.f_item = 0i64; Rc::new(t13) }
+            } else {
+                { let mut t14 = Rc::unwrap_or_clone(v_next); t14.f_message = t_text("You can only save during a game"); Rc::new(t14) }
+            } }
+            3 => { return { let mut t15 = Rc::unwrap_or_clone(v_next); t15.f_screen = t_text("help"); Rc::new(t15) } }
+            _ => { return { let mut t16 = Rc::unwrap_or_clone(v_next); t16.f_quit = true; Rc::new(t16) } }
+        } }
+        "episode" => { return { let mut t17 = Rc::unwrap_or_clone(v_next); t17.f_screen = t_text("skill"); t17.f_episode = t_add((v_app.clone()).f_item.clone(), 1i64, "play.tes:282:68 in function `play__key`"); t17.f_item = (v_app.clone()).f_skill.clone(); Rc::new(t17) } }
+        "skill" => { return { let mut t18 = Rc::unwrap_or_clone(v_next); t18.f_screen = t_text("level"); t18.f_skill = (v_app).f_item.clone(); t18.f_item = 0i64; Rc::new(t18) } }
+        "level" => { {
+            let v_maps: Rc<Vec<Rc<String>>> = f_play__episode_maps(v_a.clone(), (v_app.clone()).f_episode.clone());
+            if (t_list_length(&v_maps.clone()) == 0i64) {
+                return { let mut t19 = Rc::unwrap_or_clone(v_next); t19.f_message = t_text("This episode has no maps in the WAD"); Rc::new(t19) }
+            };
+            return f_play__start_level(v_next, v_a, t_index(&v_maps, (v_app.clone()).f_item.clone(), "play.tes:289:29 in function `play__key`"), (v_app.clone()).f_skill.clone(), f_state__start_stats())
+        } }
+        "load" => { return f_play__load_game(v_next, v_a, (v_app).f_item.clone()) }
+        "save" => { return f_play__save_game(v_next, (v_app).f_item.clone()) }
+        _ => { {
+        } }
+    };
+    v_next
+}
+
+fn f_play__picture_at(v_frame: Rc<T_std__raster__Image>, v_a: Rc<T_play__Assets>, v_name: Rc<String>, v_x: i64, v_y: i64) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:300:4 in function `play__picture_at`");
+    let mut v_out: Rc<T_std__raster__Image> = v_frame;
+    match &(t_map_get(&(v_a.clone()).f_pictures.clone(), &v_name.clone())) {
+        Some(t1) => { let v_g = t1.clone(); {
+            v_out = f_std__raster__blit(v_out, (v_g.clone()).f_image.clone(), t_sub(v_x.clone(), (v_g.clone()).f_left.clone(), "play.tes:303:51 in function `play__picture_at`"), t_sub(v_y.clone(), (v_g.clone()).f_top.clone(), "play.tes:303:63 in function `play__picture_at`"), (-1i64));
+        } }
+        None => { {
+        } }
+    };
+    v_out
+}
+
+fn f_play__write(v_frame: Rc<T_std__raster__Image>, v_a: Rc<T_play__Assets>, v_x: i64, v_y: i64, v_message: Rc<String>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:309:4 in function `play__write`");
+    f_std__raster__text(v_frame, (v_a).f_font.clone(), v_x, v_y, t_to_upper(&v_message))
+}
+
+fn f_play__centered(v_frame: Rc<T_std__raster__Image>, v_a: Rc<T_play__Assets>, v_y: i64, v_message: Rc<String>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:311:4 in function `play__centered`");
+    f_play__write(v_frame, v_a.clone(), t_div(t_sub(f_geometry__screen_width(), f_std__raster__measure((v_a.clone()).f_font.clone(), t_to_upper(&v_message.clone())), "play.tes:311:127 in function `play__centered`"), 2i64, "play.tes:311:172 in function `play__centered`"), v_y, v_message.clone())
+}
+
+fn f_play__black(v_a: Rc<T_play__Assets>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:313:4 in function `play__black`");
+    f_std__raster__blank(f_geometry__screen_width(), f_geometry__screen_height(), 0i64)
+}
+
+fn f_play__initial(v_color: Rc<String>) -> Rc<String> {
+    t_enter("play.tes:315:4 in function `play__initial`");
+    t_to_upper(&t_slice_text(v_color, 0i64, 1i64, "play.tes:315:44 in function `play__initial`"))
+}
+
+// note: The status line and message: health, armor, the current weapon's ammunition, keys.
+fn f_play__hud(v_frame: Rc<T_std__raster__Image>, v_a: Rc<T_play__Assets>, v_g: Rc<T_state__World>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:318:4 in function `play__hud`");
+    let mut v_out: Rc<T_std__raster__Image> = v_frame;
+    let v_s: Rc<T_state__Stats> = (v_g.clone()).f_stats.clone();
+    let v_kind: i64 = f_things__ammo_kind((v_s.clone()).f_weapon.clone());
+    let v_ammo: Rc<String> = if (v_kind.clone() < 0i64) {
+        t_text("")
+    } else {
+        t_concat(t_concat(t_concat(t_concat(t_concat(t_text("  "), (t_to_upper(&f_things__ammo_name(v_kind.clone())))), t_text(" ")), t_int_to_text(t_index(&(v_s.clone()).f_ammo.clone(), v_kind.clone(), "play.tes:322:79 in function `play__hud`"))), t_text("/")), t_int_to_text(t_index(&(v_s.clone()).f_max_ammo.clone(), v_kind.clone(), "play.tes:322:95 in function `play__hud`")))
+    };
+    let v_held_keys: Rc<String> = if (t_list_length(&(v_s.clone()).f_keys.clone()) == 0i64) {
+        t_text("")
+    } else {
+        t_concat(t_text("  KEYS "), (t_join(&t_map_list((v_s.clone()).f_keys.clone(), (f_play__initial as fn(Rc<String>) -> Rc<String>)), &t_text(""))))
+    };
+    v_out = f_play__write(v_out, v_a.clone(), 4i64, 190i64, t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("HEALTH "), t_int_to_text((v_s.clone()).f_health.clone())), t_text("%  ARMOR ")), t_int_to_text((v_s.clone()).f_armor.clone())), t_text("%")), (v_ammo.clone())), t_text("")), (v_held_keys.clone())));
+    if ((v_g.clone()).f_message_time.clone() > 0i64) {
+        v_out = f_play__write(v_out, v_a.clone(), 4i64, 3i64, (v_g.clone()).f_message.clone());
+    };
+    v_out
+}
+
+// note: The weapon in hand and its flash, placed with their sprite offsets as the format defines for weapon sprites (relative to the point (1, 32) of the screen).
+fn f_play__weapon(v_frame: Rc<T_std__raster__Image>, v_a: Rc<T_play__Assets>, v_g: Rc<T_state__World>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:332:4 in function `play__weapon`");
+    let mut v_out: Rc<T_std__raster__Image> = v_frame;
+    if (((v_g.clone()).f_stats.clone()).f_health.clone() <= 0i64) {
+        return v_out
+    };
+    for v_name in t_iter(f_world__weapon_view(v_g.clone())) {
+        t_tick("play.tes:337:34 in function `play__weapon`");
+        match &(t_map_get(&((v_a.clone()).f_sprites.clone()).f_frames.clone(), &v_name.clone())) {
+            Some(t1) => { let v_entry = t1.clone(); {
+                let v_hand: Rc<T_art__Graphic> = f_art__graphic(t_index(&((v_a.clone()).f_sprites.clone()).f_pictures.clone(), t_div(v_entry.clone(), 2i64, "play.tes:340:49 in function `play__weapon`"), "play.tes:340:24 in function `play__weapon`"));
+                v_out = f_std__raster__blit(v_out, (v_hand.clone()).f_image.clone(), t_sub(1i64, (v_hand.clone()).f_left.clone(), "play.tes:341:42 in function `play__weapon`"), t_sub(32i64, (v_hand.clone()).f_top.clone(), "play.tes:341:58 in function `play__weapon`"), (-1i64));
+            } }
+            None => { {
+            } }
+        }
+    }
+    v_out
+}
+
+fn f_play__game_frame(v_app: Rc<T_play__App>, v_a: Rc<T_play__Assets>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:349:4 in function `play__game_frame`");
+    f_play__view_frame((v_app.clone()).f_scene.clone(), (v_app.clone()).f_game.clone(), v_a)
+}
+
+fn f_play__view_frame(v_scene: Rc<T_render__Scene>, v_g: Rc<T_state__World>, v_a: Rc<T_play__Assets>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:351:4 in function `play__view_frame`");
+    let mut v_frame: Rc<T_std__raster__Image> = f_std__raster__from_pixels(f_geometry__screen_width(), f_render__render_world(v_scene.clone(), ((v_g.clone()).f_level.clone()).f_sectors.clone(), (v_g.clone()).f_switched.clone(), f_world__camera(v_g.clone()), (v_a.clone()).f_trig.clone(), f_world__sprites(v_g.clone()), (v_a.clone()).f_sprites.clone()));
+    v_frame = f_play__weapon(v_frame, v_a.clone(), v_g.clone());
+    v_frame = f_play__hud(v_frame, v_a.clone(), v_g.clone());
+    v_frame
+}
+
+fn f_play__menu_frame(v_app: Rc<T_play__App>, v_a: Rc<T_play__Assets>, v_tic: i64, v_descriptions: Rc<Vec<Rc<String>>>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:358:4 in function `play__menu_frame`");
+    let mut v_pixels: Rc<T_std__raster__Image> = if (v_app.clone()).f_in_game.clone() {
+        f_std__raster__remap(f_play__game_frame(v_app.clone(), v_a.clone()), t_index(&(v_a.clone()).f_shades.clone(), 18i64, "play.tes:359:64 in function `play__menu_frame`"))
+    } else {
+        f_std__raster__remap(f_play__picture_at(f_play__black(v_a.clone()), v_a.clone(), t_text("TITLEPIC"), 0i64, 0i64), t_index(&(v_a.clone()).f_shades.clone(), if ((v_app.clone()).f_screen.clone() == t_text("level")) {
+            24i64
+        } else {
+            14i64
+        }, "play.tes:359:143 in function `play__menu_frame`"))
+    };
+    let v_skull: Rc<String> = if (t_rem(t_div(v_tic.clone(), 8i64, "play.tes:360:21 in function `play__menu_frame`"), 2i64, "play.tes:360:26 in function `play__menu_frame`") == 0i64) {
+        t_text("M_SKULL1")
+    } else {
+        t_text("M_SKULL2")
+    };
+    let v_items: Rc<Vec<Rc<String>>> = f_play__menu_items((v_app.clone()).f_screen.clone());
+    match ((v_app.clone()).f_screen.clone()).as_str() {
+        "main" => { {
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_DOOM"), 94i64, 2i64);
+            for v_i in t_iter(t_range(0i64, t_list_length(&v_items.clone()), "play.tes:365:10 in function `play__menu_frame`")) {
+                t_tick("play.tes:365:34 in function `play__menu_frame`");
+                v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_index(&v_items.clone(), v_i.clone(), "play.tes:366:36 in function `play__menu_frame`"), 97i64, t_add(64i64, t_mul(v_i.clone(), 16i64, "play.tes:366:57 in function `play__menu_frame`"), "play.tes:366:53 in function `play__menu_frame`"));
+            }
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), v_skull.clone(), 65i64, t_add(59i64, t_mul((v_app.clone()).f_item.clone(), 16i64, "play.tes:368:61 in function `play__menu_frame`"), "play.tes:368:50 in function `play__menu_frame`"));
+        } }
+        "episode" => { {
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_EPISOD"), 54i64, 38i64);
+            for v_i in t_iter(t_range(0i64, t_list_length(&v_items.clone()), "play.tes:372:10 in function `play__menu_frame`")) {
+                t_tick("play.tes:372:34 in function `play__menu_frame`");
+                v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_index(&v_items.clone(), v_i.clone(), "play.tes:373:36 in function `play__menu_frame`"), 48i64, t_add(63i64, t_mul(v_i.clone(), 16i64, "play.tes:373:57 in function `play__menu_frame`"), "play.tes:373:53 in function `play__menu_frame`"));
+            }
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), v_skull.clone(), 16i64, t_add(58i64, t_mul((v_app.clone()).f_item.clone(), 16i64, "play.tes:375:61 in function `play__menu_frame`"), "play.tes:375:50 in function `play__menu_frame`"));
+        } }
+        "skill" => { {
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_NEWG"), 96i64, 14i64);
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_SKILL"), 54i64, 38i64);
+            for v_i in t_iter(t_range(0i64, t_list_length(&v_items.clone()), "play.tes:380:10 in function `play__menu_frame`")) {
+                t_tick("play.tes:380:34 in function `play__menu_frame`");
+                v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_index(&v_items.clone(), v_i.clone(), "play.tes:381:36 in function `play__menu_frame`"), 48i64, t_add(63i64, t_mul(v_i.clone(), 16i64, "play.tes:381:57 in function `play__menu_frame`"), "play.tes:381:53 in function `play__menu_frame`"));
+            }
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), v_skull.clone(), 16i64, t_add(58i64, t_mul((v_app.clone()).f_item.clone(), 16i64, "play.tes:383:61 in function `play__menu_frame`"), "play.tes:383:50 in function `play__menu_frame`"));
+        } }
+        "level" => { {
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_NEWG"), 96i64, 14i64);
+            v_pixels = f_play__centered(v_pixels, v_a.clone(), 40i64, t_text("CHOOSE LEVEL"));
+            let v_maps: Rc<Vec<Rc<String>>> = f_play__episode_maps(v_a.clone(), (v_app.clone()).f_episode.clone());
+            for v_i in t_iter(t_range(0i64, t_list_length(&v_maps.clone()), "play.tes:389:10 in function `play__menu_frame`")) {
+                t_tick("play.tes:389:33 in function `play__menu_frame`");
+                let v_label: Rc<String> = if (v_i.clone() == 8i64) {
+                    t_concat((t_index(&v_maps.clone(), v_i.clone(), "play.tes:390:28 in function `play__menu_frame`")), t_text("  (SECRET LEVEL)"))
+                } else {
+                    t_index(&v_maps.clone(), v_i.clone(), "play.tes:390:63 in function `play__menu_frame`")
+                };
+                v_pixels = f_play__write(v_pixels, v_a.clone(), 120i64, t_add(58i64, t_mul(v_i.clone(), 12i64, "play.tes:391:43 in function `play__menu_frame`"), "play.tes:391:39 in function `play__menu_frame`"), v_label.clone());
+            }
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), v_skull.clone(), 88i64, t_add(52i64, t_mul((v_app.clone()).f_item.clone(), 12i64, "play.tes:393:61 in function `play__menu_frame`"), "play.tes:393:50 in function `play__menu_frame`"));
+        } }
+        _ => { {
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), if ((v_app.clone()).f_screen.clone() == t_text("load")) {
+                t_text("M_LOADG")
+            } else {
+                t_text("M_SAVEG")
+            }, 72i64, 28i64);
+            for v_i in t_iter(t_range(0i64, 6i64, "play.tes:398:10 in function `play__menu_frame`")) {
+                t_tick("play.tes:398:22 in function `play__menu_frame`");
+                let v_y: i64 = t_add(59i64, t_mul(v_i.clone(), 16i64, "play.tes:399:16 in function `play__menu_frame`"), "play.tes:399:12 in function `play__menu_frame`");
+                v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_LSLEFT"), 72i64, v_y.clone());
+                for v_k in t_iter(t_range(0i64, 24i64, "play.tes:401:10 in function `play__menu_frame`")) {
+                    t_tick("play.tes:401:23 in function `play__menu_frame`");
+                    v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_LSCNTR"), t_add(80i64, t_mul(v_k.clone(), 8i64, "play.tes:402:55 in function `play__menu_frame`"), "play.tes:402:51 in function `play__menu_frame`"), v_y.clone());
+                }
+                v_pixels = f_play__picture_at(v_pixels, v_a.clone(), t_text("M_LSRGHT"), 272i64, v_y.clone());
+                v_pixels = f_play__write(v_pixels, v_a.clone(), 80i64, t_sub(v_y.clone(), 4i64, "play.tes:405:37 in function `play__menu_frame`"), t_index(&v_descriptions.clone(), v_i.clone(), "play.tes:405:42 in function `play__menu_frame`"));
+            }
+            v_pixels = f_play__picture_at(v_pixels, v_a.clone(), v_skull.clone(), 40i64, t_add(54i64, t_mul((v_app.clone()).f_item.clone(), 16i64, "play.tes:407:61 in function `play__menu_frame`"), "play.tes:407:50 in function `play__menu_frame`"));
+        } }
+    };
+    if ((v_app.clone()).f_message.clone() != t_text("")) {
+        v_pixels = f_play__centered(v_pixels, v_a.clone(), 170i64, (v_app.clone()).f_message.clone());
+    };
+    v_pixels
+}
+
+fn f_play__intermission_frame(v_app: Rc<T_play__App>, v_a: Rc<T_play__Assets>) -> Rc<T_std__raster__Image> {
+    t_enter("play.tes:416:4 in function `play__intermission_frame`");
+    f_std__raster__from_pixels(f_geometry__screen_width(), f_play__intermission_pixels((v_app.clone()).f_game.clone(), (v_app.clone()).f_scene.clone(), v_a))
+}
+
+// note: The screen between levels: the level's name, kills, items and secrets in percent, the time, and the next map.
+fn f_play__intermission_pixels(v_g: Rc<T_state__World>, v_scene: Rc<T_render__Scene>, v_a: Rc<T_play__Assets>) -> Rc<Vec<i64>> {
+    t_enter("play.tes:419:8 in function `play__intermission_pixels`");
+    let v_codes: Rc<Vec<i64>> = t_code_points(&((v_g.clone()).f_level.clone()).f_name.clone());
+    let v_episode: i64 = if (t_list_length(&v_codes.clone()) == 4i64) {
+        t_sub(t_index(&v_codes.clone(), 1i64, "play.tes:421:39 in function `play__intermission_pixels`"), 49i64, "play.tes:421:48 in function `play__intermission_pixels`")
+    } else {
+        0i64
+    };
+    let mut v_pixels: Rc<T_std__raster__Image> = f_play__picture_at(f_play__black(v_a.clone()), v_a.clone(), t_concat(t_text("WIMAP"), t_int_to_text(f_std__math__clamp(v_episode.clone(), 0i64, 2i64))), 0i64, 0i64);
+    v_pixels = f_std__raster__remap(v_pixels, t_index(&(v_a.clone()).f_shades.clone(), 10i64, "play.tes:423:35 in function `play__intermission_pixels`"));
+    let mut v_monsters: i64 = 0i64;
+    let mut v_items: i64 = 0i64;
+    for v_m in t_iter((v_g.clone()).f_mobjs.clone()) {
+        t_tick("play.tes:426:18 in function `play__intermission_pixels`");
+        match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
+            T_things__Role::V_Monster(_) => { if (v_m.clone()).f_present.clone() {
+                v_monsters = t_add(v_monsters.clone(), 1i64, "play.tes:429:14 in function `play__intermission_pixels`");
+            } }
+            T_things__Role::V_Item(_) => { {
+                v_items = t_add(v_items.clone(), 1i64, "play.tes:431:23 in function `play__intermission_pixels`");
+            } }
+            _ => { {
+            } }
+        }
+    }
+    let mut v_secrets: i64 = 0i64;
+    for v_s in t_iter(((v_scene.clone()).f_level.clone()).f_sectors.clone()) {
+        t_tick("play.tes:436:30 in function `play__intermission_pixels`");
+        if ((v_s.clone()).f_special.clone() == 9i64) {
+            v_secrets = t_add(v_secrets.clone(), 1i64, "play.tes:438:13 in function `play__intermission_pixels`");
+        }
+    }
+    v_pixels = f_play__centered(v_pixels, v_a.clone(), 40i64, t_concat((((v_g.clone()).f_level.clone()).f_name.clone()), t_text(" FINISHED")));
+    v_pixels = f_play__centered(v_pixels, v_a.clone(), 70i64, t_concat(t_concat(t_text("KILLS "), t_int_to_text(f_play__percent(((v_g.clone()).f_stats.clone()).f_kills.clone(), v_monsters.clone()))), t_text("%")));
+    v_pixels = f_play__centered(v_pixels, v_a.clone(), 86i64, t_concat(t_concat(t_text("ITEMS "), t_int_to_text(f_play__percent(((v_g.clone()).f_stats.clone()).f_items.clone(), v_items.clone()))), t_text("%")));
+    v_pixels = f_play__centered(v_pixels, v_a.clone(), 102i64, t_concat(t_concat(t_text("SECRETS "), t_int_to_text(f_play__percent(((v_g.clone()).f_stats.clone()).f_secrets.clone(), v_secrets.clone()))), t_text("%")));
+    v_pixels = f_play__centered(v_pixels, v_a.clone(), 118i64, t_concat(t_concat(t_concat(t_text("TIME "), t_int_to_text(t_div(t_div((v_g.clone()).f_tic.clone(), 35i64, "play.tes:445:53 in function `play__intermission_pixels`"), 60i64, "play.tes:445:58 in function `play__intermission_pixels`"))), t_text(":")), (t_pad_left(t_int_to_text(t_rem(t_div((v_g.clone()).f_tic.clone(), 35i64, "play.tes:445:89 in function `play__intermission_pixels`"), 60i64, "play.tes:445:94 in function `play__intermission_pixels`")), 2i64, t_text("0"), "play.tes:445:66 in function `play__intermission_pixels`"))));
+    let v_following: Rc<String> = f_world__next_map(((v_g.clone()).f_level.clone()).f_name.clone(), ((v_g.clone()).f_exited.clone() == 2i64));
+    v_pixels = f_play__centered(v_pixels, v_a.clone(), 150i64, if (v_following.clone() == t_text("")) {
+        t_text("PRESS A KEY")
+    } else {
+        t_concat(t_concat(t_text("NEXT: "), (v_following.clone())), t_text(" - PRESS A KEY"))
+    });
+    (v_pixels).f_pixels.clone()
+}
+
+fn f_play__percent(v_part: i64, v_whole: i64) -> i64 {
+    t_enter("play.tes:451:4 in function `play__percent`");
+    if (v_whole.clone() <= 0i64) {
+        100i64
+    } else {
+        f_std__math__min(t_div(t_mul(v_part, 100i64, "play.tes:451:87 in function `play__percent`"), v_whole.clone(), "play.tes:451:93 in function `play__percent`"), 100i64)
+    }
+}
+
+// note: Runs the game in a window until the player quits. With `start_map` empty it starts at the title screen, otherwise directly in that map. `uncapped` renders as fast as possible (to measure), `seconds` > 0 stops after that many seconds. Returns the number of frames shown and the time taken in milliseconds.
+fn f_play__run(v_a: Rc<T_play__Assets>, v_start_map: Rc<String>, v_skill: i64, v_seconds: i64, v_uncapped: bool, v_monsters: bool) -> Rc<Vec<i64>> {
+    t_enter("play.tes:454:8 in function `play__run`");
     let v_scale: i64 = 2i64;
     let v_width: i64 = f_geometry__screen_width();
     let v_height: i64 = f_geometry__screen_height();
-    t_open_window(t_concat(t_text("Tesseradoom - "), ((v_l.clone()).f_name.clone())), t_mul(v_width.clone(), v_scale.clone(), "play.tes:88:46 in function `play__run`"), t_mul(v_height.clone(), v_scale.clone(), "play.tes:88:62 in function `play__run`"), "play.tes:88:1 in function `play__run`");
-    let v_palette_colors: Rc<Vec<i64>> = f_std__palette__read(v_playpal.clone(), 0i64);
-    let mut v_colors: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), v_height.clone(), "play.tes:90:32 in function `play__run`"), "play.tes:90:14 in function `play__run`");
-    let mut v_game: Rc<T_world__World> = f_world__create(v_l.clone());
-    if (!v_monsters.clone()) {
-        v_game = f_world__without_monsters(v_game);
+    t_open_window(t_text("Tesseradoom"), t_mul(v_width.clone(), v_scale.clone(), "play.tes:458:34 in function `play__run`"), t_mul(v_height.clone(), v_scale.clone(), "play.tes:458:50 in function `play__run`"), "play.tes:458:1 in function `play__run`");
+    let v_first: Rc<String> = if (v_start_map.clone() == t_text("")) {
+        t_text("E1M1")
+    } else {
+        v_start_map.clone()
     };
-    let mut v_controls: Rc<T_play__Controls> = f_play__no_controls();
+    let v_scene: Rc<T_render__Scene> = match f_play__level_scene(v_a.clone(), v_first.clone()) { Some(t_value) => t_value, None => { return Rc::new(vec![0i64, 0i64]) } };
+    let v_game: Rc<T_state__World> = f_world__create_at_skill((v_scene.clone()).f_level.clone(), v_skill.clone());
+    let mut v_app: Rc<T_play__App> = Rc::new(T_play__App { f_screen: t_text("title"), f_item: 0i64, f_episode: 1i64, f_skill: 2i64, f_in_game: false, f_game: v_game.clone(), f_scene: v_scene.clone(), f_start_stats: (v_game.clone()).f_stats.clone(), f_controls: f_std__keys__none(), f_monsters: v_monsters.clone(), f_quit: false, f_message: t_text("") });
+    if (v_start_map.clone() != t_text("")) {
+        v_app = f_play__start_level(v_app, v_a.clone(), v_start_map.clone(), v_skill.clone(), f_state__start_stats());
+    };
+    let mut v_slots: Rc<Vec<Rc<String>>> = f_play__slot_descriptions();
     let v_started: i64 = tw_monotonic_ms();
     let mut v_tics: i64 = 0i64;
     let mut v_frames: i64 = 0i64;
-    while (!(v_controls.clone()).f_quit.clone()) {
-        t_tick("play.tes:99:25 in function `play__run`");
+    let mut v_dead_since: i64 = 0i64;
+    while (!(v_app.clone()).f_quit.clone()) {
+        t_tick("play.tes:471:20 in function `play__run`");
         let mut v_waiting: bool = true;
         while v_waiting.clone() {
-            t_tick("play.tes:102:15 in function `play__run`");
-            match &(t_poll_event("play.tes:103:7 in function `play__run`")) {
+            t_tick("play.tes:473:15 in function `play__run`");
+            match &(t_poll_event("play.tes:474:7 in function `play__run`")) {
                 Some(t1) => { let v_event = t1.clone(); match &*(v_event.clone()) {
                     T_WindowEvent::V_Key(t2) => { let v_name = t2.clone(); {
-                        v_controls = f_play__press(v_controls, v_name.clone(), true);
+                        let v_before: Rc<String> = (v_app.clone()).f_screen.clone();
+                        v_app = f_play__key(v_app, v_a.clone(), v_name.clone(), true);
+                        if ((((v_app.clone()).f_screen.clone() == t_text("load")) || ((v_app.clone()).f_screen.clone() == t_text("save"))) || (v_before.clone() == t_text("save"))) {
+                            v_slots = f_play__slot_descriptions();
+                        }
                     } }
                     T_WindowEvent::V_KeyUp(t3) => { let v_name = t3.clone(); {
-                        v_controls = f_play__press(v_controls, v_name.clone(), false);
+                        v_app = f_play__key(v_app, v_a.clone(), v_name.clone(), false);
                     } }
                     T_WindowEvent::V_Close => { {
-                        v_controls = { let mut t4 = Rc::unwrap_or_clone(v_controls); t4.f_quit = true; Rc::new(t4) };
+                        { let t_value = true; *&mut Rc::make_mut(&mut v_app).f_quit = t_value; }
                     } }
                     T_WindowEvent::V_Click(_, _, _) => { {
                     } }
@@ -5636,51 +6361,73 @@ fn f_play__run(v_scene: Rc<T_render__Scene>, v_sprites: Rc<T_art__Sprites>, v_pl
                 } }
             }
         }
-        let v_now: i64 = t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:114:23 in function `play__run`");
-        while (v_tics.clone() < t_div(t_mul(v_now.clone(), 35i64, "play.tes:115:18 in function `play__run`"), 1000i64, "play.tes:115:23 in function `play__run`")) {
-            t_tick("play.tes:115:30 in function `play__run`");
-            v_game = f_world__tic(v_game, f_play__input(v_controls.clone()), v_trig.clone());
-            v_tics = t_add(v_tics.clone(), 1i64, "play.tes:117:10 in function `play__run`");
+        let v_now: i64 = t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:490:23 in function `play__run`");
+        let v_due: i64 = t_div(t_mul(v_now.clone(), 35i64, "play.tes:491:15 in function `play__run`"), 1000i64, "play.tes:491:20 in function `play__run`");
+        while (v_tics.clone() < v_due.clone()) {
+            t_tick("play.tes:492:18 in function `play__run`");
+            if ((v_app.clone()).f_screen.clone() == t_text("game")) {
+                { let t_value = f_world__tic((v_app.clone()).f_game.clone(), f_play__input((v_app.clone()).f_controls.clone()), (v_a.clone()).f_trig.clone()); *&mut Rc::make_mut(&mut v_app).f_game = t_value; }
+                f_play__play_world_sounds(v_a.clone(), (v_app.clone()).f_game.clone());
+                if (((v_app.clone()).f_game.clone()).f_exited.clone() > 0i64) {
+                    { let t_value = t_text("intermission"); *&mut Rc::make_mut(&mut v_app).f_screen = t_value; }
+                    { let t_value = f_std__keys__release_all((v_app.clone()).f_controls.clone()); *&mut Rc::make_mut(&mut v_app).f_controls = t_value; }
+                };
+                if ((((v_app.clone()).f_game.clone()).f_stats.clone()).f_health.clone() <= 0i64) {
+                    v_dead_since = t_add(v_dead_since.clone(), 1i64, "play.tes:501:16 in function `play__run`");
+                    if ((v_dead_since.clone() > 35i64) && f_std__keys__any_held((v_app.clone()).f_controls.clone(), Rc::new(vec![t_text(" "), t_text("e")]))) {
+                        v_dead_since = 0i64;
+                        v_app = f_play__start_level(v_app.clone(), v_a.clone(), (((v_app.clone()).f_game.clone()).f_level.clone()).f_name.clone(), ((v_app.clone()).f_game.clone()).f_skill.clone(), (v_app.clone()).f_start_stats.clone());
+                    }
+                } else {
+                    v_dead_since = 0i64;
+                }
+            };
+            v_tics = t_add(v_tics.clone(), 1i64, "play.tes:510:10 in function `play__run`");
         }
-        v_colors = f_play__to_colors(std::mem::take(&mut v_colors), f_render__render_world(v_scene.clone(), ((v_game.clone()).f_level.clone()).f_sectors.clone(), f_world__camera(v_game.clone()), v_trig.clone(), f_world__sprites(v_game.clone()), v_sprites.clone()), v_palette_colors.clone());
-        t_draw_pixels(0i64, 0i64, v_width.clone(), &v_colors.clone(), v_scale.clone(), "play.tes:120:1 in function `play__run`");
-        t_draw_text(9i64, t_sub(t_mul(v_height.clone(), v_scale.clone(), "play.tes:121:21 in function `play__run`"), 21i64, "play.tes:121:29 in function `play__run`"), f_play__status(v_game.clone()), t_rgb(0i64, 0i64, 0i64, "play.tes:121:49 in function `play__run`"), "play.tes:121:1 in function `play__run`");
-        t_draw_text(8i64, t_sub(t_mul(v_height.clone(), v_scale.clone(), "play.tes:122:21 in function `play__run`"), 22i64, "play.tes:122:29 in function `play__run`"), f_play__status(v_game.clone()), t_rgb(255i64, 220i64, 120i64, "play.tes:122:49 in function `play__run`"), "play.tes:122:1 in function `play__run`");
-        t_present("play.tes:123:1 in function `play__run`");
-        v_frames = t_add(v_frames.clone(), 1i64, "play.tes:124:12 in function `play__run`");
-        if ((v_seconds.clone() > 0i64) && (v_now.clone() >= t_mul(v_seconds.clone(), 1000i64, "play.tes:125:35 in function `play__run`"))) {
-            v_controls = { let mut t5 = Rc::unwrap_or_clone(v_controls); t5.f_quit = true; Rc::new(t5) };
+        let v_frame: Rc<T_std__raster__Image> = match ((v_app.clone()).f_screen.clone()).as_str() {
+            "game" => { f_play__game_frame(v_app.clone(), v_a.clone()) }
+            "intermission" => { f_play__intermission_frame(v_app.clone(), v_a.clone()) }
+            "title" => { f_play__picture_at(f_play__black(v_a.clone()), v_a.clone(), t_text("TITLEPIC"), 0i64, 0i64) }
+            "help" => { f_play__picture_at(f_play__black(v_a.clone()), v_a.clone(), t_text("HELP1"), 0i64, 0i64) }
+            _ => { f_play__menu_frame(v_app.clone(), v_a.clone(), v_tics.clone(), v_slots.clone()) }
+        };
+        let v_palette_index: i64 = if ((v_app.clone()).f_screen.clone() == t_text("game")) {
+            f_world__palette_index((v_app.clone()).f_game.clone())
+        } else {
+            0i64
+        };
+        t_draw_pixels(0i64, 0i64, v_width.clone(), &(f_std__raster__remap(v_frame.clone(), t_index(&(v_a.clone()).f_palettes.clone(), v_palette_index.clone(), "play.tes:520:46 in function `play__run`"))).f_pixels.clone(), v_scale.clone(), "play.tes:520:1 in function `play__run`");
+        t_present("play.tes:521:1 in function `play__run`");
+        v_frames = t_add(v_frames.clone(), 1i64, "play.tes:522:12 in function `play__run`");
+        if ((v_seconds.clone() > 0i64) && (v_now.clone() >= t_mul(v_seconds.clone(), 1000i64, "play.tes:523:35 in function `play__run`"))) {
+            { let t_value = true; *&mut Rc::make_mut(&mut v_app).f_quit = t_value; }
         };
         if (!v_uncapped.clone()) {
-            let v_next: i64 = t_div(t_add(t_mul(t_add(v_tics.clone(), 1i64, "play.tes:131:19 in function `play__run`"), 1000i64, "play.tes:131:24 in function `play__run`"), 34i64, "play.tes:131:31 in function `play__run`"), 35i64, "play.tes:131:37 in function `play__run`");
-            let v_wait: i64 = t_sub(v_next.clone(), t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:132:32 in function `play__run`"), "play.tes:132:17 in function `play__run`");
+            let v_next: i64 = t_div(t_add(t_mul(t_add(v_tics.clone(), 1i64, "play.tes:528:19 in function `play__run`"), 1000i64, "play.tes:528:24 in function `play__run`"), 34i64, "play.tes:528:31 in function `play__run`"), 35i64, "play.tes:528:37 in function `play__run`");
+            let v_wait: i64 = t_sub(v_next.clone(), t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:529:32 in function `play__run`"), "play.tes:529:17 in function `play__run`");
             if (v_wait.clone() > 0i64) {
-                tw_sleep_ms(v_wait.clone(), "play.tes:134:1 in function `play__run`")
+                tw_sleep_ms(v_wait.clone(), "play.tes:531:1 in function `play__run`")
             }
         }
     }
-    Rc::new(vec![v_frames.clone(), t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:138:22 in function `play__run`")])
+    Rc::new(vec![v_frames, t_sub(tw_monotonic_ms(), v_started, "play.tes:535:22 in function `play__run`")])
 }
 
-// note: Plays back demo input in the window at 35 tics per second; any key or closing the window stops. Returns the frames shown and the time taken.
-fn f_play__watch(v_scene: Rc<T_render__Scene>, v_sprites: Rc<T_art__Sprites>, v_playpal: Rc<Vec<u8>>, v_tics: Rc<Vec<Rc<T_world__Input>>>, v_skill: i64) -> Rc<Vec<i64>> {
-    t_enter("play.tes:142:8 in function `play__watch`");
-    let v_l: Rc<T_level__Level> = (v_scene.clone()).f_level.clone();
-    let v_trig: Rc<T_geometry__Trig> = f_geometry__make_trig();
+// note: Plays back demo input in the window at 35 tics per second, with sound; any key or closing the window stops. Returns the frames shown and the time taken.
+fn f_play__watch(v_a: Rc<T_play__Assets>, v_scene: Rc<T_render__Scene>, v_tics: Rc<Vec<Rc<T_state__Input>>>, v_skill: i64) -> Rc<Vec<i64>> {
+    t_enter("play.tes:539:8 in function `play__watch`");
     let v_scale: i64 = 2i64;
     let v_width: i64 = f_geometry__screen_width();
     let v_height: i64 = f_geometry__screen_height();
-    t_open_window(t_concat(t_text("Tesseradoom - demo of "), ((v_l.clone()).f_name.clone())), t_mul(v_width.clone(), v_scale.clone(), "play.tes:148:54 in function `play__watch`"), t_mul(v_height.clone(), v_scale.clone(), "play.tes:148:70 in function `play__watch`"), "play.tes:148:1 in function `play__watch`");
-    let v_palette_colors: Rc<Vec<i64>> = f_std__palette__read(v_playpal.clone(), 0i64);
-    let mut v_colors: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![0i64]), t_mul(v_width.clone(), v_height.clone(), "play.tes:150:32 in function `play__watch`"), "play.tes:150:14 in function `play__watch`");
-    let mut v_game: Rc<T_world__World> = f_world__create_at_skill(v_l.clone(), v_skill.clone());
+    t_open_window(t_concat(t_text("Tesseradoom - demo of "), (((v_scene.clone()).f_level.clone()).f_name.clone())), t_mul(v_width.clone(), v_scale.clone(), "play.tes:543:64 in function `play__watch`"), t_mul(v_height.clone(), v_scale.clone(), "play.tes:543:80 in function `play__watch`"), "play.tes:543:1 in function `play__watch`");
+    let mut v_game: Rc<T_state__World> = f_world__create_at_skill((v_scene.clone()).f_level.clone(), v_skill.clone());
     let v_started: i64 = tw_monotonic_ms();
     let mut v_done: i64 = 0i64;
     let mut v_frames: i64 = 0i64;
     let mut v_stop: bool = false;
     while ((!v_stop.clone()) && (v_done.clone() < t_list_length(&v_tics.clone()))) {
-        t_tick("play.tes:156:40 in function `play__watch`");
-        match &(t_poll_event("play.tes:157:7 in function `play__watch`")) {
+        t_tick("play.tes:549:40 in function `play__watch`");
+        match &(t_poll_event("play.tes:550:7 in function `play__watch`")) {
             Some(t1) => { let v_event = t1.clone(); match &*(v_event.clone()) {
                 T_WindowEvent::V_Key(_) => { {
                     v_stop = true;
@@ -5694,272 +6441,147 @@ fn f_play__watch(v_scene: Rc<T_render__Scene>, v_sprites: Rc<T_art__Sprites>, v_
             None => { {
             } }
         };
-        let v_due: i64 = f_std__math__min(t_div(t_mul(t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:165:33 in function `play__watch`"), 35i64, "play.tes:165:44 in function `play__watch`"), 1000i64, "play.tes:165:49 in function `play__watch`"), t_list_length(&v_tics.clone()));
+        let v_due: i64 = f_std__math__min(t_div(t_mul(t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:558:33 in function `play__watch`"), 35i64, "play.tes:558:44 in function `play__watch`"), 1000i64, "play.tes:558:49 in function `play__watch`"), t_list_length(&v_tics.clone()));
         while (v_done.clone() < v_due.clone()) {
-            t_tick("play.tes:166:18 in function `play__watch`");
-            v_game = f_world__tic(v_game, t_index(&v_tics.clone(), v_done.clone(), "play.tes:167:28 in function `play__watch`"), v_trig.clone());
-            v_done = t_add(v_done.clone(), 1i64, "play.tes:168:10 in function `play__watch`");
+            t_tick("play.tes:559:18 in function `play__watch`");
+            v_game = f_world__tic(v_game, t_index(&v_tics.clone(), v_done.clone(), "play.tes:560:28 in function `play__watch`"), (v_a.clone()).f_trig.clone());
+            f_play__play_world_sounds(v_a.clone(), v_game.clone());
+            v_done = t_add(v_done.clone(), 1i64, "play.tes:562:10 in function `play__watch`");
         }
-        v_colors = f_play__to_colors(std::mem::take(&mut v_colors), f_render__render_world(v_scene.clone(), ((v_game.clone()).f_level.clone()).f_sectors.clone(), f_world__camera(v_game.clone()), v_trig.clone(), f_world__sprites(v_game.clone()), v_sprites.clone()), v_palette_colors.clone());
-        t_draw_pixels(0i64, 0i64, v_width.clone(), &v_colors.clone(), v_scale.clone(), "play.tes:171:1 in function `play__watch`");
-        t_draw_text(8i64, t_sub(t_mul(v_height.clone(), v_scale.clone(), "play.tes:172:21 in function `play__watch`"), 22i64, "play.tes:172:29 in function `play__watch`"), t_concat(t_concat(t_concat(t_text("DEMO tic "), t_int_to_text(v_done.clone())), t_text("  ")), (f_play__status(v_game.clone()))), t_rgb(255i64, 220i64, 120i64, "play.tes:172:72 in function `play__watch`"), "play.tes:172:1 in function `play__watch`");
-        t_present("play.tes:173:1 in function `play__watch`");
-        v_frames = t_add(v_frames.clone(), 1i64, "play.tes:174:12 in function `play__watch`");
-        tw_sleep_ms(5i64, "play.tes:175:1 in function `play__watch`")
+        let v_frame: Rc<T_std__raster__Image> = f_play__write(f_play__view_frame(v_scene.clone(), v_game.clone(), v_a.clone()), v_a.clone(), 250i64, 3i64, t_concat(t_text("DEMO "), t_int_to_text(v_done.clone())));
+        t_draw_pixels(0i64, 0i64, v_width.clone(), &(f_std__raster__remap(v_frame.clone(), t_index(&(v_a.clone()).f_palettes.clone(), f_world__palette_index(v_game.clone()), "play.tes:565:46 in function `play__watch`"))).f_pixels.clone(), v_scale.clone(), "play.tes:565:1 in function `play__watch`");
+        t_present("play.tes:566:1 in function `play__watch`");
+        v_frames = t_add(v_frames.clone(), 1i64, "play.tes:567:12 in function `play__watch`");
+        tw_sleep_ms(5i64, "play.tes:568:1 in function `play__watch`")
     }
-    Rc::new(vec![v_frames.clone(), t_sub(tw_monotonic_ms(), v_started.clone(), "play.tes:177:22 in function `play__watch`")])
+    Rc::new(vec![v_frames, t_sub(tw_monotonic_ms(), v_started, "play.tes:570:22 in function `play__watch`")])
 }
 
-fn f_world__no_input() -> Rc<T_world__Input> {
-    t_enter("world.tes:93:8 in function `world__no_input`");
-    Rc::new(T_world__Input { f_forward: 0i64, f_sideways: 0i64, f_forward_move: 0i64, f_side_move: 0i64, f_turn: 0i64, f_use: false, f_fire: false })
+fn f_world__create(v_l: Rc<T_level__Level>) -> Rc<T_state__World> {
+    t_enter("world.tes:20:8 in function `world__create`");
+    f_world__create_at_skill(v_l, 2i64)
 }
 
-fn f_world__create(v_l: Rc<T_level__Level>) -> Rc<T_world__World> {
-    t_enter("world.tes:97:8 in function `world__create`");
-    f_world__create_at_skill(v_l.clone(), 2i64)
+// note: The world of a level at a skill level from 0 to 4 (2 is the middle one), with a fresh player.
+fn f_world__create_at_skill(v_l: Rc<T_level__Level>, v_skill: i64) -> Rc<T_state__World> {
+    t_enter("world.tes:23:8 in function `world__create_at_skill`");
+    f_world__enter(v_l, v_skill, f_state__start_stats())
 }
 
-// note: The world at a skill level from 0 to 4 (2 is the middle one).
-fn f_world__create_at_skill(v_l: Rc<T_level__Level>, v_skill: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:100:8 in function `world__create_at_skill`");
-    let mut v_mobjs: Rc<Vec<Rc<T_world__Mobj>>> = Rc::new(Vec::<Rc<T_world__Mobj>>::new());
+// note: The world of a level for a player who keeps health, armor, weapons and ammunition from the previous level (keys and power-ups do not carry over).
+fn f_world__enter(v_l: Rc<T_level__Level>, v_skill: i64, v_carried: Rc<T_state__Stats>) -> Rc<T_state__World> {
+    t_enter("world.tes:26:8 in function `world__enter`");
+    let mut v_mobjs: Rc<Vec<Rc<T_state__Mobj>>> = Rc::new(Vec::<Rc<T_state__Mobj>>::new());
     for v_t in t_iter((v_l.clone()).f_things.clone()) {
-        t_tick("world.tes:102:19 in function `world__create_at_skill`");
+        t_tick("world.tes:28:19 in function `world__enter`");
         let v_info: Rc<T_things__Info> = f_things__info((v_t.clone()).f_kind.clone());
         if (f_things__spawns_at((v_t.clone()).f_kind.clone(), (v_t.clone()).f_flags.clone(), v_skill.clone()) && ((v_info.clone()).f_sprite.clone() != t_text(""))) {
             let v_x: i64 = f_std__fixed__from_int((v_t.clone()).f_x.clone());
             let v_y: i64 = f_std__fixed__from_int((v_t.clone()).f_y.clone());
-            v_mobjs = t_concat_lists(std::mem::take(&mut v_mobjs), Rc::new(vec![Rc::new(T_world__Mobj { f_kind: (v_t.clone()).f_kind.clone(), f_info: v_info.clone(), f_x: v_x.clone(), f_y: v_y.clone(), f_angle: f_geometry__degrees_to_fine((v_t.clone()).f_angle.clone()), f_sector: f_geometry__sector_at(v_l.clone(), v_x.clone(), v_y.clone()), f_health: (v_info.clone()).f_health.clone(), f_present: true, f_state: Rc::new(T_world__State::V_Idle) })]));
+            v_mobjs = t_concat_lists(std::mem::take(&mut v_mobjs), Rc::new(vec![Rc::new(T_state__Mobj { f_kind: (v_t.clone()).f_kind.clone(), f_info: v_info.clone(), f_x: v_x.clone(), f_y: v_y.clone(), f_angle: f_geometry__degrees_to_fine((v_t.clone()).f_angle.clone()), f_sector: f_geometry__sector_at(v_l.clone(), v_x.clone(), v_y.clone()), f_health: (v_info.clone()).f_health.clone(), f_present: true, f_state: Rc::new(T_state__State::V_Idle) })]));
         }
     }
-    let v_stats: Rc<T_world__Stats> = Rc::new(T_world__Stats { f_health: 100i64, f_armor: 0i64, f_ammo: 50i64, f_keys: Rc::new(Vec::<Rc<String>>::new()), f_weapons: Rc::new(vec![t_text("pistol")]), f_kills: 0i64, f_items: 0i64, f_secrets: 0i64 });
-    Rc::new(T_world__World { f_level: v_l.clone(), f_neighbors: f_world__find_neighbors(v_l.clone()), f_player: f_movement__start(v_l.clone()), f_stats: v_stats.clone(), f_mobjs: v_mobjs.clone(), f_movers: Rc::new(Vec::<Rc<T_world__Mover>>::new()), f_tic: 0i64, f_seed: 1i64, f_message: t_text(""), f_message_time: 0i64, f_cooldown: 0i64, f_use_held: false, f_exited: false, f_momentum_x: 0i64, f_momentum_y: 0i64 })
+    let v_stats: Rc<T_state__Stats> = { let mut t1 = Rc::unwrap_or_clone(v_carried.clone()); t1.f_keys = Rc::new(Vec::<Rc<String>>::new()); t1.f_kills = 0i64; t1.f_items = 0i64; t1.f_secrets = 0i64; t1.f_berserk = false; t1.f_invulnerable = 0i64; t1.f_radiation_suit = 0i64; Rc::new(t1) };
+    let mut v_w: Rc<T_state__World> = Rc::new(T_state__World { f_level: v_l.clone(), f_skill: v_skill.clone(), f_neighbors: f_sectors__find_neighbors(v_l.clone()), f_centers: f_sectors__find_centers(v_l.clone()), f_player: f_movement__start(v_l.clone()), f_stats: v_stats.clone(), f_mobjs: v_mobjs.clone(), f_movers: Rc::new(Vec::<Rc<T_state__Mover>>::new()), f_lights: Rc::new(Vec::<Rc<T_state__Light>>::new()), f_missiles: Rc::new(Vec::<Rc<T_state__Missile>>::new()), f_effects: Rc::new(Vec::<Rc<T_state__Effect>>::new()), f_switched: t_repeat_list(Rc::new(vec![0i64]), t_list_length(&(v_l.clone()).f_sidedefs.clone()), "world.tes:37:235 in function `world__enter`"), f_sounds: Rc::new(Vec::<Rc<T_state__Sound>>::new()), f_tic: 0i64, f_seed: 1i64, f_message: t_text(""), f_message_time: 0i64, f_cooldown: 0i64, f_firing: (-1i64), f_fire_held: false, f_use_held: false, f_exited: 0i64, f_momentum_x: 0i64, f_momentum_y: 0i64, f_damage_flash: 0i64, f_bonus_flash: 0i64 });
+    { let t_value = f_sectors__find_lights(v_w.clone()); *&mut Rc::make_mut(&mut v_w).f_lights = t_value; }
+    v_w
 }
 
 // note: The world without monsters, like the original game's -nomonsters option.
-fn f_world__without_monsters(v_world: Rc<T_world__World>) -> Rc<T_world__World> {
-    t_enter("world.tes:115:8 in function `world__without_monsters`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:117:10 in function `world__without_monsters`")) {
-        t_tick("world.tes:117:36 in function `world__without_monsters`");
-        if f_world__is_monster(t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:118:15 in function `world__without_monsters`")) {
-            { let t_place0: i64 = v_i.clone(); let t_value = false; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:119:5 in function `world__without_monsters`")).f_present = t_value; }
+fn f_world__without_monsters(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("world.tes:43:8 in function `world__without_monsters`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:45:10 in function `world__without_monsters`")) {
+        t_tick("world.tes:45:36 in function `world__without_monsters`");
+        if f_state__is_monster(t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:46:21 in function `world__without_monsters`")) {
+            { let t_place0: i64 = v_i.clone(); let t_value = false; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:47:5 in function `world__without_monsters`")).f_present = t_value; }
         }
     }
-    v_w.clone()
+    v_w
 }
 
-// note: For every sector, the sectors that share a two-sided line with it.
-fn f_world__find_neighbors(v_l: Rc<T_level__Level>) -> Rc<Vec<Rc<Vec<i64>>>> {
-    t_enter("world.tes:126:4 in function `world__find_neighbors`");
-    let mut v_found: Rc<Vec<Rc<Vec<i64>>>> = t_repeat_list(Rc::new(vec![Rc::new(vec![0i64])]), t_list_length(&(v_l.clone()).f_sectors.clone()), "world.tes:127:13 in function `world__find_neighbors`");
-    for v_i in t_iter(t_range(0i64, t_list_length(&v_found.clone()), "world.tes:128:10 in function `world__find_neighbors`")) {
-        t_tick("world.tes:128:34 in function `world__find_neighbors`");
-        { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(Vec::<i64>::new()); *t_slot(&mut v_found, t_place0, "world.tes:129:5 in function `world__find_neighbors`") = t_value; }
-    }
-    for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
-        t_tick("world.tes:131:24 in function `world__find_neighbors`");
-        if ((v_line.clone()).f_back.clone() >= 0i64) {
-            let v_a: i64 = (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "world.tes:133:9 in function `world__find_neighbors`")).f_sector.clone();
-            let v_b: i64 = (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "world.tes:134:9 in function `world__find_neighbors`")).f_sector.clone();
-            if (v_a.clone() != v_b.clone()) {
-                if (!t_contains(&t_index(&v_found.clone(), v_a.clone(), "world.tes:136:17 in function `world__find_neighbors`"), &v_b.clone())) {
-                    { let t_place0: i64 = v_a.clone(); let t_value = t_concat_lists(t_index(&v_found.clone(), v_a.clone(), "world.tes:137:5 in function `world__find_neighbors`"), Rc::new(vec![v_b.clone()])); *t_slot(&mut v_found, t_place0, "world.tes:137:5 in function `world__find_neighbors`") = t_value; }
-                };
-                if (!t_contains(&t_index(&v_found.clone(), v_b.clone(), "world.tes:139:17 in function `world__find_neighbors`"), &v_a.clone())) {
-                    { let t_place0: i64 = v_b.clone(); let t_value = t_concat_lists(t_index(&v_found.clone(), v_b.clone(), "world.tes:140:5 in function `world__find_neighbors`"), Rc::new(vec![v_a.clone()])); *t_slot(&mut v_found, t_place0, "world.tes:140:5 in function `world__find_neighbors`") = t_value; }
-                }
-            }
-        }
-    }
-    v_found.clone()
+fn f_world__no_input() -> Rc<T_state__Input> {
+    t_enter("world.tes:53:8 in function `world__no_input`");
+    f_state__no_input()
 }
 
-// note: A pseudo-random number from 0 to 255 and the next seed (a linear congruential generator; the products stay below 2^62).
-fn f_world__random(v_seed: i64) -> Rc<Vec<i64>> {
-    t_enter("world.tes:151:4 in function `world__random`");
-    let v_next: i64 = t_rem(t_add(t_mul(v_seed.clone(), 1103515245i64, "world.tes:152:18 in function `world__random`"), 12345i64, "world.tes:152:31 in function `world__random`"), 2147483648i64, "world.tes:152:40 in function `world__random`");
-    Rc::new(vec![t_rem(t_shift_right(v_next.clone(), 16i64, "world.tes:153:2 in function `world__random`"), 256i64, "world.tes:153:24 in function `world__random`"), v_next.clone()])
-}
-
-fn f_world__say(v_w: Rc<T_world__World>, v_text: Rc<String>) -> Rc<T_world__World> {
-    t_enter("world.tes:156:4 in function `world__say`");
-    { let mut t1 = Rc::unwrap_or_clone(v_w.clone()); t1.f_message = v_text.clone(); t1.f_message_time = 105i64; Rc::new(t1) }
-}
-
-fn f_world__sector_floor(v_w: Rc<T_world__World>, v_sector: i64) -> i64 {
-    t_enter("world.tes:158:4 in function `world__sector_floor`");
-    (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:158:49 in function `world__sector_floor`")).f_floor.clone()
-}
-
-fn f_world__lowest_neighbor_ceiling(v_w: Rc<T_world__World>, v_sector: i64) -> i64 {
-    t_enter("world.tes:160:4 in function `world__lowest_neighbor_ceiling`");
-    let mut v_lowest: i64 = 32767i64;
-    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "world.tes:162:10 in function `world__lowest_neighbor_ceiling`")) {
-        t_tick("world.tes:162:30 in function `world__lowest_neighbor_ceiling`");
-        v_lowest = f_std__math__min(v_lowest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "world.tes:163:31 in function `world__lowest_neighbor_ceiling`")).f_ceiling.clone());
-    }
-    if (v_lowest.clone() == 32767i64) {
-        (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:165:22 in function `world__lowest_neighbor_ceiling`")).f_ceiling.clone()
-    } else {
-        v_lowest.clone()
-    }
-}
-
-fn f_world__lowest_neighbor_floor(v_w: Rc<T_world__World>, v_sector: i64) -> i64 {
-    t_enter("world.tes:168:4 in function `world__lowest_neighbor_floor`");
-    let mut v_lowest: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:169:14 in function `world__lowest_neighbor_floor`")).f_floor.clone();
-    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "world.tes:170:10 in function `world__lowest_neighbor_floor`")) {
-        t_tick("world.tes:170:30 in function `world__lowest_neighbor_floor`");
-        v_lowest = f_std__math__min(v_lowest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "world.tes:171:31 in function `world__lowest_neighbor_floor`")).f_floor.clone());
-    }
-    v_lowest.clone()
-}
-
-fn f_world__highest_neighbor_floor(v_w: Rc<T_world__World>, v_sector: i64) -> i64 {
-    t_enter("world.tes:176:4 in function `world__highest_neighbor_floor`");
-    let mut v_highest: i64 = (-32768i64);
-    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "world.tes:178:10 in function `world__highest_neighbor_floor`")) {
-        t_tick("world.tes:178:30 in function `world__highest_neighbor_floor`");
-        v_highest = f_std__math__max(v_highest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "world.tes:179:33 in function `world__highest_neighbor_floor`")).f_floor.clone());
-    }
-    if (v_highest.clone() == (-32768i64)) {
-        (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:181:24 in function `world__highest_neighbor_floor`")).f_floor.clone()
-    } else {
-        v_highest.clone()
-    }
-}
-
-fn f_world__is_monster(v_m: Rc<T_world__Mobj>) -> bool {
-    t_enter("world.tes:184:4 in function `world__is_monster`");
-    match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
-        T_things__Role::V_Monster(_) => { true }
-        _ => { false }
-    }
-}
-
-fn f_world__is_dead(v_m: Rc<T_world__Mobj>) -> bool {
-    t_enter("world.tes:191:4 in function `world__is_dead`");
-    match &*((v_m.clone()).f_state.clone()) {
-        T_world__State::V_Dead(_) => { true }
-        _ => { false }
-    }
-}
-
-// note: Whether a thing stops others from walking through it: obstacles and living monsters.
-fn f_world__is_solid(v_m: Rc<T_world__Mobj>) -> bool {
-    t_enter("world.tes:199:4 in function `world__is_solid`");
-    if (!(v_m.clone()).f_present.clone()) {
-        return false
-    };
-    match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
-        T_things__Role::V_Obstacle => { true }
-        T_things__Role::V_Monster(_) => { (!f_world__is_dead(v_m.clone())) }
-        _ => { false }
-    }
-}
-
-// note: Whether a circle of `size` units at (x, y) overlaps a solid thing other than `self` (-1 for the player).
-fn f_world__hits_thing(v_w: Rc<T_world__World>, v_x: i64, v_y: i64, v_size: i64, v_self: i64) -> bool {
-    t_enter("world.tes:211:4 in function `world__hits_thing`");
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:212:10 in function `world__hits_thing`")) {
-        t_tick("world.tes:212:36 in function `world__hits_thing`");
-        let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:213:9 in function `world__hits_thing`");
-        if ((v_i.clone() != v_self.clone()) && f_world__is_solid(v_m.clone())) {
-            let v_reach: i64 = f_std__fixed__from_int(t_add(v_size.clone(), ((v_m.clone()).f_info.clone()).f_radius.clone(), "world.tes:215:33 in function `world__hits_thing`"));
-            if ((f_std__math__abs(t_sub((v_m.clone()).f_x.clone(), v_x.clone(), "world.tes:216:17 in function `world__hits_thing`")) < v_reach.clone()) && (f_std__math__abs(t_sub((v_m.clone()).f_y.clone(), v_y.clone(), "world.tes:216:47 in function `world__hits_thing`")) < v_reach.clone())) {
-                return true
-            }
-        }
-    }
-    false
-}
-
-// note: Whether the line between two points crosses a wall or a closed door, for monster sight and shots.
-fn f_world__blocked(v_w: Rc<T_world__World>, v_x0: i64, v_y0: i64, v_x1: i64, v_y1: i64) -> bool {
-    t_enter("world.tes:225:4 in function `world__blocked`");
-    let v_l: Rc<T_level__Level> = (v_w.clone()).f_level.clone();
-    for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
-        t_tick("world.tes:227:24 in function `world__blocked`");
-        let mut v_solid: bool = ((v_line.clone()).f_back.clone() < 0i64);
-        if (!v_solid.clone()) {
-            let v_front: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "world.tes:230:23 in function `world__blocked`")).f_sector.clone(), "world.tes:230:13 in function `world__blocked`");
-            let v_back: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "world.tes:231:22 in function `world__blocked`")).f_sector.clone(), "world.tes:231:12 in function `world__blocked`");
-            v_solid = (f_std__math__min((v_front.clone()).f_ceiling.clone(), (v_back.clone()).f_ceiling.clone()) <= f_std__math__max((v_front.clone()).f_floor.clone(), (v_back.clone()).f_floor.clone()));
+fn f_world__tic(v_world: Rc<T_state__World>, v_input: Rc<T_state__Input>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("world.tes:57:8 in function `world__tic`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    { let t_value = Rc::new(Vec::<Rc<T_state__Sound>>::new()); *&mut Rc::make_mut(&mut v_w).f_sounds = t_value; }
+    { let t_value = t_add((v_w.clone()).f_tic.clone(), 1i64, "world.tes:60:11 in function `world__tic`"); *&mut Rc::make_mut(&mut v_w).f_tic = t_value; }
+    if ((((v_w.clone()).f_stats.clone()).f_health.clone() > 0i64) && ((v_w.clone()).f_exited.clone() == 0i64)) {
+        if ((v_input.clone()).f_weapon.clone() >= 0i64) {
+            v_w = f_combat__select_weapon(v_w, (v_input.clone()).f_weapon.clone());
         };
-        if v_solid.clone() {
-            let v_a: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "world.tes:235:9 in function `world__blocked`");
-            let v_b: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "world.tes:236:9 in function `world__blocked`");
-            if f_world__crosses(v_x0.clone(), v_y0.clone(), v_x1.clone(), v_y1.clone(), f_std__fixed__from_int((v_a.clone()).f_x.clone()), f_std__fixed__from_int((v_a.clone()).f_y.clone()), f_std__fixed__from_int((v_b.clone()).f_x.clone()), f_std__fixed__from_int((v_b.clone()).f_y.clone())) {
-                return true
-            }
-        }
-    }
-    false
-}
-
-// note: Which side of the line a-b the point p is on: the sign of the cross product, computed with 8 fraction bits so it cannot overflow.
-fn f_world__orient(v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64, v_px: i64, v_py: i64) -> i64 {
-    t_enter("world.tes:246:4 in function `world__orient`");
-    let v_cross: i64 = t_sub(t_mul(t_shift_right(t_sub(v_bx.clone(), v_ax.clone(), "world.tes:247:28 in function `world__orient`"), 8i64, "world.tes:247:13 in function `world__orient`"), t_shift_right(t_sub(v_py.clone(), v_ay.clone(), "world.tes:247:54 in function `world__orient`"), 8i64, "world.tes:247:39 in function `world__orient`"), "world.tes:247:37 in function `world__orient`"), t_mul(t_shift_right(t_sub(v_by.clone(), v_ay.clone(), "world.tes:247:80 in function `world__orient`"), 8i64, "world.tes:247:65 in function `world__orient`"), t_shift_right(t_sub(v_px.clone(), v_ax.clone(), "world.tes:247:106 in function `world__orient`"), 8i64, "world.tes:247:91 in function `world__orient`"), "world.tes:247:89 in function `world__orient`"), "world.tes:247:63 in function `world__orient`");
-    if (v_cross.clone() > 0i64) {
-        1i64
-    } else if (v_cross.clone() < 0i64) {
-        (-1i64)
-    } else {
-        0i64
-    }
-}
-
-// note: Whether segment p-q properly crosses segment a-b (fixed coordinates).
-fn f_world__crosses(v_px: i64, v_py: i64, v_qx: i64, v_qy: i64, v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> bool {
-    t_enter("world.tes:252:4 in function `world__crosses`");
-    ((t_mul(f_world__orient(v_px.clone(), v_py.clone(), v_qx.clone(), v_qy.clone(), v_ax.clone(), v_ay.clone()), f_world__orient(v_px.clone(), v_py.clone(), v_qx.clone(), v_qy.clone(), v_bx.clone(), v_by.clone()), "world.tes:253:32 in function `world__crosses`") < 0i64) && (t_mul(f_world__orient(v_ax.clone(), v_ay.clone(), v_bx.clone(), v_by.clone(), v_px.clone(), v_py.clone()), f_world__orient(v_ax.clone(), v_ay.clone(), v_bx.clone(), v_by.clone(), v_qx.clone(), v_qy.clone()), "world.tes:253:104 in function `world__crosses`") < 0i64))
-}
-
-fn f_world__tic(v_world: Rc<T_world__World>, v_input: Rc<T_world__Input>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:258:8 in function `world__tic`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    { let t_value = t_add((v_w.clone()).f_tic.clone(), 1i64, "world.tes:260:11 in function `world__tic`"); *&mut Rc::make_mut(&mut v_w).f_tic = t_value; }
-    if ((((v_w.clone()).f_stats.clone()).f_health.clone() > 0i64) && (!(v_w.clone()).f_exited.clone())) {
         v_w = f_world__move_player(v_w, v_input.clone(), v_trig.clone());
         if ((v_input.clone()).f_use.clone() && (!(v_w.clone()).f_use_held.clone())) {
             v_w = f_world__use_line(v_w, v_trig.clone());
         };
         if ((v_input.clone()).f_fire.clone() && ((v_w.clone()).f_cooldown.clone() == 0i64)) {
-            v_w = f_world__fire(v_w, v_trig.clone());
+            v_w = f_combat__fire(v_w, v_trig.clone());
         };
         v_w = f_world__pick_up(v_w);
-        v_w = f_world__floor_effects(v_w);
+        v_w = f_sectors__floor_effects(v_w);
     };
     { let t_value = (v_input.clone()).f_use.clone(); *&mut Rc::make_mut(&mut v_w).f_use_held = t_value; }
+    { let t_value = (v_input.clone()).f_fire.clone(); *&mut Rc::make_mut(&mut v_w).f_fire_held = t_value; }
     if ((v_w.clone()).f_cooldown.clone() > 0i64) {
-        { let t_value = t_sub((v_w.clone()).f_cooldown.clone(), 1i64, "world.tes:274:16 in function `world__tic`"); *&mut Rc::make_mut(&mut v_w).f_cooldown = t_value; }
+        { let t_value = t_sub((v_w.clone()).f_cooldown.clone(), 1i64, "world.tes:78:16 in function `world__tic`"); *&mut Rc::make_mut(&mut v_w).f_cooldown = t_value; }
     };
-    v_w = f_world__run_movers(v_w);
-    v_w = f_world__run_monsters(v_w, v_trig.clone());
+    if ((v_w.clone()).f_firing.clone() >= 0i64) {
+        { let t_value = if (t_add((v_w.clone()).f_firing.clone(), 1i64, "world.tes:81:28 in function `world__tic`") >= f_combat__weapon_cooldown(((v_w.clone()).f_stats.clone()).f_weapon.clone())) {
+            (-1i64)
+        } else {
+            t_add((v_w.clone()).f_firing.clone(), 1i64, "world.tes:81:97 in function `world__tic`")
+        }; *&mut Rc::make_mut(&mut v_w).f_firing = t_value; }
+    };
+    { let t_value = f_std__math__max(t_sub(((v_w.clone()).f_stats.clone()).f_invulnerable.clone(), 1i64, "world.tes:83:58 in function `world__tic`"), 0i64); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_invulnerable = t_value; }
+    { let t_value = f_std__math__max(t_sub(((v_w.clone()).f_stats.clone()).f_radiation_suit.clone(), 1i64, "world.tes:84:62 in function `world__tic`"), 0i64); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_radiation_suit = t_value; }
+    { let t_value = f_std__math__max(t_sub((v_w.clone()).f_damage_flash.clone(), 1i64, "world.tes:85:46 in function `world__tic`"), 0i64); *&mut Rc::make_mut(&mut v_w).f_damage_flash = t_value; }
+    { let t_value = f_std__math__max(t_sub((v_w.clone()).f_bonus_flash.clone(), 1i64, "world.tes:86:44 in function `world__tic`"), 0i64); *&mut Rc::make_mut(&mut v_w).f_bonus_flash = t_value; }
+    v_w = f_sectors__run_switches(v_w);
+    v_w = f_sectors__run_movers(v_w);
+    v_w = f_sectors__run_lights(v_w);
+    v_w = f_combat__run_missiles(v_w);
+    v_w = f_combat__run_monsters(v_w, v_trig.clone());
+    v_w = f_world__run_effects(v_w);
     if ((v_w.clone()).f_message_time.clone() > 0i64) {
-        { let t_value = t_sub((v_w.clone()).f_message_time.clone(), 1i64, "world.tes:279:20 in function `world__tic`"); *&mut Rc::make_mut(&mut v_w).f_message_time = t_value; }
+        { let t_value = t_sub((v_w.clone()).f_message_time.clone(), 1i64, "world.tes:94:20 in function `world__tic`"); *&mut Rc::make_mut(&mut v_w).f_message_time = t_value; }
     };
-    v_w.clone()
+    v_w
+}
+
+fn f_world__run_effects(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("world.tes:99:4 in function `world__run_effects`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let mut v_kept: Rc<Vec<Rc<T_state__Effect>>> = Rc::new(Vec::<Rc<T_state__Effect>>::new());
+    for v_e in t_iter((v_w.clone()).f_effects.clone()) {
+        t_tick("world.tes:102:20 in function `world__run_effects`");
+        let v_next: Rc<T_state__Effect> = { let mut t1 = Rc::unwrap_or_clone(v_e.clone()); t1.f_time = t_add((v_e.clone()).f_time.clone(), 1i64, "world.tes:103:34 in function `world__run_effects`"); Rc::new(t1) };
+        if (t_div((v_next.clone()).f_time.clone(), (v_next.clone()).f_speed.clone(), "world.tes:104:14 in function `world__run_effects`") < t_text_length(&(v_next.clone()).f_frames.clone())) {
+            v_kept = t_concat_lists(std::mem::take(&mut v_kept), Rc::new(vec![v_next.clone()]));
+        }
+    }
+    { let t_value = v_kept.clone(); *&mut Rc::make_mut(&mut v_w).f_effects = t_value; }
+    v_w
 }
 
 // note: Turns the player, moves it directly by `forward`/`sideways` units if given, then by its momentum: input pushes (thrust `move * 2048` per tic along the view), the speed is at most 30 units per tic in each direction, and friction keeps 0xE800/0x10000 of it every tic; below 0x1000 without input it stops. These are the original game's published movement constants.
-fn f_world__move_player(v_world: Rc<T_world__World>, v_input: Rc<T_world__Input>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:285:4 in function `world__move_player`");
-    let mut v_w: Rc<T_world__World> = v_world;
+fn f_world__move_player(v_world: Rc<T_state__World>, v_input: Rc<T_state__Input>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("world.tes:113:4 in function `world__move_player`");
+    let mut v_w: Rc<T_state__World> = v_world;
     { let t_value = f_movement__turn((v_w.clone()).f_player.clone(), (v_input.clone()).f_turn.clone()); *&mut Rc::make_mut(&mut v_w).f_player = t_value; }
     if (((v_input.clone()).f_forward.clone() != 0i64) || ((v_input.clone()).f_sideways.clone() != 0i64)) {
         v_w = f_world__displace(v_w, (v_input.clone()).f_forward.clone(), (v_input.clone()).f_sideways.clone(), v_trig.clone());
     };
-    let v_c: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), ((v_w.clone()).f_player.clone()).f_angle.clone(), "world.tes:291:9 in function `world__move_player`");
-    let v_s: i64 = t_index(&(v_trig.clone()).f_sine.clone(), ((v_w.clone()).f_player.clone()).f_angle.clone(), "world.tes:292:9 in function `world__move_player`");
-    let v_push: i64 = t_mul((v_input.clone()).f_forward_move.clone(), 2048i64, "world.tes:293:31 in function `world__move_player`");
-    let v_side: i64 = t_mul((v_input.clone()).f_side_move.clone(), 2048i64, "world.tes:294:28 in function `world__move_player`");
+    let v_c: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), ((v_w.clone()).f_player.clone()).f_angle.clone(), "world.tes:119:9 in function `world__move_player`");
+    let v_s: i64 = t_index(&(v_trig.clone()).f_sine.clone(), ((v_w.clone()).f_player.clone()).f_angle.clone(), "world.tes:120:9 in function `world__move_player`");
+    let v_push: i64 = t_mul((v_input.clone()).f_forward_move.clone(), 2048i64, "world.tes:121:31 in function `world__move_player`");
+    let v_side: i64 = t_mul((v_input.clone()).f_side_move.clone(), 2048i64, "world.tes:122:28 in function `world__move_player`");
     let v_limit: i64 = f_std__fixed__from_int(30i64);
-    let mut v_mx: i64 = f_std__math__clamp(t_add(t_add((v_w.clone()).f_momentum_x.clone(), f_std__fixed__mul(v_push.clone(), v_c.clone()), "world.tes:296:34 in function `world__move_player`"), f_std__fixed__mul(v_side.clone(), v_s.clone()), "world.tes:296:55 in function `world__move_player`"), t_neg(v_limit.clone(), "world.tes:296:77 in function `world__move_player`"), v_limit.clone());
-    let mut v_my: i64 = f_std__math__clamp(t_sub(t_add((v_w.clone()).f_momentum_y.clone(), f_std__fixed__mul(v_push.clone(), v_s.clone()), "world.tes:297:34 in function `world__move_player`"), f_std__fixed__mul(v_side.clone(), v_c.clone()), "world.tes:297:55 in function `world__move_player`"), t_neg(v_limit.clone(), "world.tes:297:77 in function `world__move_player`"), v_limit.clone());
+    let mut v_mx: i64 = f_std__math__clamp(t_add(t_add((v_w.clone()).f_momentum_x.clone(), f_std__fixed__mul(v_push.clone(), v_c.clone()), "world.tes:124:34 in function `world__move_player`"), f_std__fixed__mul(v_side.clone(), v_s.clone()), "world.tes:124:55 in function `world__move_player`"), t_neg(v_limit.clone(), "world.tes:124:77 in function `world__move_player`"), v_limit.clone());
+    let mut v_my: i64 = f_std__math__clamp(t_sub(t_add((v_w.clone()).f_momentum_y.clone(), f_std__fixed__mul(v_push.clone(), v_s.clone()), "world.tes:125:34 in function `world__move_player`"), f_std__fixed__mul(v_side.clone(), v_c.clone()), "world.tes:125:55 in function `world__move_player`"), t_neg(v_limit.clone(), "world.tes:125:77 in function `world__move_player`"), v_limit.clone());
     if ((v_mx.clone() != 0i64) || (v_my.clone() != 0i64)) {
         let v_before_x: i64 = ((v_w.clone()).f_player.clone()).f_x.clone();
         let v_before_y: i64 = ((v_w.clone()).f_player.clone()).f_y.clone();
@@ -5971,345 +6593,131 @@ fn f_world__move_player(v_world: Rc<T_world__World>, v_input: Rc<T_world__Input>
             v_my = 0i64;
         }
     };
-    v_mx = t_shift_right(t_mul(v_mx.clone(), 59392i64, "world.tes:310:25 in function `world__move_player`"), 16i64, "world.tes:310:10 in function `world__move_player`");
-    v_my = t_shift_right(t_mul(v_my.clone(), 59392i64, "world.tes:311:25 in function `world__move_player`"), 16i64, "world.tes:311:10 in function `world__move_player`");
+    v_mx = t_shift_right(t_mul(v_mx.clone(), 59392i64, "world.tes:138:25 in function `world__move_player`"), 16i64, "world.tes:138:10 in function `world__move_player`");
+    v_my = t_shift_right(t_mul(v_my.clone(), 59392i64, "world.tes:139:25 in function `world__move_player`"), 16i64, "world.tes:139:10 in function `world__move_player`");
     if (((((v_input.clone()).f_forward_move.clone() == 0i64) && ((v_input.clone()).f_side_move.clone() == 0i64)) && (f_std__math__abs(v_mx.clone()) < 4096i64)) && (f_std__math__abs(v_my.clone()) < 4096i64)) {
         v_mx = 0i64;
         v_my = 0i64;
     };
     { let t_value = v_mx.clone(); *&mut Rc::make_mut(&mut v_w).f_momentum_x = t_value; }
     { let t_value = v_my.clone(); *&mut Rc::make_mut(&mut v_w).f_momentum_y = t_value; }
-    v_w.clone()
+    v_w
 }
 
 // note: Moves the player by (dx, dy) fixed in steps of at most 8 units.
-fn f_world__slide(v_world: Rc<T_world__World>, v_dx: i64, v_dy: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:322:4 in function `world__slide`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_steps: i64 = f_std__math__max(1i64, t_div(t_sub(t_add(f_std__math__max(f_std__math__abs(v_dx.clone()), f_std__math__abs(v_dy.clone())), f_std__fixed__from_int(8i64), "world.tes:324:63 in function `world__slide`"), 1i64, "world.tes:324:83 in function `world__slide`"), f_std__fixed__from_int(8i64), "world.tes:324:88 in function `world__slide`"));
-    for v_i in t_iter(t_range(0i64, v_steps.clone(), "world.tes:325:10 in function `world__slide`")) {
-        t_tick("world.tes:325:26 in function `world__slide`");
-        let v_step_x: i64 = t_sub(t_div(t_mul(v_dx.clone(), t_add(v_i.clone(), 1i64, "world.tes:326:22 in function `world__slide`"), "world.tes:326:17 in function `world__slide`"), v_steps.clone(), "world.tes:326:27 in function `world__slide`"), t_div(t_mul(v_dx.clone(), v_i.clone(), "world.tes:326:40 in function `world__slide`"), v_steps.clone(), "world.tes:326:44 in function `world__slide`"), "world.tes:326:35 in function `world__slide`");
-        let v_step_y: i64 = t_sub(t_div(t_mul(v_dy.clone(), t_add(v_i.clone(), 1i64, "world.tes:327:22 in function `world__slide`"), "world.tes:327:17 in function `world__slide`"), v_steps.clone(), "world.tes:327:27 in function `world__slide`"), t_div(t_mul(v_dy.clone(), v_i.clone(), "world.tes:327:40 in function `world__slide`"), v_steps.clone(), "world.tes:327:44 in function `world__slide`"), "world.tes:327:35 in function `world__slide`");
+fn f_world__slide(v_world: Rc<T_state__World>, v_dx: i64, v_dy: i64) -> Rc<T_state__World> {
+    t_enter("world.tes:150:4 in function `world__slide`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_steps: i64 = f_std__math__max(1i64, t_div(t_sub(t_add(f_std__math__max(f_std__math__abs(v_dx.clone()), f_std__math__abs(v_dy.clone())), f_std__fixed__from_int(8i64), "world.tes:152:63 in function `world__slide`"), 1i64, "world.tes:152:83 in function `world__slide`"), f_std__fixed__from_int(8i64), "world.tes:152:88 in function `world__slide`"));
+    for v_i in t_iter(t_range(0i64, v_steps.clone(), "world.tes:153:10 in function `world__slide`")) {
+        t_tick("world.tes:153:26 in function `world__slide`");
+        let v_step_x: i64 = t_sub(t_div(t_mul(v_dx.clone(), t_add(v_i.clone(), 1i64, "world.tes:154:22 in function `world__slide`"), "world.tes:154:17 in function `world__slide`"), v_steps.clone(), "world.tes:154:27 in function `world__slide`"), t_div(t_mul(v_dx.clone(), v_i.clone(), "world.tes:154:40 in function `world__slide`"), v_steps.clone(), "world.tes:154:44 in function `world__slide`"), "world.tes:154:35 in function `world__slide`");
+        let v_step_y: i64 = t_sub(t_div(t_mul(v_dy.clone(), t_add(v_i.clone(), 1i64, "world.tes:155:22 in function `world__slide`"), "world.tes:155:17 in function `world__slide`"), v_steps.clone(), "world.tes:155:27 in function `world__slide`"), t_div(t_mul(v_dy.clone(), v_i.clone(), "world.tes:155:40 in function `world__slide`"), v_steps.clone(), "world.tes:155:44 in function `world__slide`"), "world.tes:155:35 in function `world__slide`");
         v_w = f_world__player_step(v_w, v_step_x.clone(), v_step_y.clone());
     }
-    v_w.clone()
+    v_w
 }
 
-fn f_world__displace(v_world: Rc<T_world__World>, v_forward_units: i64, v_sideways_units: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:333:4 in function `world__displace`");
-    let mut v_w: Rc<T_world__World> = v_world;
+fn f_world__displace(v_world: Rc<T_state__World>, v_forward_units: i64, v_sideways_units: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("world.tes:161:4 in function `world__displace`");
+    let mut v_w: Rc<T_state__World> = v_world;
     let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    let v_c: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:336:9 in function `world__displace`");
-    let v_s: i64 = t_index(&(v_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:337:9 in function `world__displace`");
+    let v_c: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:164:9 in function `world__displace`");
+    let v_s: i64 = t_index(&(v_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:165:9 in function `world__displace`");
     let v_forward: i64 = f_std__fixed__from_int(v_forward_units.clone());
     let v_sideways: i64 = f_std__fixed__from_int(v_sideways_units.clone());
-    let v_dx: i64 = t_add(f_std__fixed__mul(v_forward.clone(), v_c.clone()), f_std__fixed__mul(v_sideways.clone(), v_s.clone()), "world.tes:340:32 in function `world__displace`");
-    let v_dy: i64 = t_sub(f_std__fixed__mul(v_forward.clone(), v_s.clone()), f_std__fixed__mul(v_sideways.clone(), v_c.clone()), "world.tes:341:32 in function `world__displace`");
+    let v_dx: i64 = t_add(f_std__fixed__mul(v_forward.clone(), v_c.clone()), f_std__fixed__mul(v_sideways.clone(), v_s.clone()), "world.tes:168:32 in function `world__displace`");
+    let v_dy: i64 = t_sub(f_std__fixed__mul(v_forward.clone(), v_s.clone()), f_std__fixed__mul(v_sideways.clone(), v_c.clone()), "world.tes:169:32 in function `world__displace`");
     v_w = f_world__slide(v_w, v_dx.clone(), v_dy.clone());
-    v_w.clone()
+    v_w
 }
 
-fn f_world__player_step(v_world: Rc<T_world__World>, v_dx: i64, v_dy: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:346:4 in function `world__player_step`");
-    let mut v_w: Rc<T_world__World> = v_world;
+fn f_world__player_step(v_world: Rc<T_state__World>, v_dx: i64, v_dy: i64) -> Rc<T_state__World> {
+    t_enter("world.tes:174:4 in function `world__player_step`");
+    let mut v_w: Rc<T_state__World> = v_world;
     let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    let v_floor: i64 = f_world__sector_floor(v_w.clone(), (v_p.clone()).f_sector.clone());
+    let v_floor: i64 = f_state__sector_floor(v_w.clone(), (v_p.clone()).f_sector.clone());
     for v_attempt in t_iter(Rc::new(vec![Rc::new(vec![v_dx.clone(), v_dy.clone()]), Rc::new(vec![v_dx.clone(), 0i64]), Rc::new(vec![0i64, v_dy.clone()])])) {
-        t_tick("world.tes:350:45 in function `world__player_step`");
-        let v_x: i64 = t_add((v_p.clone()).f_x.clone(), t_index(&v_attempt.clone(), 0i64, "world.tes:351:15 in function `world__player_step`"), "world.tes:351:13 in function `world__player_step`");
-        let v_y: i64 = t_add((v_p.clone()).f_y.clone(), t_index(&v_attempt.clone(), 1i64, "world.tes:352:15 in function `world__player_step`"), "world.tes:352:13 in function `world__player_step`");
-        if ((((t_index(&v_attempt.clone(), 0i64, "world.tes:353:5 in function `world__player_step`") != 0i64) || (t_index(&v_attempt.clone(), 1i64, "world.tes:353:24 in function `world__player_step`") != 0i64)) && f_movement__fits((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone(), v_floor.clone())) && (!f_world__hits_thing(v_w.clone(), v_x.clone(), v_y.clone(), f_movement__radius(), (-1i64)))) {
+        t_tick("world.tes:178:45 in function `world__player_step`");
+        let v_x: i64 = t_add((v_p.clone()).f_x.clone(), t_index(&v_attempt.clone(), 0i64, "world.tes:179:15 in function `world__player_step`"), "world.tes:179:13 in function `world__player_step`");
+        let v_y: i64 = t_add((v_p.clone()).f_y.clone(), t_index(&v_attempt.clone(), 1i64, "world.tes:180:15 in function `world__player_step`"), "world.tes:180:13 in function `world__player_step`");
+        if ((((t_index(&v_attempt.clone(), 0i64, "world.tes:181:5 in function `world__player_step`") != 0i64) || (t_index(&v_attempt.clone(), 1i64, "world.tes:181:24 in function `world__player_step`") != 0i64)) && f_movement__fits((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone(), v_floor.clone())) && (!f_state__hits_thing(v_w.clone(), v_x.clone(), v_y.clone(), f_movement__radius(), (-1i64)))) {
             { let t_value = { let mut t1 = Rc::unwrap_or_clone(v_p.clone()); t1.f_x = v_x.clone(); t1.f_y = v_y.clone(); t1.f_sector = f_geometry__sector_at((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone()); Rc::new(t1) }; *&mut Rc::make_mut(&mut v_w).f_player = t_value; }
             v_w = f_world__walk_over(v_w, (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_x.clone(), v_y.clone());
-            return v_w.clone()
+            return v_w
         }
     }
-    v_w.clone()
+    v_w
 }
 
-// note: Triggers the walk-over specials of lines the player's centre crossed going from (x0, y0) to (x1, y1).
-fn f_world__walk_over(v_world: Rc<T_world__World>, v_x0: i64, v_y0: i64, v_x1: i64, v_y1: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:363:4 in function `world__walk_over`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    for v_index in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_linedefs.clone()), "world.tes:365:14 in function `world__walk_over`")) {
-        t_tick("world.tes:365:49 in function `world__walk_over`");
-        let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "world.tes:366:12 in function `world__walk_over`");
-        if (((v_line.clone()).f_special.clone() != 0i64) && f_world__is_walk_special((v_line.clone()).f_special.clone())) {
-            let v_a: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "world.tes:368:9 in function `world__walk_over`");
-            let v_b: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "world.tes:369:9 in function `world__walk_over`");
-            if f_world__crosses(v_x0.clone(), v_y0.clone(), v_x1.clone(), v_y1.clone(), f_std__fixed__from_int((v_a.clone()).f_x.clone()), f_std__fixed__from_int((v_a.clone()).f_y.clone()), f_std__fixed__from_int((v_b.clone()).f_x.clone()), f_std__fixed__from_int((v_b.clone()).f_y.clone())) {
-                v_w = f_world__trigger(v_w, v_index.clone());
+// note: Triggers the walk-over specials of lines the player's centre crossed going from (x0, y0) to (x1, y1). Teleporters work only when crossed from their front (right) side.
+fn f_world__walk_over(v_world: Rc<T_state__World>, v_x0: i64, v_y0: i64, v_x1: i64, v_y1: i64) -> Rc<T_state__World> {
+    t_enter("world.tes:191:4 in function `world__walk_over`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    for v_index in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_linedefs.clone()), "world.tes:193:14 in function `world__walk_over`")) {
+        t_tick("world.tes:193:49 in function `world__walk_over`");
+        let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "world.tes:194:12 in function `world__walk_over`");
+        if (((v_line.clone()).f_special.clone() != 0i64) && f_sectors__is_walk_special((v_line.clone()).f_special.clone())) {
+            let v_a: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "world.tes:196:9 in function `world__walk_over`");
+            let v_b: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "world.tes:197:9 in function `world__walk_over`");
+            let v_ax: i64 = f_std__fixed__from_int((v_a.clone()).f_x.clone());
+            let v_ay: i64 = f_std__fixed__from_int((v_a.clone()).f_y.clone());
+            let v_bx: i64 = f_std__fixed__from_int((v_b.clone()).f_x.clone());
+            let v_by: i64 = f_std__fixed__from_int((v_b.clone()).f_y.clone());
+            if f_std__plane__crosses(v_x0.clone(), v_y0.clone(), v_x1.clone(), v_y1.clone(), v_ax.clone(), v_ay.clone(), v_bx.clone(), v_by.clone()) {
+                if f_sectors__is_teleport((v_line.clone()).f_special.clone()) {
+                    if (f_std__plane__orient(v_ax.clone(), v_ay.clone(), v_bx.clone(), v_by.clone(), v_x0.clone(), v_y0.clone()) < 0i64) {
+                        return f_sectors__teleport(v_w, v_index)
+                    }
+                } else {
+                    v_w = f_sectors__trigger(v_w, v_index.clone(), false);
+                }
             }
         }
     }
-    v_w.clone()
+    v_w
 }
 
-fn f_world__is_walk_special(v_special: i64) -> bool {
-    t_enter("world.tes:378:4 in function `world__is_walk_special`");
-    t_contains(&Rc::new(vec![2i64, 3i64, 4i64, 10i64, 19i64, 38i64, 52i64, 75i64, 82i64, 83i64, 86i64, 88i64, 90i64, 105i64, 108i64, 109i64, 120i64, 121i64, 124i64]), &v_special.clone())
-}
-
-// note: The player pressed `use`: the nearest line within 64 units straight ahead is used, if it has a special. Two-sided lines without a special are looked through.
-fn f_world__use_line(v_world: Rc<T_world__World>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:381:4 in function `world__use_line`");
-    let mut v_w: Rc<T_world__World> = v_world;
+// note: The player pressed `use`: the nearest line within 64 units straight ahead is used, if it has a special; otherwise the player grunts. Two-sided lines without a special are looked through.
+fn f_world__use_line(v_w: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("world.tes:217:4 in function `world__use_line`");
     let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    let v_dx: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:384:10 in function `world__use_line`");
-    let v_dy: i64 = t_index(&(v_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:385:10 in function `world__use_line`");
+    let v_dx: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:219:10 in function `world__use_line`");
+    let v_dy: i64 = t_index(&(v_trig.clone()).f_sine.clone(), (v_p.clone()).f_angle.clone(), "world.tes:220:10 in function `world__use_line`");
     let mut v_best: i64 = (-1i64);
     let mut v_best_distance: i64 = f_std__fixed__from_int(65i64);
-    for v_index in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_linedefs.clone()), "world.tes:388:14 in function `world__use_line`")) {
-        t_tick("world.tes:388:49 in function `world__use_line`");
-        let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "world.tes:389:12 in function `world__use_line`");
+    for v_index in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_linedefs.clone()), "world.tes:223:14 in function `world__use_line`")) {
+        t_tick("world.tes:223:49 in function `world__use_line`");
+        let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "world.tes:224:12 in function `world__use_line`");
         if (((v_line.clone()).f_back.clone() < 0i64) || ((v_line.clone()).f_special.clone() != 0i64)) {
-            let v_a: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "world.tes:391:9 in function `world__use_line`");
-            let v_b: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "world.tes:392:9 in function `world__use_line`");
-            let v_hit: Rc<T_geometry__Hit> = f_geometry__intersect((v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_dx.clone(), v_dy.clone(), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
+            let v_a: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "world.tes:226:9 in function `world__use_line`");
+            let v_b: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "world.tes:227:9 in function `world__use_line`");
+            let v_hit: Rc<T_std__plane__Hit> = f_std__plane__intersect((v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_dx.clone(), v_dy.clone(), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
             if ((v_hit.clone()).f_hit.clone() && ((v_hit.clone()).f_distance.clone() < v_best_distance.clone())) {
                 v_best = v_index.clone();
                 v_best_distance = (v_hit.clone()).f_distance.clone();
             }
         }
     }
-    if ((v_best.clone() >= 0i64) && ((t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_best.clone(), "world.tes:400:18 in function `world__use_line`")).f_special.clone() != 0i64)) {
-        v_w = f_world__trigger(v_w, v_best.clone());
+    if (v_best.clone() < 0i64) {
+        return v_w
     };
-    v_w.clone()
+    let v_special: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_best.clone(), "world.tes:238:15 in function `world__use_line`")).f_special.clone();
+    if ((v_special.clone() != 0i64) && (!f_sectors__is_walk_special(v_special.clone()))) {
+        return f_sectors__trigger(v_w, v_best, true)
+    };
+    f_state__sound_here(v_w, t_text("DSNOWAY"))
 }
 
-// note: Carries out a line's special. Door specials 1, 26-28, 31-34, 117 and 118 work on the sector behind the line; the others on every sector with the line's tag. One-time specials are cleared after use.
-fn f_world__trigger(v_world: Rc<T_world__World>, v_index: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:407:4 in function `world__trigger`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "world.tes:409:12 in function `world__trigger`");
-    let v_special: i64 = (v_line.clone()).f_special.clone();
-    let v_key: Rc<String> = match v_special.clone() {
-        26 => { t_text("blue") }
-        32 => { t_text("blue") }
-        27 => { t_text("yellow") }
-        34 => { t_text("yellow") }
-        28 => { t_text("red") }
-        33 => { t_text("red") }
-        _ => { t_text("") }
-    };
-    if ((v_key.clone() != t_text("")) && (!t_contains(&((v_w.clone()).f_stats.clone()).f_keys.clone(), &v_key.clone()))) {
-        return f_world__say(v_w.clone(), t_concat(t_concat(t_text("You need a "), (v_key.clone())), t_text(" key to open this door")))
-    };
-    if t_contains(&Rc::new(vec![1i64, 26i64, 27i64, 28i64, 31i64, 32i64, 33i64, 34i64, 117i64, 118i64]), &v_special.clone()) {
-        if ((v_line.clone()).f_back.clone() < 0i64) {
-            return v_w.clone()
-        };
-        let v_sector: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "world.tes:427:14 in function `world__trigger`")).f_sector.clone();
-        let v_stays: bool = t_contains(&Rc::new(vec![31i64, 32i64, 33i64, 34i64, 118i64]), &v_special.clone());
-        let v_speed: i64 = if ((v_special.clone() == 117i64) || (v_special.clone() == 118i64)) {
-            8i64
-        } else {
-            2i64
-        };
-        v_w = f_world__start_door(v_w, v_sector.clone(), v_speed.clone(), if v_stays.clone() {
-            (-1i64)
-        } else {
-            150i64
-        });
-        if v_stays.clone() {
-            { let t_place0: i64 = v_index.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_linedefs, t_place0, "world.tes:432:5 in function `world__trigger`")).f_special = t_value; }
-        };
-        return v_w.clone()
-    };
-    let v_once: bool = t_contains(&Rc::new(vec![2i64, 3i64, 4i64, 10i64, 11i64, 19i64, 21i64, 23i64, 29i64, 38i64, 50i64, 51i64, 52i64, 102i64, 103i64, 108i64, 109i64, 112i64, 121i64, 122i64, 124i64]), &v_special.clone());
-    for v_sector in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_sectors.clone()), "world.tes:437:15 in function `world__trigger`")) {
-        t_tick("world.tes:437:49 in function `world__trigger`");
-        if (((v_line.clone()).f_tag.clone() != 0i64) && ((t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:438:22 in function `world__trigger`")).f_tag.clone() == (v_line.clone()).f_tag.clone())) {
-            v_w = f_world__tagged_action(v_w, v_special.clone(), v_sector.clone());
-        }
-    }
-    if t_contains(&Rc::new(vec![11i64, 51i64, 52i64, 124i64]), &v_special.clone()) {
-        { let t_value = true; *&mut Rc::make_mut(&mut v_w).f_exited = t_value; }
-        v_w = f_world__say(v_w, t_text("Level complete"));
-    };
-    if v_once.clone() {
-        { let t_place0: i64 = v_index.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_linedefs, t_place0, "world.tes:447:5 in function `world__trigger`")).f_special = t_value; }
-    };
-    v_w.clone()
-}
-
-fn f_world__tagged_action(v_w: Rc<T_world__World>, v_special: i64, v_sector: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:452:4 in function `world__tagged_action`");
-    if t_contains(&Rc::new(vec![2i64, 86i64, 103i64, 61i64, 109i64, 112i64, 114i64]), &v_special.clone()) {
-        return f_world__start_door(v_w.clone(), v_sector.clone(), if (v_special.clone() >= 109i64) {
-            8i64
-        } else {
-            2i64
-        }, (-1i64))
-    };
-    if t_contains(&Rc::new(vec![4i64, 90i64, 29i64, 63i64, 105i64, 108i64, 111i64]), &v_special.clone()) {
-        return f_world__start_door(v_w.clone(), v_sector.clone(), if (v_special.clone() >= 105i64) {
-            8i64
-        } else {
-            2i64
-        }, 150i64)
-    };
-    if t_contains(&Rc::new(vec![3i64, 75i64, 50i64, 42i64]), &v_special.clone()) {
-        return f_world__add_mover(v_w.clone(), Rc::new(T_world__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_world__Motion::V_DoorClosing((t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:460:66 in function `world__tagged_action`")).f_ceiling.clone(), 2i64, (-1i64))) }))
-    };
-    if t_contains(&Rc::new(vec![10i64, 88i64, 21i64, 62i64, 120i64, 121i64, 122i64, 123i64]), &v_special.clone()) {
-        let v_speed: i64 = if (v_special.clone() >= 120i64) {
-            8i64
-        } else {
-            4i64
-        };
-        return f_world__add_mover(v_w.clone(), Rc::new(T_world__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_world__Motion::V_LiftLowering(f_world__lowest_neighbor_floor(v_w.clone(), v_sector.clone()), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "world.tes:464:101 in function `world__tagged_action`")).f_floor.clone(), v_speed.clone())) }))
-    };
-    if t_contains(&Rc::new(vec![23i64, 38i64, 82i64, 60i64]), &v_special.clone()) {
-        return f_world__add_mover(v_w.clone(), Rc::new(T_world__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_world__Motion::V_FloorLowering(f_world__lowest_neighbor_floor(v_w.clone(), v_sector.clone()), 1i64)) }))
-    };
-    if t_contains(&Rc::new(vec![19i64, 102i64, 83i64, 45i64]), &v_special.clone()) {
-        return f_world__add_mover(v_w.clone(), Rc::new(T_world__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_world__Motion::V_FloorLowering(f_world__highest_neighbor_floor(v_w.clone(), v_sector.clone()), 1i64)) }))
-    };
-    v_w.clone()
-}
-
-// note: Opens a door sector up to 4 units below its lowest neighboring ceiling. A door that is already moving reverses instead (as pressing `use` on an open door closes it).
-fn f_world__start_door(v_world: Rc<T_world__World>, v_sector: i64, v_speed: i64, v_wait: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:476:4 in function `world__start_door`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_top: i64 = t_sub(f_world__lowest_neighbor_ceiling(v_w.clone(), v_sector.clone()), 4i64, "world.tes:478:46 in function `world__start_door`");
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_movers.clone()), "world.tes:479:10 in function `world__start_door`")) {
-        t_tick("world.tes:479:37 in function `world__start_door`");
-        if ((t_index(&(v_w.clone()).f_movers.clone(), v_i.clone(), "world.tes:480:4 in function `world__start_door`")).f_sector.clone() == v_sector.clone()) {
-            match &*((t_index(&(v_w.clone()).f_movers.clone(), v_i.clone(), "world.tes:481:7 in function `world__start_door`")).f_motion.clone()) {
-                T_world__Motion::V_DoorClosing(t1, t2, t3) => { let v_t = t1.clone(); let v_s = t2.clone(); let v_wt = t3.clone(); {
-                    { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(T_world__Motion::V_DoorOpening(v_t.clone(), v_s.clone(), v_wt.clone())); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_movers, t_place0, "world.tes:482:31 in function `world__start_door`")).f_motion = t_value; }
-                } }
-                T_world__Motion::V_DoorWaiting(t4, t5, _, t6) => { let v_t = t4.clone(); let v_s = t5.clone(); let v_wt = t6.clone(); {
-                    { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(T_world__Motion::V_DoorClosing(v_t.clone(), v_s.clone(), v_wt.clone())); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_movers, t_place0, "world.tes:483:34 in function `world__start_door`")).f_motion = t_value; }
-                } }
-                _ => { {
-                } }
-            };
-            return v_w.clone()
-        }
-    }
-    f_world__add_mover(v_w.clone(), Rc::new(T_world__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_world__Motion::V_DoorOpening(v_top.clone(), v_speed.clone(), v_wait.clone())) }))
-}
-
-fn f_world__add_mover(v_world: Rc<T_world__World>, v_mover: Rc<T_world__Mover>) -> Rc<T_world__World> {
-    t_enter("world.tes:492:4 in function `world__add_mover`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    for v_m in t_iter((v_w.clone()).f_movers.clone()) {
-        t_tick("world.tes:494:19 in function `world__add_mover`");
-        if ((v_m.clone()).f_sector.clone() == (v_mover.clone()).f_sector.clone()) {
-            return v_w.clone()
-        }
-    }
-    { let t_value = t_concat_lists((v_w.clone()).f_movers.clone(), Rc::new(vec![v_mover.clone()])); *&mut Rc::make_mut(&mut v_w).f_movers = t_value; }
-    v_w.clone()
-}
-
-// note: Whether the player or a living monster stands in a sector, so a closing door must not come down on it.
-fn f_world__occupied(v_w: Rc<T_world__World>, v_sector: i64) -> bool {
-    t_enter("world.tes:506:4 in function `world__occupied`");
-    if (((v_w.clone()).f_player.clone()).f_sector.clone() == v_sector.clone()) {
-        return true
-    };
-    for v_m in t_iter((v_w.clone()).f_mobjs.clone()) {
-        t_tick("world.tes:510:18 in function `world__occupied`");
-        if (((((v_m.clone()).f_sector.clone() == v_sector.clone()) && f_world__is_monster(v_m.clone())) && (!f_world__is_dead(v_m.clone()))) && (v_m.clone()).f_present.clone()) {
-            return true
-        }
-    }
-    false
-}
-
-fn f_world__run_movers(v_world: Rc<T_world__World>) -> Rc<T_world__World> {
-    t_enter("world.tes:518:4 in function `world__run_movers`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let mut v_still: Rc<Vec<Rc<T_world__Mover>>> = Rc::new(Vec::<Rc<T_world__Mover>>::new());
-    for v_mover in t_iter((v_w.clone()).f_movers.clone()) {
-        t_tick("world.tes:521:23 in function `world__run_movers`");
-        let v_s: i64 = (v_mover.clone()).f_sector.clone();
-        let v_sector: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_s.clone(), "world.tes:523:14 in function `world__run_movers`");
-        let v_next: Rc<T_world__Motion> = match &*((v_mover.clone()).f_motion.clone()) {
-            T_world__Motion::V_DoorOpening(t1, t2, t3) => { let v_top = t1.clone(); let v_speed = t2.clone(); let v_wait = t3.clone(); {
-                let v_ceiling: i64 = f_std__math__min(t_add((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "world.tes:526:39 in function `world__run_movers`"), v_top.clone());
-                { let t_place0: i64 = v_s.clone(); let t_value = v_ceiling.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "world.tes:527:5 in function `world__run_movers`")).f_ceiling = t_value; }
-                if (v_ceiling.clone() < v_top.clone()) {
-                    (v_mover.clone()).f_motion.clone()
-                } else if (v_wait.clone() < 0i64) {
-                    Rc::new(T_world__Motion::V_Finished)
-                } else {
-                    Rc::new(T_world__Motion::V_DoorWaiting(v_top.clone(), v_speed.clone(), v_wait.clone(), v_wait.clone()))
-                }
-            } }
-            T_world__Motion::V_DoorWaiting(t4, t5, t6, t7) => { let v_top = t4.clone(); let v_speed = t5.clone(); let v_time = t6.clone(); let v_wait = t7.clone(); if (v_time.clone() > 1i64) {
-                Rc::new(T_world__Motion::V_DoorWaiting(v_top.clone(), v_speed.clone(), t_sub(v_time.clone(), 1i64, "world.tes:530:91 in function `world__run_movers`"), v_wait.clone()))
-            } else {
-                Rc::new(T_world__Motion::V_DoorClosing(v_top.clone(), v_speed.clone(), v_wait.clone()))
-            } }
-            T_world__Motion::V_DoorClosing(t8, t9, t10) => { let v_top = t8.clone(); let v_speed = t9.clone(); let v_wait = t10.clone(); {
-                if (f_world__occupied(v_w.clone(), v_s.clone()) && (t_sub(t_sub((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "world.tes:532:38 in function `world__run_movers`"), (v_sector.clone()).f_floor.clone(), "world.tes:532:46 in function `world__run_movers`") < f_movement__player_height())) {
-                    Rc::new(T_world__Motion::V_DoorOpening(v_top.clone(), v_speed.clone(), v_wait.clone()))
-                } else {
-                    let v_ceiling: i64 = f_std__math__max(t_sub((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "world.tes:535:39 in function `world__run_movers`"), (v_sector.clone()).f_floor.clone());
-                    { let t_place0: i64 = v_s.clone(); let t_value = v_ceiling.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "world.tes:536:5 in function `world__run_movers`")).f_ceiling = t_value; }
-                    if (v_ceiling.clone() > (v_sector.clone()).f_floor.clone()) {
-                        (v_mover.clone()).f_motion.clone()
-                    } else {
-                        Rc::new(T_world__Motion::V_Finished)
-                    }
-                }
-            } }
-            T_world__Motion::V_LiftLowering(t11, t12, t13) => { let v_low = t11.clone(); let v_high = t12.clone(); let v_speed = t13.clone(); {
-                let v_floor: i64 = f_std__math__max(t_sub((v_sector.clone()).f_floor.clone(), v_speed.clone(), "world.tes:541:35 in function `world__run_movers`"), v_low.clone());
-                { let t_place0: i64 = v_s.clone(); let t_value = v_floor.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "world.tes:542:5 in function `world__run_movers`")).f_floor = t_value; }
-                if (v_floor.clone() > v_low.clone()) {
-                    (v_mover.clone()).f_motion.clone()
-                } else {
-                    Rc::new(T_world__Motion::V_LiftWaiting(v_low.clone(), v_high.clone(), v_speed.clone(), 105i64))
-                }
-            } }
-            T_world__Motion::V_LiftWaiting(t14, t15, t16, t17) => { let v_low = t14.clone(); let v_high = t15.clone(); let v_speed = t16.clone(); let v_time = t17.clone(); if (v_time.clone() > 1i64) {
-                Rc::new(T_world__Motion::V_LiftWaiting(v_low.clone(), v_high.clone(), v_speed.clone(), t_sub(v_time.clone(), 1i64, "world.tes:545:97 in function `world__run_movers`")))
-            } else {
-                Rc::new(T_world__Motion::V_LiftRising(v_low.clone(), v_high.clone(), v_speed.clone()))
-            } }
-            T_world__Motion::V_LiftRising(t18, t19, t20) => { let v_low = t18.clone(); let v_high = t19.clone(); let v_speed = t20.clone(); {
-                let v_floor: i64 = f_std__math__min(t_add((v_sector.clone()).f_floor.clone(), v_speed.clone(), "world.tes:547:35 in function `world__run_movers`"), v_high.clone());
-                { let t_place0: i64 = v_s.clone(); let t_value = v_floor.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "world.tes:548:5 in function `world__run_movers`")).f_floor = t_value; }
-                if (v_floor.clone() < v_high.clone()) {
-                    (v_mover.clone()).f_motion.clone()
-                } else {
-                    Rc::new(T_world__Motion::V_Finished)
-                }
-            } }
-            T_world__Motion::V_FloorLowering(t21, t22) => { let v_target = t21.clone(); let v_speed = t22.clone(); {
-                let v_floor: i64 = f_std__math__max(t_sub((v_sector.clone()).f_floor.clone(), v_speed.clone(), "world.tes:552:35 in function `world__run_movers`"), v_target.clone());
-                { let t_place0: i64 = v_s.clone(); let t_value = v_floor.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "world.tes:553:5 in function `world__run_movers`")).f_floor = t_value; }
-                if (v_floor.clone() > v_target.clone()) {
-                    (v_mover.clone()).f_motion.clone()
-                } else {
-                    Rc::new(T_world__Motion::V_Finished)
-                }
-            } }
-            T_world__Motion::V_Finished => { Rc::new(T_world__Motion::V_Finished) }
-        };
-        if (v_next.clone() != Rc::new(T_world__Motion::V_Finished)) {
-            v_still = t_concat_lists(std::mem::take(&mut v_still), Rc::new(vec![{ let mut t23 = Rc::unwrap_or_clone(v_mover.clone()); t23.f_motion = v_next.clone(); Rc::new(t23) }]));
-        }
-    }
-    { let t_value = v_still.clone(); *&mut Rc::make_mut(&mut v_w).f_movers = t_value; }
-    v_w.clone()
-}
-
-fn f_world__pickup_name(v_effect: Rc<T_things__Pickup>, v_sprite: Rc<String>) -> Rc<String> {
-    t_enter("world.tes:568:4 in function `world__pickup_name`");
-    match &*(v_effect.clone()) {
+fn f_world__pickup_name(v_effect: Rc<T_things__Pickup>) -> Rc<String> {
+    t_enter("world.tes:247:4 in function `world__pickup_name`");
+    match &*(v_effect) {
         T_things__Pickup::V_Health(t1, _) => { let v_amount = t1.clone(); if (v_amount.clone() == 1i64) {
             t_text("a health bonus")
         } else if (v_amount.clone() == 100i64) {
             t_text("a soul sphere")
+        } else if (v_amount.clone() == 200i64) {
+            t_text("a mega sphere")
         } else if (v_amount.clone() == 10i64) {
             t_text("a stimpack")
         } else {
@@ -6321,31 +6729,45 @@ fn f_world__pickup_name(v_effect: Rc<T_things__Pickup>, v_sprite: Rc<String>) ->
         } else {
             t_text("the mega armor")
         } }
-        T_things__Pickup::V_Ammo(_) => { t_concat(t_concat(t_text("ammunition ("), (t_to_lower(&v_sprite.clone()))), t_text(")")) }
-        T_things__Pickup::V_Key(t3) => { let v_color = t3.clone(); t_concat(t_concat(t_text("a "), (v_color.clone())), t_text(" key")) }
-        T_things__Pickup::V_Weapon(t4, _) => { let v_name = t4.clone(); t_concat(t_text("a "), (v_name.clone())) }
-        T_things__Pickup::V_Other(t5) => { let v_name = t5.clone(); v_name.clone() }
+        T_things__Pickup::V_Ammo(t3, t4) => { let v_kind = t3.clone(); let v_amount = t4.clone(); t_concat(t_concat(t_int_to_text(v_amount.clone()), t_text(" ")), (f_things__ammo_name(v_kind))) }
+        T_things__Pickup::V_Backpack => { t_text("a backpack full of ammo") }
+        T_things__Pickup::V_Key(t5) => { let v_color = t5.clone(); t_concat(t_concat(t_text("a "), (v_color)), t_text(" key")) }
+        T_things__Pickup::V_Weapon(t6, _, _) => { let v_slot = t6.clone(); t_concat(t_text("the "), (f_things__weapon_name(v_slot))) }
+        T_things__Pickup::V_Power(t7, _) => { let v_name = t7.clone(); v_name }
     }
 }
 
-fn f_world__pick_up(v_world: Rc<T_world__World>) -> Rc<T_world__World> {
-    t_enter("world.tes:580:4 in function `world__pick_up`");
-    let mut v_w: Rc<T_world__World> = v_world;
+fn f_world__pick_up(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("world.tes:260:4 in function `world__pick_up`");
+    let mut v_w: Rc<T_state__World> = v_world;
     let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:583:10 in function `world__pick_up`")) {
-        t_tick("world.tes:583:36 in function `world__pick_up`");
-        let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:584:9 in function `world__pick_up`");
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:263:10 in function `world__pick_up`")) {
+        t_tick("world.tes:263:36 in function `world__pick_up`");
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:264:9 in function `world__pick_up`");
         if (v_m.clone()).f_present.clone() {
             match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
                 T_things__Role::V_Item(t1) => { let v_effect = t1.clone(); {
-                    let v_reach: i64 = f_std__fixed__from_int(t_add(f_movement__radius(), ((v_m.clone()).f_info.clone()).f_radius.clone(), "world.tes:588:46 in function `world__pick_up`"));
-                    if ((f_std__math__abs(t_sub((v_m.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "world.tes:589:17 in function `world__pick_up`")) < v_reach.clone()) && (f_std__math__abs(t_sub((v_m.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "world.tes:589:49 in function `world__pick_up`")) < v_reach.clone())) {
-                        let v_before: Rc<T_world__Stats> = (v_w.clone()).f_stats.clone();
+                    let v_reach: i64 = f_std__fixed__from_int(t_add(f_movement__radius(), ((v_m.clone()).f_info.clone()).f_radius.clone(), "world.tes:268:46 in function `world__pick_up`"));
+                    if ((f_std__math__abs(t_sub((v_m.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "world.tes:269:17 in function `world__pick_up`")) < v_reach.clone()) && (f_std__math__abs(t_sub((v_m.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "world.tes:269:49 in function `world__pick_up`")) < v_reach.clone())) {
+                        let v_before: Rc<T_state__Stats> = (v_w.clone()).f_stats.clone();
                         { let t_value = f_world__apply_pickup((v_w.clone()).f_stats.clone(), v_effect.clone()); *&mut Rc::make_mut(&mut v_w).f_stats = t_value; }
-                        if (((v_w.clone()).f_stats.clone() != v_before.clone()) || f_world__is_other(v_effect.clone())) {
-                            { let t_place0: i64 = v_i.clone(); let t_value = false; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:593:5 in function `world__pick_up`")).f_present = t_value; }
-                            { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_items.clone(), 1i64, "world.tes:594:19 in function `world__pick_up`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_items = t_value; }
-                            v_w = f_world__say(v_w, t_concat(t_text("Picked up "), (f_world__pickup_name(v_effect.clone(), ((v_m.clone()).f_info.clone()).f_sprite.clone()))));
+                        if (((v_w.clone()).f_stats.clone() != v_before.clone()) || f_world__is_power(v_effect.clone())) {
+                            { let t_place0: i64 = v_i.clone(); let t_value = false; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:273:5 in function `world__pick_up`")).f_present = t_value; }
+                            { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_items.clone(), 1i64, "world.tes:274:19 in function `world__pick_up`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_items = t_value; }
+                            { let t_value = 6i64; *&mut Rc::make_mut(&mut v_w).f_bonus_flash = t_value; }
+                            v_w = f_state__say(v_w, t_concat(t_text("Picked up "), (f_world__pickup_name(v_effect.clone()))));
+                            v_w = f_state__sound_here(v_w, match &*(v_effect.clone()) {
+                                T_things__Pickup::V_Weapon(_, _, _) => { t_text("DSWPNUP") }
+                                T_things__Pickup::V_Power(_, _) => { t_text("DSGETPOW") }
+                                _ => { t_text("DSITEMUP") }
+                            });
+                            match &*(v_effect.clone()) {
+                                T_things__Pickup::V_Weapon(t2, _, _) => { let v_slot = t2.clone(); if (!t_index(&(v_before.clone()).f_weapons.clone(), v_slot.clone(), "world.tes:283:31 in function `world__pick_up`")) {
+                                    { let t_value = v_slot.clone(); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_weapon = t_value; }
+                                } }
+                                _ => { {
+                                } }
+                            }
                         }
                     }
                 } }
@@ -6354,391 +6776,207 @@ fn f_world__pick_up(v_world: Rc<T_world__World>) -> Rc<T_world__World> {
             }
         }
     }
-    v_w.clone()
+    v_w
 }
 
-fn f_world__is_other(v_effect: Rc<T_things__Pickup>) -> bool {
-    t_enter("world.tes:606:4 in function `world__is_other`");
-    match &*(v_effect.clone()) {
-        T_things__Pickup::V_Other(_) => { true }
+fn f_world__is_power(v_effect: Rc<T_things__Pickup>) -> bool {
+    t_enter("world.tes:298:4 in function `world__is_power`");
+    match &*(v_effect) {
+        T_things__Pickup::V_Power(_, _) => { true }
         _ => { false }
     }
 }
 
-// note: The stats after taking an item; unchanged when the item is of no use (full health, full armor).
-fn f_world__apply_pickup(v_stats: Rc<T_world__Stats>, v_effect: Rc<T_things__Pickup>) -> Rc<T_world__Stats> {
-    t_enter("world.tes:614:4 in function `world__apply_pickup`");
+fn f_world__add_ammo(v_stats: Rc<T_state__Stats>, v_kind: i64, v_amount: i64) -> Rc<T_state__Stats> {
+    t_enter("world.tes:305:4 in function `world__add_ammo`");
+    let mut v_s: Rc<T_state__Stats> = v_stats;
+    { let t_place0: i64 = v_kind.clone(); let t_value = f_std__math__min(t_add(t_index(&(v_s.clone()).f_ammo.clone(), v_kind.clone(), "world.tes:307:29 in function `world__add_ammo`"), v_amount.clone(), "world.tes:307:42 in function `world__add_ammo`"), t_index(&(v_s.clone()).f_max_ammo.clone(), v_kind.clone(), "world.tes:307:52 in function `world__add_ammo`")); *t_slot(&mut Rc::make_mut(&mut v_s).f_ammo, t_place0, "world.tes:307:5 in function `world__add_ammo`") = t_value; }
+    v_s
+}
+
+// note: The stats after taking an item; unchanged when the item is of no use (full health, full armor, full ammunition).
+fn f_world__apply_pickup(v_stats: Rc<T_state__Stats>, v_effect: Rc<T_things__Pickup>) -> Rc<T_state__Stats> {
+    t_enter("world.tes:312:4 in function `world__apply_pickup`");
     match &*(v_effect.clone()) {
         T_things__Pickup::V_Health(t1, t2) => { let v_amount = t1.clone(); let v_limit = t2.clone(); if ((v_stats.clone()).f_health.clone() >= v_limit.clone()) {
             v_stats.clone()
         } else {
-            { let mut t3 = Rc::unwrap_or_clone(v_stats.clone()); t3.f_health = f_std__math__min(t_add((v_stats.clone()).f_health.clone(), v_amount.clone(), "world.tes:616:112 in function `world__apply_pickup`"), v_limit.clone()); Rc::new(t3) }
+            { let mut t3 = Rc::unwrap_or_clone(v_stats.clone()); t3.f_health = f_std__math__min(t_add((v_stats.clone()).f_health.clone(), v_amount.clone(), "world.tes:314:112 in function `world__apply_pickup`"), v_limit.clone()); Rc::new(t3) }
         } }
         T_things__Pickup::V_Armor(t4, t5) => { let v_amount = t4.clone(); let v_limit = t5.clone(); if ((v_stats.clone()).f_armor.clone() >= v_limit.clone()) {
             v_stats.clone()
         } else {
-            { let mut t6 = Rc::unwrap_or_clone(v_stats.clone()); t6.f_armor = f_std__math__min(t_add((v_stats.clone()).f_armor.clone(), v_amount.clone(), "world.tes:617:108 in function `world__apply_pickup`"), v_limit.clone()); Rc::new(t6) }
+            { let mut t6 = Rc::unwrap_or_clone(v_stats.clone()); t6.f_armor = f_std__math__min(t_add((v_stats.clone()).f_armor.clone(), v_amount.clone(), "world.tes:315:108 in function `world__apply_pickup`"), v_limit.clone()); t6.f_armor_class = f_std__math__max((v_stats.clone()).f_armor_class.clone(), 1i64); Rc::new(t6) }
         } }
         T_things__Pickup::V_SetArmor(t7) => { let v_amount = t7.clone(); if ((v_stats.clone()).f_armor.clone() >= v_amount.clone()) {
             v_stats.clone()
         } else {
-            { let mut t8 = Rc::unwrap_or_clone(v_stats.clone()); t8.f_armor = v_amount.clone(); Rc::new(t8) }
+            { let mut t8 = Rc::unwrap_or_clone(v_stats.clone()); t8.f_armor = v_amount.clone(); t8.f_armor_class = if (v_amount.clone() >= 200i64) {
+                2i64
+            } else {
+                1i64
+            }; Rc::new(t8) }
         } }
-        T_things__Pickup::V_Ammo(t9) => { let v_amount = t9.clone(); if ((v_stats.clone()).f_ammo.clone() >= 200i64) {
+        T_things__Pickup::V_Ammo(t9, t10) => { let v_kind = t9.clone(); let v_amount = t10.clone(); if (t_index(&(v_stats.clone()).f_ammo.clone(), v_kind.clone(), "world.tes:317:27 in function `world__apply_pickup`") >= t_index(&(v_stats.clone()).f_max_ammo.clone(), v_kind.clone(), "world.tes:317:47 in function `world__apply_pickup`")) {
             v_stats.clone()
         } else {
-            { let mut t10 = Rc::unwrap_or_clone(v_stats.clone()); t10.f_ammo = f_std__math__min(t_add((v_stats.clone()).f_ammo.clone(), v_amount.clone(), "world.tes:619:95 in function `world__apply_pickup`"), 200i64); Rc::new(t10) }
+            f_world__add_ammo(v_stats.clone(), v_kind.clone(), v_amount.clone())
         } }
-        T_things__Pickup::V_Key(t11) => { let v_color = t11.clone(); if t_contains(&(v_stats.clone()).f_keys.clone(), &v_color.clone()) {
+        T_things__Pickup::V_Backpack => { {
+            let mut v_s: Rc<T_state__Stats> = { let mut t11 = Rc::unwrap_or_clone(v_stats.clone()); t11.f_max_ammo = Rc::new(vec![400i64, 100i64, 100i64, 600i64]); Rc::new(t11) };
+            for v_kind in t_iter(t_range(0i64, 4i64, "world.tes:320:13 in function `world__apply_pickup`")) {
+                t_tick("world.tes:320:25 in function `world__apply_pickup`");
+                v_s = f_world__add_ammo(v_s, v_kind.clone(), t_index(&Rc::new(vec![10i64, 4i64, 1i64, 20i64]), v_kind.clone(), "world.tes:321:27 in function `world__apply_pickup`"));
+            }
+            v_s.clone()
+        } }
+        T_things__Pickup::V_Key(t12) => { let v_color = t12.clone(); if t_contains(&(v_stats.clone()).f_keys.clone(), &v_color.clone()) {
             v_stats.clone()
         } else {
-            { let mut t12 = Rc::unwrap_or_clone(v_stats.clone()); t12.f_keys = t_concat_lists((v_stats.clone()).f_keys.clone(), Rc::new(vec![v_color.clone()])); Rc::new(t12) }
+            { let mut t13 = Rc::unwrap_or_clone(v_stats.clone()); t13.f_keys = t_concat_lists((v_stats.clone()).f_keys.clone(), Rc::new(vec![v_color.clone()])); Rc::new(t13) }
         } }
-        T_things__Pickup::V_Weapon(t13, t14) => { let v_name = t13.clone(); let v_ammo = t14.clone(); { let mut t15 = Rc::unwrap_or_clone(v_stats.clone()); t15.f_weapons = if t_contains(&(v_stats.clone()).f_weapons.clone(), &v_name.clone()) {
-            (v_stats.clone()).f_weapons.clone()
-        } else {
-            t_concat_lists((v_stats.clone()).f_weapons.clone(), Rc::new(vec![v_name.clone()]))
-        }; t15.f_ammo = f_std__math__min(t_add((v_stats.clone()).f_ammo.clone(), v_ammo.clone(), "world.tes:621:156 in function `world__apply_pickup`"), 200i64); Rc::new(t15) } }
-        T_things__Pickup::V_Other(_) => { v_stats.clone() }
-    }
-}
-
-fn f_world__hurt_player(v_world: Rc<T_world__World>, v_damage: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:626:4 in function `world__hurt_player`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_absorbed: i64 = f_std__math__min(((v_w.clone()).f_stats.clone()).f_armor.clone(), t_div(v_damage.clone(), 3i64, "world.tes:628:47 in function `world__hurt_player`"));
-    { let t_value = t_sub(((v_w.clone()).f_stats.clone()).f_armor.clone(), v_absorbed.clone(), "world.tes:629:19 in function `world__hurt_player`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_armor = t_value; }
-    { let t_value = f_std__math__max(t_sub(((v_w.clone()).f_stats.clone()).f_health.clone(), t_sub(v_damage.clone(), v_absorbed.clone(), "world.tes:630:56 in function `world__hurt_player`"), "world.tes:630:46 in function `world__hurt_player`"), 0i64); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_health = t_value; }
-    if (((v_w.clone()).f_stats.clone()).f_health.clone() == 0i64) {
-        v_w = f_world__say(v_w, t_text("You died"));
-    };
-    v_w.clone()
-}
-
-// note: Damaging floors (sector specials 4, 5, 7 and 16) hurt every 32 tics; entering a secret sector (9) counts it once.
-fn f_world__floor_effects(v_world: Rc<T_world__World>) -> Rc<T_world__World> {
-    t_enter("world.tes:638:4 in function `world__floor_effects`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_s: i64 = ((v_w.clone()).f_player.clone()).f_sector.clone();
-    let v_special: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_s.clone(), "world.tes:641:15 in function `world__floor_effects`")).f_special.clone();
-    if (v_special.clone() == 9i64) {
-        { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_secrets.clone(), 1i64, "world.tes:643:21 in function `world__floor_effects`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_secrets = t_value; }
-        { let t_place0: i64 = v_s.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "world.tes:644:5 in function `world__floor_effects`")).f_special = t_value; }
-        return f_world__say(v_w.clone(), t_text("You found a secret area"))
-    };
-    if (t_rem((v_w.clone()).f_tic.clone(), 32i64, "world.tes:647:10 in function `world__floor_effects`") == 0i64) {
-        let v_damage: i64 = match v_special.clone() {
-            5 => { 10i64 }
-            7 => { 5i64 }
-            4 => { 20i64 }
-            16 => { 20i64 }
-            _ => { 0i64 }
-        };
-        if (v_damage.clone() > 0i64) {
-            v_w = f_world__hurt_player(v_w, v_damage.clone());
-        }
-    };
-    v_w.clone()
-}
-
-// note: Fires the pistol (5 to 15 damage, 14 tics between shots) or, once picked up, the shotgun (7 pellets): each shot hits the nearest living monster in the line of fire, unless a wall is nearer.
-fn f_world__fire(v_world: Rc<T_world__World>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:665:4 in function `world__fire`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    if (((v_w.clone()).f_stats.clone()).f_ammo.clone() <= 0i64) {
-        return f_world__say(v_w.clone(), t_text("Out of ammunition"))
-    };
-    let v_shotgun: bool = t_contains(&((v_w.clone()).f_stats.clone()).f_weapons.clone(), &t_text("shotgun"));
-    { let t_value = t_sub(((v_w.clone()).f_stats.clone()).f_ammo.clone(), 1i64, "world.tes:671:18 in function `world__fire`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_ammo = t_value; }
-    { let t_value = if v_shotgun.clone() {
-        37i64
-    } else {
-        14i64
-    }; *&mut Rc::make_mut(&mut v_w).f_cooldown = t_value; }
-    v_w = f_world__alert(v_w);
-    let v_pellets: i64 = if v_shotgun.clone() {
-        7i64
-    } else {
-        1i64
-    };
-    for _ in t_iter(t_range(0i64, v_pellets.clone(), "world.tes:675:10 in function `world__fire`")) {
-        t_tick("world.tes:675:28 in function `world__fire`");
-        let v_r: Rc<Vec<i64>> = f_world__random((v_w.clone()).f_seed.clone());
-        { let t_value = t_index(&v_r.clone(), 1i64, "world.tes:677:14 in function `world__fire`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
-        let v_spread: i64 = if v_shotgun.clone() {
-            t_sub(t_index(&v_r.clone(), 0i64, "world.tes:679:28 in function `world__fire`"), 128i64, "world.tes:679:33 in function `world__fire`")
-        } else {
-            t_div(t_sub(t_index(&v_r.clone(), 0i64, "world.tes:679:50 in function `world__fire`"), 128i64, "world.tes:679:55 in function `world__fire`"), 8i64, "world.tes:679:62 in function `world__fire`")
-        };
-        let v_angle: i64 = f_geometry__wrap_angle(t_add(((v_w.clone()).f_player.clone()).f_angle.clone(), v_spread.clone(), "world.tes:680:48 in function `world__fire`"));
-        v_w = f_world__shoot(v_w, v_trig.clone(), v_angle.clone());
-    }
-    v_w.clone()
-}
-
-fn f_world__shoot(v_world: Rc<T_world__World>, v_trig: Rc<T_geometry__Trig>, v_angle: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:686:4 in function `world__shoot`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    let v_dx: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), v_angle.clone(), "world.tes:689:10 in function `world__shoot`");
-    let v_dy: i64 = t_index(&(v_trig.clone()).f_sine.clone(), v_angle.clone(), "world.tes:690:10 in function `world__shoot`");
-    let mut v_target: i64 = (-1i64);
-    let mut v_target_distance: i64 = f_std__fixed__from_int(4096i64);
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:693:10 in function `world__shoot`")) {
-        t_tick("world.tes:693:36 in function `world__shoot`");
-        let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:694:9 in function `world__shoot`");
-        if (((v_m.clone()).f_present.clone() && f_world__is_monster(v_m.clone())) && (!f_world__is_dead(v_m.clone()))) {
-            let v_along: i64 = t_add(f_std__fixed__mul(t_sub((v_m.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "world.tes:697:27 in function `world__shoot`"), v_dx.clone()), f_std__fixed__mul(t_sub((v_m.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "world.tes:697:54 in function `world__shoot`"), v_dy.clone()), "world.tes:697:38 in function `world__shoot`");
-            let v_beside: i64 = f_std__math__abs(t_sub(f_std__fixed__mul(t_sub((v_m.clone()).f_x.clone(), (v_p.clone()).f_x.clone(), "world.tes:698:37 in function `world__shoot`"), v_dy.clone()), f_std__fixed__mul(t_sub((v_m.clone()).f_y.clone(), (v_p.clone()).f_y.clone(), "world.tes:698:64 in function `world__shoot`"), v_dx.clone()), "world.tes:698:48 in function `world__shoot`"));
-            if (((v_along.clone() > 0i64) && (v_along.clone() < v_target_distance.clone())) && (v_beside.clone() < f_std__fixed__from_int(((v_m.clone()).f_info.clone()).f_radius.clone()))) {
-                v_target = v_i.clone();
-                v_target_distance = v_along.clone();
-            }
-        }
-    }
-    if (v_target.clone() < 0i64) {
-        return v_w.clone()
-    };
-    let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_target.clone(), "world.tes:708:9 in function `world__shoot`");
-    if f_world__blocked(v_w.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone()) {
-        return v_w.clone()
-    };
-    let v_r: Rc<Vec<i64>> = f_world__random((v_w.clone()).f_seed.clone());
-    { let t_value = t_index(&v_r.clone(), 1i64, "world.tes:713:14 in function `world__shoot`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
-    v_w = f_world__damage_monster(v_w, v_target.clone(), t_add(5i64, t_div(t_mul(t_index(&v_r.clone(), 0i64, "world.tes:714:39 in function `world__shoot`"), 11i64, "world.tes:714:44 in function `world__shoot`"), 256i64, "world.tes:714:49 in function `world__shoot`"), "world.tes:714:37 in function `world__shoot`"));
-    v_w.clone()
-}
-
-fn f_world__damage_monster(v_world: Rc<T_world__World>, v_index: i64, v_damage: i64) -> Rc<T_world__World> {
-    t_enter("world.tes:718:4 in function `world__damage_monster`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "world.tes:720:9 in function `world__damage_monster`");
-    let v_health: i64 = t_sub((v_m.clone()).f_health.clone(), v_damage.clone(), "world.tes:721:23 in function `world__damage_monster`");
-    { let t_place0: i64 = v_index.clone(); let t_value = v_health.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:722:5 in function `world__damage_monster`")).f_health = t_value; }
-    if (v_health.clone() <= 0i64) {
-        { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Dead(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:724:5 in function `world__damage_monster`")).f_state = t_value; }
-        { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_kills.clone(), 1i64, "world.tes:725:19 in function `world__damage_monster`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_kills = t_value; }
-        return v_w.clone()
-    };
-    let v_r: Rc<Vec<i64>> = f_world__random((v_w.clone()).f_seed.clone());
-    { let t_value = t_index(&v_r.clone(), 1i64, "world.tes:729:14 in function `world__damage_monster`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
-    { let t_place0: i64 = v_index.clone(); let t_value = if (t_index(&v_r.clone(), 0i64, "world.tes:730:31 in function `world__damage_monster`") < 128i64) {
-        Rc::new(T_world__State::V_Pain(8i64))
-    } else {
-        Rc::new(T_world__State::V_Chase(0i64))
-    }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:730:5 in function `world__damage_monster`")).f_state = t_value; }
-    v_w.clone()
-}
-
-fn f_world__run_monsters(v_world: Rc<T_world__World>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:736:4 in function `world__run_monsters`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:738:10 in function `world__run_monsters`")) {
-        t_tick("world.tes:738:36 in function `world__run_monsters`");
-        let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:739:9 in function `world__run_monsters`");
-        if ((v_m.clone()).f_present.clone() && f_world__is_monster(v_m.clone())) {
-            v_w = f_world__think(v_w, v_i.clone(), v_trig.clone());
-        }
-    }
-    v_w.clone()
-}
-
-fn f_world__distance_units(v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> i64 {
-    t_enter("world.tes:747:4 in function `world__distance_units`");
-    let v_dx: i64 = f_std__fixed__floor_int(t_sub(v_ax.clone(), v_bx.clone(), "world.tes:748:29 in function `world__distance_units`"));
-    let v_dy: i64 = f_std__fixed__floor_int(t_sub(v_ay.clone(), v_by.clone(), "world.tes:749:29 in function `world__distance_units`"));
-    f_std__math__isqrt(t_add(t_mul(v_dx.clone(), v_dx.clone(), "world.tes:750:15 in function `world__distance_units`"), t_mul(v_dy.clone(), v_dy.clone(), "world.tes:750:25 in function `world__distance_units`"), "world.tes:750:20 in function `world__distance_units`"))
-}
-
-// note: One tic of a monster. Idle monsters look for the player every 4 tics; chasing monsters walk towards the player and sometimes attack; an attack hits after 8 tics if the player is still in sight.
-fn f_world__think(v_world: Rc<T_world__World>, v_index: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:754:4 in function `world__think`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "world.tes:756:9 in function `world__think`");
-    let v_species: Rc<T_things__Species> = match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
-        T_things__Role::V_Monster(t1) => { let v_s = t1.clone(); v_s.clone() }
-        _ => { return v_w.clone() }
-    };
-    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    let v_distance: i64 = f_world__distance_units((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone());
-    match &*((v_m.clone()).f_state.clone()) {
-        T_world__State::V_Idle => { {
-            if (((((t_rem(t_add((v_w.clone()).f_tic.clone(), v_index.clone(), "world.tes:765:11 in function `world__think`"), 4i64, "world.tes:765:20 in function `world__think`") == 0i64) && (v_distance.clone() < 2048i64)) && (((v_w.clone()).f_stats.clone()).f_health.clone() > 0i64)) && ((v_distance.clone() < 64i64) || f_world__in_front(v_m.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone()))) && (!f_world__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
-                { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Chase(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:766:5 in function `world__think`")).f_state = t_value; }
-            }
-        } }
-        T_world__State::V_Chase(t2) => { let v_stuck = t2.clone(); {
-            if (((v_w.clone()).f_stats.clone()).f_health.clone() <= 0i64) {
-                { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Idle); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:771:5 in function `world__think`")).f_state = t_value; }
-                return v_w.clone()
+        T_things__Pickup::V_Weapon(t14, t15, t16) => { let v_slot = t14.clone(); let v_kind = t15.clone(); let v_amount = t16.clone(); {
+            let mut v_s: Rc<T_state__Stats> = v_stats.clone();
+            { let t_place0: i64 = v_slot.clone(); let t_value = true; *t_slot(&mut Rc::make_mut(&mut v_s).f_weapons, t_place0, "world.tes:328:5 in function `world__apply_pickup`") = t_value; }
+            if (v_amount.clone() > 0i64) {
+                v_s = f_world__add_ammo(v_s, v_kind.clone(), v_amount.clone());
             };
-            v_w = f_world__chase_step(v_w, v_index.clone(), v_stuck.clone(), v_trig.clone());
-            let v_r: Rc<Vec<i64>> = f_world__random((v_w.clone()).f_seed.clone());
-            { let t_value = t_index(&v_r.clone(), 1i64, "world.tes:776:14 in function `world__think`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
-            let v_reach: i64 = t_add(t_add(((v_m.clone()).f_info.clone()).f_radius.clone(), f_movement__radius(), "world.tes:777:27 in function `world__think`"), 20i64, "world.tes:777:47 in function `world__think`");
-            let v_wants: bool = if (v_species.clone()).f_melee.clone() {
-                ((v_distance.clone() < v_reach.clone()) && (t_index(&v_r.clone(), 0i64, "world.tes:778:53 in function `world__think`") < 64i64))
-            } else {
-                ((v_distance.clone() < 1024i64) && (t_index(&v_r.clone(), 0i64, "world.tes:778:92 in function `world__think`") < 4i64))
-            };
-            if (v_wants.clone() && (!f_world__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
-                { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Attack(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:780:5 in function `world__think`")).f_state = t_value; }
-            }
+            v_s.clone()
         } }
-        T_world__State::V_Attack(t3) => { let v_time = t3.clone(); {
-            { let t_place0: i64 = v_index.clone(); let t_value = f_world__face(v_m.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:784:5 in function `world__think`")).f_angle = t_value; }
-            if ((v_time.clone() == 8i64) && (!f_world__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
-                let v_r: Rc<Vec<i64>> = f_world__random((v_w.clone()).f_seed.clone());
-                { let t_value = t_index(&v_r.clone(), 1i64, "world.tes:787:14 in function `world__think`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
-                let v_close_enough: bool = if (v_species.clone()).f_melee.clone() {
-                    (v_distance.clone() < t_add(t_add(((v_m.clone()).f_info.clone()).f_radius.clone(), f_movement__radius(), "world.tes:789:64 in function `world__think`"), 24i64, "world.tes:789:84 in function `world__think`"))
-                } else {
-                    (t_index(&v_r.clone(), 0i64, "world.tes:789:98 in function `world__think`") < f_std__math__clamp(t_sub(192i64, t_div(v_distance.clone(), 4i64, "world.tes:789:131 in function `world__think`"), "world.tes:789:120 in function `world__think`"), 40i64, 192i64))
-                };
-                if v_close_enough.clone() {
-                    let v_r2: Rc<Vec<i64>> = f_world__random((v_w.clone()).f_seed.clone());
-                    { let t_value = t_index(&v_r2.clone(), 1i64, "world.tes:792:14 in function `world__think`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
-                    v_w = f_world__hurt_player(v_w, t_add((v_species.clone()).f_damage_min.clone(), t_div(t_mul(t_index(&v_r2.clone(), 0i64, "world.tes:793:45 in function `world__think`"), t_add(t_sub((v_species.clone()).f_damage_max.clone(), (v_species.clone()).f_damage_min.clone(), "world.tes:793:73 in function `world__think`"), 1i64, "world.tes:793:94 in function `world__think`"), "world.tes:793:51 in function `world__think`"), 256i64, "world.tes:793:99 in function `world__think`"), "world.tes:793:43 in function `world__think`"));
-                }
-            };
-            { let t_place0: i64 = v_index.clone(); let t_value = if (v_time.clone() >= 16i64) {
-                Rc::new(T_world__State::V_Chase(0i64))
-            } else {
-                Rc::new(T_world__State::V_Attack(t_add(v_time.clone(), 1i64, "world.tes:796:86 in function `world__think`")))
-            }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:796:5 in function `world__think`")).f_state = t_value; }
+        T_things__Pickup::V_Power(t17, t18) => { let v_name = t17.clone(); let v_tics = t18.clone(); match (v_name.clone()).as_str() {
+            "berserk" => { { let mut t19 = Rc::unwrap_or_clone(v_stats.clone()); t19.f_berserk = true; t19.f_health = f_std__math__max((v_stats.clone()).f_health.clone(), 100i64); Rc::new(t19) } }
+            "invulnerability" => { { let mut t20 = Rc::unwrap_or_clone(v_stats.clone()); t20.f_invulnerable = v_tics.clone(); Rc::new(t20) } }
+            "radiation suit" => { { let mut t21 = Rc::unwrap_or_clone(v_stats.clone()); t21.f_radiation_suit = v_tics.clone(); Rc::new(t21) } }
+            _ => { v_stats.clone() }
         } }
-        T_world__State::V_Pain(t4) => { let v_time = t4.clone(); {
-            { let t_place0: i64 = v_index.clone(); let t_value = if (v_time.clone() <= 1i64) {
-                Rc::new(T_world__State::V_Chase(0i64))
-            } else {
-                Rc::new(T_world__State::V_Pain(t_sub(v_time.clone(), 1i64, "world.tes:798:98 in function `world__think`")))
-            }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:798:20 in function `world__think`")).f_state = t_value; }
-        } }
-        T_world__State::V_Dead(t5) => { let v_time = t5.clone(); {
-            { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Dead(f_std__math__min(t_add(v_time.clone(), 1i64, "world.tes:799:63 in function `world__think`"), 1000i64))); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:799:20 in function `world__think`")).f_state = t_value; }
-        } }
-    };
-    v_w.clone()
-}
-
-// note: Whether a point is in the half of the map a monster faces (it sees 180 degrees).
-fn f_world__in_front(v_m: Rc<T_world__Mobj>, v_x: i64, v_y: i64, v_trig: Rc<T_geometry__Trig>) -> bool {
-    t_enter("world.tes:805:4 in function `world__in_front`");
-    (t_add(t_mul(t_shift_right(t_sub(v_x.clone(), (v_m.clone()).f_x.clone(), "world.tes:806:15 in function `world__in_front`"), 8i64, "world.tes:806:1 in function `world__in_front`"), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), (v_m.clone()).f_angle.clone(), "world.tes:806:39 in function `world__in_front`"), 8i64, "world.tes:806:27 in function `world__in_front`"), "world.tes:806:25 in function `world__in_front`"), t_mul(t_shift_right(t_sub(v_y.clone(), (v_m.clone()).f_y.clone(), "world.tes:806:80 in function `world__in_front`"), 8i64, "world.tes:806:66 in function `world__in_front`"), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), (v_m.clone()).f_angle.clone(), "world.tes:806:104 in function `world__in_front`"), 8i64, "world.tes:806:92 in function `world__in_front`"), "world.tes:806:90 in function `world__in_front`"), "world.tes:806:64 in function `world__in_front`") > 0i64)
-}
-
-// note: Gunfire wakes idle monsters within 1200 units that have a line of sight to the player, whichever way they face.
-fn f_world__alert(v_world: Rc<T_world__World>) -> Rc<T_world__World> {
-    t_enter("world.tes:810:4 in function `world__alert`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "world.tes:813:10 in function `world__alert`")) {
-        t_tick("world.tes:813:36 in function `world__alert`");
-        let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "world.tes:814:9 in function `world__alert`");
-        if (((((v_m.clone()).f_present.clone() && f_world__is_monster(v_m.clone())) && ((v_m.clone()).f_state.clone() == Rc::new(T_world__State::V_Idle))) && (f_world__distance_units((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()) < 1200i64)) && (!f_world__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
-            { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(T_world__State::V_Chase(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:816:5 in function `world__alert`")).f_state = t_value; }
-        }
     }
-    v_w.clone()
-}
-
-// note: The fine angle from a monster towards a point: the closest of 32 directions, chosen with dot products.
-fn f_world__face(v_m: Rc<T_world__Mobj>, v_x: i64, v_y: i64, v_trig: Rc<T_geometry__Trig>) -> i64 {
-    t_enter("world.tes:823:4 in function `world__face`");
-    let v_dx: i64 = t_shift_right(t_sub(v_x.clone(), (v_m.clone()).f_x.clone(), "world.tes:824:24 in function `world__face`"), 8i64, "world.tes:824:10 in function `world__face`");
-    let v_dy: i64 = t_shift_right(t_sub(v_y.clone(), (v_m.clone()).f_y.clone(), "world.tes:825:24 in function `world__face`"), 8i64, "world.tes:825:10 in function `world__face`");
-    let mut v_best: i64 = 0i64;
-    let mut v_best_dot: i64 = 0i64;
-    for v_k in t_iter(t_range(0i64, 32i64, "world.tes:828:10 in function `world__face`")) {
-        t_tick("world.tes:828:23 in function `world__face`");
-        let v_a: i64 = t_div(t_mul(v_k.clone(), f_geometry__fine_angles(), "world.tes:829:11 in function `world__face`"), 32i64, "world.tes:829:36 in function `world__face`");
-        let v_dot: i64 = t_add(t_mul(v_dx.clone(), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), v_a.clone(), "world.tes:830:28 in function `world__face`"), 8i64, "world.tes:830:16 in function `world__face`"), "world.tes:830:14 in function `world__face`"), t_mul(v_dy.clone(), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), v_a.clone(), "world.tes:830:66 in function `world__face`"), 8i64, "world.tes:830:54 in function `world__face`"), "world.tes:830:52 in function `world__face`"), "world.tes:830:47 in function `world__face`");
-        if ((v_k.clone() == 0i64) || (v_dot.clone() > v_best_dot.clone())) {
-            v_best = v_a.clone();
-            v_best_dot = v_dot.clone();
-        }
-    }
-    v_best.clone()
-}
-
-// note: Moves a chasing monster towards the player at its speed. When walls or things block the way it tries each axis alone, then, for a while, a sideways direction.
-fn f_world__chase_step(v_world: Rc<T_world__World>, v_index: i64, v_stuck: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_world__World> {
-    t_enter("world.tes:840:4 in function `world__chase_step`");
-    let mut v_w: Rc<T_world__World> = v_world;
-    let v_m: Rc<T_world__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "world.tes:842:9 in function `world__chase_step`");
-    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
-    let v_dx: i64 = t_sub((v_p.clone()).f_x.clone(), (v_m.clone()).f_x.clone(), "world.tes:844:14 in function `world__chase_step`");
-    let v_dy: i64 = t_sub((v_p.clone()).f_y.clone(), (v_m.clone()).f_y.clone(), "world.tes:845:14 in function `world__chase_step`");
-    let v_length: i64 = f_std__math__max(1i64, f_world__distance_units((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()));
-    let v_speed: i64 = f_std__fixed__from_int(((v_m.clone()).f_info.clone()).f_speed.clone());
-    let mut v_step_x: i64 = t_mul(t_div(v_dx.clone(), v_length.clone(), "world.tes:848:17 in function `world__chase_step`"), ((v_m.clone()).f_info.clone()).f_speed.clone(), "world.tes:848:26 in function `world__chase_step`");
-    let mut v_step_y: i64 = t_mul(t_div(v_dy.clone(), v_length.clone(), "world.tes:849:17 in function `world__chase_step`"), ((v_m.clone()).f_info.clone()).f_speed.clone(), "world.tes:849:26 in function `world__chase_step`");
-    if (v_stuck.clone() > 0i64) {
-        let v_old_x: i64 = v_step_x.clone();
-        v_step_x = t_neg(v_step_y.clone(), "world.tes:853:14 in function `world__chase_step`");
-        v_step_y = v_old_x.clone();
-    };
-    let v_floor: i64 = f_world__sector_floor(v_w.clone(), (v_m.clone()).f_sector.clone());
-    let v_reach: i64 = f_std__fixed__from_int(t_add(((v_m.clone()).f_info.clone()).f_radius.clone(), f_movement__radius(), "world.tes:857:42 in function `world__chase_step`"));
-    for v_attempt in t_iter(Rc::new(vec![Rc::new(vec![v_step_x.clone(), v_step_y.clone()]), Rc::new(vec![v_step_x.clone(), 0i64]), Rc::new(vec![0i64, v_step_y.clone()]), Rc::new(vec![f_std__math__clamp(v_step_x.clone(), t_neg(v_speed.clone(), "world.tes:858:81 in function `world__chase_step`"), v_speed.clone()), 0i64])])) {
-        t_tick("world.tes:858:101 in function `world__chase_step`");
-        let v_x: i64 = t_add((v_m.clone()).f_x.clone(), t_index(&v_attempt.clone(), 0i64, "world.tes:859:15 in function `world__chase_step`"), "world.tes:859:13 in function `world__chase_step`");
-        let v_y: i64 = t_add((v_m.clone()).f_y.clone(), t_index(&v_attempt.clone(), 1i64, "world.tes:860:15 in function `world__chase_step`"), "world.tes:860:13 in function `world__chase_step`");
-        let v_near_player: bool = ((f_std__math__abs(t_sub(v_x.clone(), (v_p.clone()).f_x.clone(), "world.tes:861:30 in function `world__chase_step`")) < v_reach.clone()) && (f_std__math__abs(t_sub(v_y.clone(), (v_p.clone()).f_y.clone(), "world.tes:861:60 in function `world__chase_step`")) < v_reach.clone()));
-        if (((((t_index(&v_attempt.clone(), 0i64, "world.tes:862:5 in function `world__chase_step`") != 0i64) || (t_index(&v_attempt.clone(), 1i64, "world.tes:862:24 in function `world__chase_step`") != 0i64)) && (!v_near_player.clone())) && f_movement__fits_radius((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone(), v_floor.clone(), ((v_m.clone()).f_info.clone()).f_radius.clone())) && (!f_world__hits_thing(v_w.clone(), v_x.clone(), v_y.clone(), ((v_m.clone()).f_info.clone()).f_radius.clone(), v_index.clone()))) {
-            { let t_place0: i64 = v_index.clone(); let t_value = v_x.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:863:5 in function `world__chase_step`")).f_x = t_value; }
-            { let t_place0: i64 = v_index.clone(); let t_value = v_y.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:864:5 in function `world__chase_step`")).f_y = t_value; }
-            { let t_place0: i64 = v_index.clone(); let t_value = f_geometry__sector_at((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:865:5 in function `world__chase_step`")).f_sector = t_value; }
-            { let t_place0: i64 = v_index.clone(); let t_value = f_world__face(v_m.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:866:5 in function `world__chase_step`")).f_angle = t_value; }
-            { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Chase(f_std__math__max(t_sub(v_stuck.clone(), 1i64, "world.tes:867:50 in function `world__chase_step`"), 0i64))); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:867:5 in function `world__chase_step`")).f_state = t_value; }
-            return v_w.clone()
-        }
-    }
-    { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_world__State::V_Chase(if (v_stuck.clone() > 0i64) {
-        t_sub(v_stuck.clone(), 1i64, "world.tes:871:56 in function `world__chase_step`")
-    } else {
-        16i64
-    })); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "world.tes:871:5 in function `world__chase_step`")).f_state = t_value; }
-    v_w.clone()
 }
 
 // note: The sprite frame letter of a thing for the current tic.
-fn f_world__frame_of(v_m: Rc<T_world__Mobj>, v_tic: i64) -> Rc<String> {
-    t_enter("world.tes:878:4 in function `world__frame_of`");
+fn f_world__frame_of(v_m: Rc<T_state__Mobj>, v_tic: i64) -> Rc<String> {
+    t_enter("world.tes:346:4 in function `world__frame_of`");
     let v_frames: Rc<String> = match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
         T_things__Role::V_Monster(t1) => { let v_s = t1.clone(); match &*((v_m.clone()).f_state.clone()) {
-            T_world__State::V_Idle => { t_slice_text((v_s.clone()).f_walk.clone(), 0i64, 2i64, "world.tes:881:10 in function `world__frame_of`") }
-            T_world__State::V_Chase(_) => { (v_s.clone()).f_walk.clone() }
-            T_world__State::V_Attack(t2) => { let v_time = t2.clone(); t_slice_text((v_s.clone()).f_attack.clone(), f_std__math__min(t_div(t_mul(v_time.clone(), t_text_length(&(v_s.clone()).f_attack.clone()), "world.tes:883:53 in function `world__frame_of`"), 17i64, "world.tes:883:72 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_attack.clone()), 1i64, "world.tes:883:95 in function `world__frame_of`")), t_add(f_std__math__min(t_div(t_mul(v_time.clone(), t_text_length(&(v_s.clone()).f_attack.clone()), "world.tes:883:115 in function `world__frame_of`"), 17i64, "world.tes:883:134 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_attack.clone()), 1i64, "world.tes:883:157 in function `world__frame_of`")), 1i64, "world.tes:883:162 in function `world__frame_of`"), "world.tes:883:18 in function `world__frame_of`") }
-            T_world__State::V_Pain(_) => { (v_s.clone()).f_pain.clone() }
-            T_world__State::V_Dead(t3) => { let v_time = t3.clone(); t_slice_text((v_s.clone()).f_death.clone(), f_std__math__min(t_div(v_time.clone(), 6i64, "world.tes:885:50 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_death.clone()), 1i64, "world.tes:885:71 in function `world__frame_of`")), t_add(f_std__math__min(t_div(v_time.clone(), 6i64, "world.tes:885:91 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_death.clone()), 1i64, "world.tes:885:112 in function `world__frame_of`")), 1i64, "world.tes:885:117 in function `world__frame_of`"), "world.tes:885:16 in function `world__frame_of`") }
+            T_state__State::V_Idle => { t_slice_text((v_s.clone()).f_walk.clone(), 0i64, 2i64, "world.tes:349:10 in function `world__frame_of`") }
+            T_state__State::V_Chase(_) => { (v_s.clone()).f_walk.clone() }
+            T_state__State::V_Attack(t2) => { let v_time = t2.clone(); t_slice_text((v_s.clone()).f_attack.clone(), f_std__math__min(t_div(t_mul(v_time.clone(), t_text_length(&(v_s.clone()).f_attack.clone()), "world.tes:351:53 in function `world__frame_of`"), 17i64, "world.tes:351:72 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_attack.clone()), 1i64, "world.tes:351:95 in function `world__frame_of`")), t_add(f_std__math__min(t_div(t_mul(v_time.clone(), t_text_length(&(v_s.clone()).f_attack.clone()), "world.tes:351:115 in function `world__frame_of`"), 17i64, "world.tes:351:134 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_attack.clone()), 1i64, "world.tes:351:157 in function `world__frame_of`")), 1i64, "world.tes:351:162 in function `world__frame_of`"), "world.tes:351:18 in function `world__frame_of`") }
+            T_state__State::V_Pain(_) => { (v_s.clone()).f_pain.clone() }
+            T_state__State::V_Dead(t3) => { let v_time = t3.clone(); t_slice_text((v_s.clone()).f_death.clone(), f_std__math__min(t_div(v_time.clone(), 6i64, "world.tes:353:50 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_death.clone()), 1i64, "world.tes:353:71 in function `world__frame_of`")), t_add(f_std__math__min(t_div(v_time.clone(), 6i64, "world.tes:353:91 in function `world__frame_of`"), t_sub(t_text_length(&(v_s.clone()).f_death.clone()), 1i64, "world.tes:353:112 in function `world__frame_of`")), 1i64, "world.tes:353:117 in function `world__frame_of`"), "world.tes:353:16 in function `world__frame_of`") }
         } }
         _ => { ((v_m.clone()).f_info.clone()).f_frames.clone() }
     };
     let v_speed: i64 = match &*((v_m.clone()).f_state.clone()) {
-        T_world__State::V_Chase(_) => { 4i64 }
+        T_state__State::V_Chase(_) => { 4i64 }
         _ => { 8i64 }
     };
     let v_count: i64 = t_text_length(&v_frames.clone());
-    t_slice_text(v_frames.clone(), t_rem(t_div(v_tic.clone(), v_speed.clone(), "world.tes:894:25 in function `world__frame_of`"), v_count.clone(), "world.tes:894:34 in function `world__frame_of`"), t_add(t_rem(t_div(v_tic.clone(), v_speed.clone(), "world.tes:894:48 in function `world__frame_of`"), v_count.clone(), "world.tes:894:57 in function `world__frame_of`"), 1i64, "world.tes:894:65 in function `world__frame_of`"), "world.tes:894:1 in function `world__frame_of`")
+    t_slice_text(v_frames, t_rem(t_div(v_tic.clone(), v_speed.clone(), "world.tes:362:25 in function `world__frame_of`"), v_count.clone(), "world.tes:362:34 in function `world__frame_of`"), t_add(t_rem(t_div(v_tic.clone(), v_speed.clone(), "world.tes:362:48 in function `world__frame_of`"), v_count.clone(), "world.tes:362:57 in function `world__frame_of`"), 1i64, "world.tes:362:65 in function `world__frame_of`"), "world.tes:362:1 in function `world__frame_of`")
 }
 
-fn f_world__sprites(v_w: Rc<T_world__World>) -> Rc<Vec<Rc<T_render__SpriteDraw>>> {
-    t_enter("world.tes:897:8 in function `world__sprites`");
+// note: Everything in the world to draw as sprites: things, projectiles (seen from the direction they fly) and effects.
+fn f_world__sprites(v_w: Rc<T_state__World>) -> Rc<Vec<Rc<T_render__SpriteDraw>>> {
+    t_enter("world.tes:366:8 in function `world__sprites`");
     let mut v_out: Rc<Vec<Rc<T_render__SpriteDraw>>> = Rc::new(Vec::<Rc<T_render__SpriteDraw>>::new());
     for v_m in t_iter((v_w.clone()).f_mobjs.clone()) {
-        t_tick("world.tes:899:18 in function `world__sprites`");
+        t_tick("world.tes:368:18 in function `world__sprites`");
         if ((v_m.clone()).f_present.clone() && (((v_m.clone()).f_info.clone()).f_sprite.clone() != t_text(""))) {
-            let v_sector: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), (v_m.clone()).f_sector.clone(), "world.tes:901:14 in function `world__sprites`");
+            let v_sector: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), (v_m.clone()).f_sector.clone(), "world.tes:370:14 in function `world__sprites`");
             v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![Rc::new(T_render__SpriteDraw { f_x: (v_m.clone()).f_x.clone(), f_y: (v_m.clone()).f_y.clone(), f_z: f_std__fixed__from_int((v_sector.clone()).f_floor.clone()), f_sprite: ((v_m.clone()).f_info.clone()).f_sprite.clone(), f_frame: f_world__frame_of(v_m.clone(), (v_w.clone()).f_tic.clone()), f_angle: (v_m.clone()).f_angle.clone(), f_light: (v_sector.clone()).f_light.clone() })]));
         }
     }
-    v_out.clone()
+    for v_m in t_iter((v_w.clone()).f_missiles.clone()) {
+        t_tick("world.tes:374:21 in function `world__sprites`");
+        let v_frame: Rc<String> = if (t_rem(t_div((v_w.clone()).f_tic.clone(), 4i64, "world.tes:375:23 in function `world__sprites`"), 2i64, "world.tes:375:28 in function `world__sprites`") == 0i64) {
+            t_text("A")
+        } else {
+            t_text("B")
+        };
+        let v_angle: i64 = if (f_std__math__abs((v_m.clone()).f_dx.clone()) >= f_std__math__abs((v_m.clone()).f_dy.clone())) {
+            if ((v_m.clone()).f_dx.clone() > 0i64) {
+                0i64
+            } else {
+                4096i64
+            }
+        } else if ((v_m.clone()).f_dy.clone() > 0i64) {
+            2048i64
+        } else {
+            6144i64
+        };
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![Rc::new(T_render__SpriteDraw { f_x: (v_m.clone()).f_x.clone(), f_y: (v_m.clone()).f_y.clone(), f_z: t_sub((v_m.clone()).f_z.clone(), f_std__fixed__from_int(8i64), "world.tes:377:56 in function `world__sprites`"), f_sprite: (v_m.clone()).f_sprite.clone(), f_frame: v_frame.clone(), f_angle: v_angle.clone(), f_light: 255i64 })]));
+    }
+    for v_e in t_iter((v_w.clone()).f_effects.clone()) {
+        t_tick("world.tes:379:20 in function `world__sprites`");
+        let v_index: i64 = f_std__math__min(t_div((v_e.clone()).f_time.clone(), (v_e.clone()).f_speed.clone(), "world.tes:380:29 in function `world__sprites`"), t_sub(t_text_length(&(v_e.clone()).f_frames.clone()), 1i64, "world.tes:380:57 in function `world__sprites`"));
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![Rc::new(T_render__SpriteDraw { f_x: (v_e.clone()).f_x.clone(), f_y: (v_e.clone()).f_y.clone(), f_z: (v_e.clone()).f_z.clone(), f_sprite: (v_e.clone()).f_sprite.clone(), f_frame: t_slice_text((v_e.clone()).f_frames.clone(), v_index.clone(), t_add(v_index.clone(), 1i64, "world.tes:381:116 in function `world__sprites`"), "world.tes:381:82 in function `world__sprites`"), f_angle: 0i64, f_light: 255i64 })]));
+    }
+    v_out
 }
 
-fn f_world__camera(v_w: Rc<T_world__World>) -> Rc<T_geometry__Camera> {
-    t_enter("world.tes:908:8 in function `world__camera`");
+// note: The weapon on screen: its sprite and frame, and the muzzle flash (empty when none), e.g. ["PISGA0", "PISFA0"].
+fn f_world__weapon_view(v_w: Rc<T_state__World>) -> Rc<Vec<Rc<String>>> {
+    t_enter("world.tes:387:8 in function `world__weapon_view`");
+    let v_slot: i64 = ((v_w.clone()).f_stats.clone()).f_weapon.clone();
+    let v_sprite: Rc<String> = f_things__weapon_sprite(v_slot.clone());
+    let v_frames: Rc<String> = f_things__weapon_frames(v_slot.clone());
+    let mut v_frame: Rc<String> = if (v_slot.clone() == 7i64) {
+        if (t_rem(t_div((v_w.clone()).f_tic.clone(), 4i64, "world.tes:391:38 in function `world__weapon_view`"), 2i64, "world.tes:391:43 in function `world__weapon_view`") == 0i64) {
+            t_text("C")
+        } else {
+            t_text("D")
+        }
+    } else {
+        t_text("A")
+    };
+    let mut v_flash: Rc<String> = t_text("");
+    if ((v_w.clone()).f_firing.clone() >= 0i64) {
+        let v_index: i64 = f_std__math__min(t_div(t_mul((v_w.clone()).f_firing.clone(), t_text_length(&v_frames.clone()), "world.tes:394:31 in function `world__weapon_view`"), f_combat__weapon_cooldown(v_slot.clone()), "world.tes:394:48 in function `world__weapon_view`"), t_sub(t_text_length(&v_frames.clone()), 1i64, "world.tes:394:95 in function `world__weapon_view`"));
+        v_frame = t_slice_text(v_frames.clone(), v_index.clone(), t_add(v_index.clone(), 1i64, "world.tes:395:45 in function `world__weapon_view`"), "world.tes:395:13 in function `world__weapon_view`");
+        if (((v_w.clone()).f_firing.clone() < 4i64) && (f_things__weapon_flash(v_slot.clone()) != t_text(""))) {
+            v_flash = t_concat((f_things__weapon_flash(v_slot.clone())), t_text("A0"));
+        }
+    };
+    Rc::new(vec![t_concat(t_concat(t_concat((v_sprite), t_text("")), (v_frame)), t_text("0")), v_flash])
+}
+
+// note: Which of PLAYPAL's 14 palettes to show: red after damage (1 to 8), yellow after a pickup (9 to 12), green with the radiation suit (13), else 0.
+fn f_world__palette_index(v_w: Rc<T_state__World>) -> i64 {
+    t_enter("world.tes:404:8 in function `world__palette_index`");
+    if ((v_w.clone()).f_damage_flash.clone() > 0i64) {
+        return f_std__math__min(t_div(t_add((v_w).f_damage_flash.clone(), 7i64, "world.tes:406:33 in function `world__palette_index`"), 8i64, "world.tes:406:38 in function `world__palette_index`"), 8i64)
+    };
+    if ((v_w.clone()).f_bonus_flash.clone() > 0i64) {
+        return t_sub(t_add(9i64, f_std__math__min(t_div(t_add((v_w).f_bonus_flash.clone(), 7i64, "world.tes:409:36 in function `world__palette_index`"), 8i64, "world.tes:409:41 in function `world__palette_index`"), 3i64), "world.tes:409:10 in function `world__palette_index`"), 1i64, "world.tes:409:49 in function `world__palette_index`")
+    };
+    if ((((v_w.clone()).f_stats.clone()).f_radiation_suit.clone() > 0i64) && ((((v_w.clone()).f_stats.clone()).f_radiation_suit.clone() > 128i64) || (t_rem(((v_w.clone()).f_stats.clone()).f_radiation_suit.clone(), 16i64, "world.tes:411:91 in function `world__palette_index`") < 8i64))) {
+        return 13i64
+    };
+    0i64
+}
+
+fn f_world__camera(v_w: Rc<T_state__World>) -> Rc<T_geometry__Camera> {
+    t_enter("world.tes:417:8 in function `world__camera`");
     f_movement__camera((v_w.clone()).f_level.clone(), (v_w.clone()).f_player.clone())
+}
+
+// note: The map after this one: the next on a normal exit, the secret map (9) on a secret exit, and back from the secret map to where the episode continues. Empty after the last map of an episode.
+fn f_world__next_map(v_name: Rc<String>, v_secret: bool) -> Rc<String> {
+    t_enter("world.tes:420:8 in function `world__next_map`");
+    let v_codes: Rc<Vec<i64>> = t_code_points(&v_name.clone());
+    if (t_list_length(&v_codes.clone()) != 4i64) {
+        return t_text("")
+    };
+    let v_episode: i64 = t_sub(t_index(&v_codes.clone(), 1i64, "world.tes:425:15 in function `world__next_map`"), 48i64, "world.tes:425:24 in function `world__next_map`");
+    let v_map: i64 = t_sub(t_index(&v_codes.clone(), 3i64, "world.tes:426:11 in function `world__next_map`"), 48i64, "world.tes:426:20 in function `world__next_map`");
+    if v_secret.clone() {
+        return t_concat(t_concat(t_text("E"), t_int_to_text(v_episode)), t_text("M9"))
+    };
+    if (v_map.clone() == 9i64) {
+        return t_concat(t_concat(t_concat(t_text("E"), t_int_to_text(v_episode.clone())), t_text("M")), t_int_to_text(t_index(&Rc::new(vec![4i64, 6i64, 7i64, 3i64]), f_std__math__clamp(t_sub(v_episode.clone(), 1i64, "world.tes:431:55 in function `world__next_map`"), 0i64, 3i64), "world.tes:431:23 in function `world__next_map`")))
+    };
+    if (v_map.clone() >= 8i64) {
+        return t_text("")
+    };
+    t_concat(t_concat(t_concat(t_text("E"), t_int_to_text(v_episode)), t_text("M")), t_int_to_text(t_add(v_map, 1i64, "world.tes:436:20 in function `world__next_map`")))
 }
 
 fn f_demo__signed(v_value: i64) -> i64 {
@@ -6772,7 +7010,7 @@ fn f_demo__parse(v_data: Rc<Vec<u8>>) -> Result<Rc<T_demo__Demo>, Rc<String>> {
             v_console = t_add(v_console.clone(), 1i64, "demo.tes:37:13 in function `demo__parse`");
         }
     }
-    let mut v_tics: Rc<Vec<Rc<T_world__Input>>> = Rc::new(Vec::<Rc<T_world__Input>>::new());
+    let mut v_tics: Rc<Vec<Rc<T_state__Input>>> = Rc::new(Vec::<Rc<T_state__Input>>::new());
     let mut v_at: i64 = 13i64;
     while ((v_at.clone() < t_list_length(&v_data.clone())) && (t_bytes_index(&v_data.clone(), v_at.clone(), "demo.tes:42:29 in function `demo__parse`") != 128i64)) {
         t_tick("demo.tes:42:45 in function `demo__parse`");
@@ -6781,15 +7019,408 @@ fn f_demo__parse(v_data: Rc<Vec<u8>>) -> Result<Rc<T_demo__Demo>, Rc<String>> {
             return Result::<Rc<T_demo__Demo>, Rc<String>>::Err(t_text("the demo ends in the middle of a tic"))
         };
         let v_buttons: i64 = t_bytes_index(&v_data.clone(), t_add(v_mine.clone(), 3i64, "demo.tes:47:25 in function `demo__parse`"), "demo.tes:47:15 in function `demo__parse`");
-        v_tics = t_concat_lists(std::mem::take(&mut v_tics), Rc::new(vec![{ let mut t1 = Rc::unwrap_or_clone(f_world__no_input()); t1.f_forward_move = f_demo__signed(t_bytes_index(&v_data.clone(), v_mine.clone(), "demo.tes:49:59 in function `demo__parse`")); t1.f_side_move = f_demo__signed(t_bytes_index(&v_data.clone(), t_add(v_mine.clone(), 1i64, "demo.tes:49:100 in function `demo__parse`"), "demo.tes:49:90 in function `demo__parse`")); t1.f_turn = t_mul(f_demo__signed(t_bytes_index(&v_data.clone(), t_add(v_mine.clone(), 2i64, "demo.tes:49:130 in function `demo__parse`"), "demo.tes:49:120 in function `demo__parse`")), 32i64, "demo.tes:49:136 in function `demo__parse`"); t1.f_fire = ((v_buttons.clone() & 1i64) != 0i64); t1.f_use = ((v_buttons.clone() & 2i64) != 0i64); Rc::new(t1) }]));
+        v_tics = t_concat_lists(std::mem::take(&mut v_tics), Rc::new(vec![{ let mut t1 = Rc::unwrap_or_clone(f_state__no_input()); t1.f_forward_move = f_demo__signed(t_bytes_index(&v_data.clone(), v_mine.clone(), "demo.tes:49:59 in function `demo__parse`")); t1.f_side_move = f_demo__signed(t_bytes_index(&v_data.clone(), t_add(v_mine.clone(), 1i64, "demo.tes:49:100 in function `demo__parse`"), "demo.tes:49:90 in function `demo__parse`")); t1.f_turn = t_mul(f_demo__signed(t_bytes_index(&v_data.clone(), t_add(v_mine.clone(), 2i64, "demo.tes:49:130 in function `demo__parse`"), "demo.tes:49:120 in function `demo__parse`")), 32i64, "demo.tes:49:136 in function `demo__parse`"); t1.f_fire = ((v_buttons.clone() & 1i64) != 0i64); t1.f_use = ((v_buttons.clone() & 2i64) != 0i64); Rc::new(t1) }]));
         v_at = t_add(v_at.clone(), t_mul(v_players.clone(), 4i64, "demo.tes:50:19 in function `demo__parse`"), "demo.tes:50:8 in function `demo__parse`");
     }
-    Result::<Rc<T_demo__Demo>, Rc<String>>::Ok(Rc::new(T_demo__Demo { f_skill: t_bytes_index(&v_data.clone(), 1i64, "demo.tes:52:19 in function `demo__parse`"), f_episode: t_bytes_index(&v_data.clone(), 2i64, "demo.tes:52:37 in function `demo__parse`"), f_map: t_bytes_index(&v_data.clone(), 3i64, "demo.tes:52:51 in function `demo__parse`"), f_players: v_players.clone(), f_console: v_console.clone(), f_tics: v_tics.clone() }))
+    Result::<Rc<T_demo__Demo>, Rc<String>>::Ok(Rc::new(T_demo__Demo { f_skill: t_bytes_index(&v_data.clone(), 1i64, "demo.tes:52:19 in function `demo__parse`"), f_episode: t_bytes_index(&v_data.clone(), 2i64, "demo.tes:52:37 in function `demo__parse`"), f_map: t_bytes_index(&v_data.clone(), 3i64, "demo.tes:52:51 in function `demo__parse`"), f_players: v_players, f_console: v_console, f_tics: v_tics }))
 }
 
 fn f_demo__map_name(v_d: Rc<T_demo__Demo>) -> Rc<String> {
     t_enter("demo.tes:55:8 in function `demo__map_name`");
     t_concat(t_concat(t_concat(t_text("E"), t_int_to_text((v_d.clone()).f_episode.clone())), t_text("M")), t_int_to_text((v_d.clone()).f_map.clone()))
+}
+
+fn f_state__no_input() -> Rc<T_state__Input> {
+    t_enter("state.tes:154:8 in function `state__no_input`");
+    Rc::new(T_state__Input { f_forward: 0i64, f_sideways: 0i64, f_forward_move: 0i64, f_side_move: 0i64, f_turn: 0i64, f_use: false, f_fire: false, f_weapon: (-1i64) })
+}
+
+fn f_state__start_stats() -> Rc<T_state__Stats> {
+    t_enter("state.tes:156:8 in function `state__start_stats`");
+    Rc::new(T_state__Stats { f_health: 100i64, f_armor: 0i64, f_armor_class: 0i64, f_ammo: Rc::new(vec![50i64, 0i64, 0i64, 0i64]), f_max_ammo: Rc::new(vec![200i64, 50i64, 50i64, 300i64]), f_weapons: Rc::new(vec![true, true, false, false, false, false, false, false]), f_weapon: 1i64, f_keys: Rc::new(Vec::<Rc<String>>::new()), f_kills: 0i64, f_items: 0i64, f_secrets: 0i64, f_berserk: false, f_invulnerable: 0i64, f_radiation_suit: 0i64 })
+}
+
+// note: A random number from `low` to `high` (inclusive), advancing the world's seed.
+fn f_state__roll(v_world: Rc<T_state__World>, v_low: i64, v_high: i64) -> Rc<Vec<i64>> {
+    t_enter("state.tes:161:8 in function `state__roll`");
+    f_std__rng__roll((v_world).f_seed.clone(), v_low, v_high)
+}
+
+fn f_state__say(v_w: Rc<T_state__World>, v_text: Rc<String>) -> Rc<T_state__World> {
+    t_enter("state.tes:163:8 in function `state__say`");
+    { let mut t1 = Rc::unwrap_or_clone(v_w); t1.f_message = v_text; t1.f_message_time = 105i64; Rc::new(t1) }
+}
+
+fn f_state__sound_at(v_world: Rc<T_state__World>, v_name: Rc<String>, v_x: i64, v_y: i64) -> Rc<T_state__World> {
+    t_enter("state.tes:165:8 in function `state__sound_at`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    { let t_value = t_concat_lists((v_w.clone()).f_sounds.clone(), Rc::new(vec![Rc::new(T_state__Sound { f_name: v_name.clone(), f_x: v_x.clone(), f_y: v_y.clone() })])); *&mut Rc::make_mut(&mut v_w).f_sounds = t_value; }
+    v_w
+}
+
+fn f_state__sound_here(v_w: Rc<T_state__World>, v_name: Rc<String>) -> Rc<T_state__World> {
+    t_enter("state.tes:171:8 in function `state__sound_here`");
+    f_state__sound_at(v_w.clone(), v_name, ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone())
+}
+
+fn f_state__sector_sound(v_w: Rc<T_state__World>, v_name: Rc<String>, v_sector: i64) -> Rc<T_state__World> {
+    t_enter("state.tes:173:8 in function `state__sector_sound`");
+    f_state__sound_at(v_w.clone(), v_name, t_index(&t_index(&(v_w.clone()).f_centers.clone(), v_sector.clone(), "state.tes:173:85 in function `state__sector_sound`"), 0i64, "state.tes:173:85 in function `state__sector_sound`"), t_index(&t_index(&(v_w.clone()).f_centers.clone(), v_sector.clone(), "state.tes:173:107 in function `state__sector_sound`"), 1i64, "state.tes:173:107 in function `state__sector_sound`"))
+}
+
+fn f_state__sector_floor(v_w: Rc<T_state__World>, v_sector: i64) -> i64 {
+    t_enter("state.tes:175:8 in function `state__sector_floor`");
+    (t_index(&((v_w).f_level.clone()).f_sectors.clone(), v_sector, "state.tes:175:53 in function `state__sector_floor`")).f_floor.clone()
+}
+
+fn f_state__is_monster(v_m: Rc<T_state__Mobj>) -> bool {
+    t_enter("state.tes:177:8 in function `state__is_monster`");
+    match &*(((v_m).f_info.clone()).f_role.clone()) {
+        T_things__Role::V_Monster(_) => { true }
+        _ => { false }
+    }
+}
+
+fn f_state__is_barrel(v_m: Rc<T_state__Mobj>) -> bool {
+    t_enter("state.tes:184:8 in function `state__is_barrel`");
+    (((v_m).f_info.clone()).f_role.clone() == Rc::new(T_things__Role::V_Barrel))
+}
+
+fn f_state__is_dead(v_m: Rc<T_state__Mobj>) -> bool {
+    t_enter("state.tes:186:8 in function `state__is_dead`");
+    match &*((v_m).f_state.clone()) {
+        T_state__State::V_Dead(_) => { true }
+        _ => { false }
+    }
+}
+
+// note: Whether a thing can be shot: a living monster or a barrel.
+fn f_state__is_target(v_m: Rc<T_state__Mobj>) -> bool {
+    t_enter("state.tes:194:8 in function `state__is_target`");
+    ((v_m.clone()).f_present.clone() && ((f_state__is_monster(v_m.clone()) && (!f_state__is_dead(v_m.clone()))) || f_state__is_barrel(v_m.clone())))
+}
+
+// note: Whether a thing stops others from walking through it: obstacles, barrels and living monsters.
+fn f_state__is_solid(v_m: Rc<T_state__Mobj>) -> bool {
+    t_enter("state.tes:197:8 in function `state__is_solid`");
+    if (!(v_m.clone()).f_present.clone()) {
+        return false
+    };
+    match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
+        T_things__Role::V_Obstacle => { true }
+        T_things__Role::V_Barrel => { true }
+        T_things__Role::V_Monster(_) => { (!f_state__is_dead(v_m.clone())) }
+        _ => { false }
+    }
+}
+
+// note: Whether a circle of `size` units at (x, y) overlaps a solid thing other than `self` (-1 for the player).
+fn f_state__hits_thing(v_w: Rc<T_state__World>, v_x: i64, v_y: i64, v_size: i64, v_self: i64) -> bool {
+    t_enter("state.tes:210:8 in function `state__hits_thing`");
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "state.tes:211:10 in function `state__hits_thing`")) {
+        t_tick("state.tes:211:36 in function `state__hits_thing`");
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "state.tes:212:9 in function `state__hits_thing`");
+        if ((v_i.clone() != v_self.clone()) && f_state__is_solid(v_m.clone())) {
+            let v_reach: i64 = f_std__fixed__from_int(t_add(v_size.clone(), ((v_m.clone()).f_info.clone()).f_radius.clone(), "state.tes:214:33 in function `state__hits_thing`"));
+            if ((f_std__math__abs(t_sub((v_m.clone()).f_x.clone(), v_x.clone(), "state.tes:215:17 in function `state__hits_thing`")) < v_reach.clone()) && (f_std__math__abs(t_sub((v_m.clone()).f_y.clone(), v_y.clone(), "state.tes:215:47 in function `state__hits_thing`")) < v_reach.clone())) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// note: Whether a line is a wall for sight and shots: one-sided, or a two-sided line whose opening is closed.
+fn f_state__solid_line(v_l: Rc<T_level__Level>, v_line: Rc<T_level__Linedef>) -> bool {
+    t_enter("state.tes:224:8 in function `state__solid_line`");
+    if ((v_line.clone()).f_back.clone() < 0i64) {
+        return true
+    };
+    let v_front: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "state.tes:228:23 in function `state__solid_line`")).f_sector.clone(), "state.tes:228:13 in function `state__solid_line`");
+    let v_back: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "state.tes:229:22 in function `state__solid_line`")).f_sector.clone(), "state.tes:229:12 in function `state__solid_line`");
+    (f_std__math__min((v_front.clone()).f_ceiling.clone(), (v_back.clone()).f_ceiling.clone()) <= f_std__math__max((v_front.clone()).f_floor.clone(), (v_back.clone()).f_floor.clone()))
+}
+
+// note: Whether the line between two points crosses a wall or a closed door, for monster sight, shots and explosions.
+fn f_state__blocked(v_w: Rc<T_state__World>, v_x0: i64, v_y0: i64, v_x1: i64, v_y1: i64) -> bool {
+    t_enter("state.tes:234:8 in function `state__blocked`");
+    let v_l: Rc<T_level__Level> = (v_w.clone()).f_level.clone();
+    for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
+        t_tick("state.tes:236:24 in function `state__blocked`");
+        if f_state__solid_line(v_l.clone(), v_line.clone()) {
+            let v_a: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "state.tes:238:9 in function `state__blocked`");
+            let v_b: Rc<T_level__Vertex> = t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "state.tes:239:9 in function `state__blocked`");
+            if f_std__plane__crosses(v_x0.clone(), v_y0.clone(), v_x1.clone(), v_y1.clone(), f_std__fixed__from_int((v_a.clone()).f_x.clone()), f_std__fixed__from_int((v_a.clone()).f_y.clone()), f_std__fixed__from_int((v_b.clone()).f_x.clone()), f_std__fixed__from_int((v_b.clone()).f_y.clone())) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn f_state__distance_units(v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> i64 {
+    t_enter("state.tes:248:8 in function `state__distance_units`");
+    let v_dx: i64 = f_std__fixed__floor_int(t_sub(v_ax.clone(), v_bx.clone(), "state.tes:249:29 in function `state__distance_units`"));
+    let v_dy: i64 = f_std__fixed__floor_int(t_sub(v_ay.clone(), v_by.clone(), "state.tes:250:29 in function `state__distance_units`"));
+    f_std__math__isqrt(t_add(t_mul(v_dx.clone(), v_dx.clone(), "state.tes:251:15 in function `state__distance_units`"), t_mul(v_dy.clone(), v_dy.clone(), "state.tes:251:25 in function `state__distance_units`"), "state.tes:251:20 in function `state__distance_units`"))
+}
+
+fn f_state__add_effect(v_world: Rc<T_state__World>, v_sprite: Rc<String>, v_frames: Rc<String>, v_x: i64, v_y: i64, v_z: i64, v_speed: i64) -> Rc<T_state__World> {
+    t_enter("state.tes:254:8 in function `state__add_effect`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    { let t_value = t_concat_lists((v_w.clone()).f_effects.clone(), Rc::new(vec![Rc::new(T_state__Effect { f_sprite: v_sprite.clone(), f_frames: v_frames.clone(), f_x: v_x.clone(), f_y: v_y.clone(), f_z: v_z.clone(), f_time: 0i64, f_speed: v_speed.clone() })])); *&mut Rc::make_mut(&mut v_w).f_effects = t_value; }
+    v_w
+}
+
+// note: Damage to the player: nothing while invulnerable; armor takes a third (class 1) or half (class 2) while it lasts.
+fn f_state__hurt_player(v_world: Rc<T_state__World>, v_damage: i64) -> Rc<T_state__World> {
+    t_enter("state.tes:261:8 in function `state__hurt_player`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    if (((v_damage.clone() <= 0i64) || (((v_w.clone()).f_stats.clone()).f_health.clone() <= 0i64)) || (((v_w.clone()).f_stats.clone()).f_invulnerable.clone() > 0i64)) {
+        return v_w
+    };
+    let v_share: i64 = if (((v_w.clone()).f_stats.clone()).f_armor_class.clone() == 2i64) {
+        t_div(v_damage.clone(), 2i64, "state.tes:266:50 in function `state__hurt_player`")
+    } else {
+        t_div(v_damage.clone(), 3i64, "state.tes:266:70 in function `state__hurt_player`")
+    };
+    let v_absorbed: i64 = f_std__math__min(((v_w.clone()).f_stats.clone()).f_armor.clone(), v_share.clone());
+    { let t_value = t_sub(((v_w.clone()).f_stats.clone()).f_armor.clone(), v_absorbed.clone(), "state.tes:268:19 in function `state__hurt_player`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_armor = t_value; }
+    if (((v_w.clone()).f_stats.clone()).f_armor.clone() == 0i64) {
+        { let t_value = 0i64; *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_armor_class = t_value; }
+    };
+    { let t_value = f_std__math__max(t_sub(((v_w.clone()).f_stats.clone()).f_health.clone(), t_sub(v_damage.clone(), v_absorbed.clone(), "state.tes:272:56 in function `state__hurt_player`"), "state.tes:272:46 in function `state__hurt_player`"), 0i64); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_health = t_value; }
+    { let t_value = f_std__math__min(t_add((v_w.clone()).f_damage_flash.clone(), v_damage.clone(), "state.tes:273:46 in function `state__hurt_player`"), 100i64); *&mut Rc::make_mut(&mut v_w).f_damage_flash = t_value; }
+    if (((v_w.clone()).f_stats.clone()).f_health.clone() == 0i64) {
+        v_w = f_state__sound_here(v_w, t_text("DSPLDETH"));
+        return f_state__say(v_w, t_text("You died - press use to try again"))
+    };
+    f_state__sound_here(v_w, t_text("DSPLPAIN"))
+}
+
+fn f_save__number(v_word: Rc<String>) -> i64 {
+    t_enter("save.tes:12:4 in function `save__number`");
+    t_value_or(t_parse_int(&v_word), 0i64)
+}
+
+fn f_save__flag(v_value: bool) -> Rc<String> {
+    t_enter("save.tes:14:4 in function `save__flag`");
+    if v_value {
+        t_text("1")
+    } else {
+        t_text("0")
+    }
+}
+
+fn f_save__monster_state(v_s: Rc<T_state__State>) -> Rc<String> {
+    t_enter("save.tes:16:4 in function `save__monster_state`");
+    match &*(v_s) {
+        T_state__State::V_Idle => { t_text("idle 0") }
+        T_state__State::V_Chase(t1) => { let v_n = t1.clone(); t_concat(t_text("chase "), t_int_to_text(v_n)) }
+        T_state__State::V_Attack(t2) => { let v_n = t2.clone(); t_concat(t_text("attack "), t_int_to_text(v_n)) }
+        T_state__State::V_Pain(t3) => { let v_n = t3.clone(); t_concat(t_text("pain "), t_int_to_text(v_n)) }
+        T_state__State::V_Dead(t4) => { let v_n = t4.clone(); t_concat(t_text("dead "), t_int_to_text(v_n)) }
+    }
+}
+
+fn f_save__read_state(v_name: Rc<String>, v_n: i64) -> Rc<T_state__State> {
+    t_enter("save.tes:26:4 in function `save__read_state`");
+    match (v_name).as_str() {
+        "chase" => { Rc::new(T_state__State::V_Chase(v_n)) }
+        "attack" => { Rc::new(T_state__State::V_Attack(v_n)) }
+        "pain" => { Rc::new(T_state__State::V_Pain(v_n)) }
+        "dead" => { Rc::new(T_state__State::V_Dead(v_n)) }
+        _ => { Rc::new(T_state__State::V_Idle) }
+    }
+}
+
+fn f_save__motion(v_m: Rc<T_state__Motion>) -> Rc<String> {
+    t_enter("save.tes:36:4 in function `save__motion`");
+    match &*(v_m) {
+        T_state__Motion::V_DoorOpening(t1, t2, t3) => { let v_top = t1.clone(); let v_speed = t2.clone(); let v_wait = t3.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("door-opening "), t_int_to_text(v_top)), t_text(" ")), t_int_to_text(v_speed)), t_text(" ")), t_int_to_text(v_wait)), t_text(" 0")) }
+        T_state__Motion::V_DoorWaiting(t4, t5, t6, t7) => { let v_top = t4.clone(); let v_speed = t5.clone(); let v_time = t6.clone(); let v_wait = t7.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("door-waiting "), t_int_to_text(v_top)), t_text(" ")), t_int_to_text(v_speed)), t_text(" ")), t_int_to_text(v_time)), t_text(" ")), t_int_to_text(v_wait)) }
+        T_state__Motion::V_DoorClosing(t8, t9, t10) => { let v_top = t8.clone(); let v_speed = t9.clone(); let v_wait = t10.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("door-closing "), t_int_to_text(v_top)), t_text(" ")), t_int_to_text(v_speed)), t_text(" ")), t_int_to_text(v_wait)), t_text(" 0")) }
+        T_state__Motion::V_LiftLowering(t11, t12, t13) => { let v_low = t11.clone(); let v_high = t12.clone(); let v_speed = t13.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("lift-lowering "), t_int_to_text(v_low)), t_text(" ")), t_int_to_text(v_high)), t_text(" ")), t_int_to_text(v_speed)), t_text(" 0")) }
+        T_state__Motion::V_LiftWaiting(t14, t15, t16, t17) => { let v_low = t14.clone(); let v_high = t15.clone(); let v_speed = t16.clone(); let v_time = t17.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("lift-waiting "), t_int_to_text(v_low)), t_text(" ")), t_int_to_text(v_high)), t_text(" ")), t_int_to_text(v_speed)), t_text(" ")), t_int_to_text(v_time)) }
+        T_state__Motion::V_LiftRising(t18, t19, t20) => { let v_low = t18.clone(); let v_high = t19.clone(); let v_speed = t20.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("lift-rising "), t_int_to_text(v_low)), t_text(" ")), t_int_to_text(v_high)), t_text(" ")), t_int_to_text(v_speed)), t_text(" 0")) }
+        T_state__Motion::V_FloorLowering(t21, t22) => { let v_target = t21.clone(); let v_speed = t22.clone(); t_concat(t_concat(t_concat(t_concat(t_text("floor-lowering "), t_int_to_text(v_target)), t_text(" ")), t_int_to_text(v_speed)), t_text(" 0 0")) }
+        T_state__Motion::V_Crushing(t23, t24, t25, t26) => { let v_top = t23.clone(); let v_speed = t24.clone(); let v_down = t25.clone(); let v_silent = t26.clone(); t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("crushing "), t_int_to_text(v_top)), t_text(" ")), t_int_to_text(v_speed)), t_text(" ")), (f_save__flag(v_down))), t_text(" ")), (f_save__flag(v_silent))) }
+        T_state__Motion::V_Finished => { t_text("finished 0 0 0 0") }
+    }
+}
+
+fn f_save__read_motion(v_name: Rc<String>, v_a: i64, v_b: i64, v_c: i64, v_d: i64) -> Rc<T_state__Motion> {
+    t_enter("save.tes:50:4 in function `save__read_motion`");
+    match (v_name).as_str() {
+        "door-opening" => { Rc::new(T_state__Motion::V_DoorOpening(v_a, v_b, v_c)) }
+        "door-waiting" => { Rc::new(T_state__Motion::V_DoorWaiting(v_a, v_b, v_c, v_d)) }
+        "door-closing" => { Rc::new(T_state__Motion::V_DoorClosing(v_a, v_b, v_c)) }
+        "lift-lowering" => { Rc::new(T_state__Motion::V_LiftLowering(v_a, v_b, v_c)) }
+        "lift-waiting" => { Rc::new(T_state__Motion::V_LiftWaiting(v_a, v_b, v_c, v_d)) }
+        "lift-rising" => { Rc::new(T_state__Motion::V_LiftRising(v_a, v_b, v_c)) }
+        "floor-lowering" => { Rc::new(T_state__Motion::V_FloorLowering(v_a, v_b)) }
+        "crushing" => { Rc::new(T_state__Motion::V_Crushing(v_a, v_b, (v_c == 1i64), (v_d == 1i64))) }
+        _ => { Rc::new(T_state__Motion::V_Finished) }
+    }
+}
+
+fn f_save__numbers(v_values: Rc<Vec<i64>>) -> Rc<String> {
+    t_enter("save.tes:64:4 in function `save__numbers`");
+    t_join(&t_map_list(v_values, ((|v_t_arg0: i64| t_int_to_text(v_t_arg0.clone())) as fn(i64) -> Rc<String>)), &t_text(" "))
+}
+
+fn f_save__flags(v_values: Rc<Vec<bool>>) -> Rc<String> {
+    t_enter("save.tes:66:4 in function `save__flags`");
+    t_join(&t_map_list(v_values, (f_save__flag as fn(bool) -> Rc<String>)), &t_text(""))
+}
+
+// note: The text of a saved game.
+fn f_save__write(v_w: Rc<T_state__World>) -> Rc<String> {
+    t_enter("save.tes:69:8 in function `save__write`");
+    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
+    let v_s: Rc<T_state__Stats> = (v_w.clone()).f_stats.clone();
+    let mut v_out: Rc<Vec<Rc<String>>> = Rc::new(vec![t_text("tesseradoom-save 1"), t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("map "), (((v_w.clone()).f_level.clone()).f_name.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_skill.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_tic.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_seed.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_exited.clone()))]);
+    v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("player "), t_int_to_text((v_p.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_y.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_angle.clone())), t_text(" ")), t_int_to_text((v_p.clone()).f_sector.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_momentum_x.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_momentum_y.clone()))]));
+    v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("stats "), t_int_to_text((v_s.clone()).f_health.clone())), t_text(" ")), t_int_to_text((v_s.clone()).f_armor.clone())), t_text(" ")), t_int_to_text((v_s.clone()).f_armor_class.clone())), t_text(" ")), (f_save__numbers((v_s.clone()).f_ammo.clone()))), t_text(" ")), (f_save__numbers((v_s.clone()).f_max_ammo.clone()))), t_text(" ")), (f_save__flags((v_s.clone()).f_weapons.clone()))), t_text(" ")), t_int_to_text((v_s.clone()).f_weapon.clone())), t_text(" ")), t_int_to_text((v_s.clone()).f_kills.clone())), t_text(" ")), t_int_to_text((v_s.clone()).f_items.clone())), t_text(" ")), t_int_to_text((v_s.clone()).f_secrets.clone())), t_text(" ")), (f_save__flag((v_s.clone()).f_berserk.clone()))), t_text(" ")), t_int_to_text((v_s.clone()).f_invulnerable.clone())), t_text(" ")), t_int_to_text((v_s.clone()).f_radiation_suit.clone()))]));
+    v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_text("keys "), (t_join(&(v_s.clone()).f_keys.clone(), &t_text(" "))))]));
+    v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_text("timers "), t_int_to_text((v_w.clone()).f_cooldown.clone())), t_text(" ")), t_int_to_text((v_w.clone()).f_firing.clone()))]));
+    for v_i in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_sectors.clone()), "save.tes:77:10 in function `save__write`")) {
+        t_tick("save.tes:77:44 in function `save__write`");
+        let v_sector: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_i.clone(), "save.tes:78:14 in function `save__write`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("sector "), t_int_to_text(v_i.clone())), t_text(" ")), t_int_to_text((v_sector.clone()).f_floor.clone())), t_text(" ")), t_int_to_text((v_sector.clone()).f_ceiling.clone())), t_text(" ")), t_int_to_text((v_sector.clone()).f_light.clone())), t_text(" ")), t_int_to_text((v_sector.clone()).f_special.clone()))]));
+    }
+    for v_i in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_linedefs.clone()), "save.tes:81:10 in function `save__write`")) {
+        t_tick("save.tes:81:45 in function `save__write`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_text("line "), t_int_to_text(v_i.clone())), t_text(" ")), t_int_to_text((t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_i.clone(), "save.tes:82:26 in function `save__write`")).f_special.clone()))]));
+    }
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_switched.clone()), "save.tes:84:10 in function `save__write`")) {
+        t_tick("save.tes:84:39 in function `save__write`");
+        if (t_index(&(v_w.clone()).f_switched.clone(), v_i.clone(), "save.tes:85:4 in function `save__write`") != 0i64) {
+            v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_text("switch "), t_int_to_text(v_i.clone())), t_text(" ")), t_int_to_text(t_index(&(v_w.clone()).f_switched.clone(), v_i.clone(), "save.tes:86:28 in function `save__write`")))]));
+        }
+    }
+    for v_m in t_iter((v_w.clone()).f_mobjs.clone()) {
+        t_tick("save.tes:89:18 in function `save__write`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("mobj "), t_int_to_text((v_m.clone()).f_kind.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_y.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_angle.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_sector.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_health.clone())), t_text(" ")), (f_save__flag((v_m.clone()).f_present.clone()))), t_text(" ")), (f_save__monster_state((v_m.clone()).f_state.clone())))]));
+    }
+    for v_m in t_iter((v_w.clone()).f_movers.clone()) {
+        t_tick("save.tes:92:19 in function `save__write`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_text("mover "), t_int_to_text((v_m.clone()).f_sector.clone())), t_text(" ")), (f_save__motion((v_m.clone()).f_motion.clone())))]));
+    }
+    for v_l in t_iter((v_w.clone()).f_lights.clone()) {
+        t_tick("save.tes:95:19 in function `save__write`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("light "), t_int_to_text((v_l.clone()).f_sector.clone())), t_text(" ")), t_int_to_text((v_l.clone()).f_kind.clone())), t_text(" ")), t_int_to_text((v_l.clone()).f_bright.clone())), t_text(" ")), t_int_to_text((v_l.clone()).f_dark.clone())), t_text(" ")), t_int_to_text((v_l.clone()).f_timer.clone()))]));
+    }
+    for v_m in t_iter((v_w.clone()).f_missiles.clone()) {
+        t_tick("save.tes:98:21 in function `save__write`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_concat(t_text("missile "), ((v_m.clone()).f_sprite.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_x.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_y.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_z.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_dx.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_dy.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_damage_min.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_damage_max.clone())), t_text(" ")), t_int_to_text((v_m.clone()).f_radius.clone())), t_text(" ")), (f_save__flag((v_m.clone()).f_splash.clone()))), t_text(" ")), t_int_to_text((v_m.clone()).f_owner.clone()))]));
+    }
+    t_concat(t_join(&v_out, &t_text("\n")), t_text("\n"))
+}
+
+// note: The map and skill a saved game needs, read from its second line, or .None for a text that is not a saved game.
+fn f_save__header(v_text: Rc<String>) -> Option<Rc<Vec<Rc<String>>>> {
+    t_enter("save.tes:105:8 in function `save__header`");
+    let v_rows: Rc<Vec<Rc<String>>> = t_lines(&v_text.clone());
+    if ((t_list_length(&v_rows.clone()) < 2i64) || (t_index(&v_rows.clone(), 0i64, "save.tes:107:24 in function `save__header`") != t_text("tesseradoom-save 1"))) {
+        return Option::<Rc<Vec<Rc<String>>>>::None
+    };
+    let v_words: Rc<Vec<Rc<String>>> = t_split(&t_index(&v_rows.clone(), 1i64, "save.tes:110:19 in function `save__header`"), &t_text(" "));
+    if ((t_list_length(&v_words.clone()) < 4i64) || (t_index(&v_words.clone(), 0i64, "save.tes:111:25 in function `save__header`") != t_text("map"))) {
+        return Option::<Rc<Vec<Rc<String>>>>::None
+    };
+    Some(Rc::new(vec![t_index(&v_words.clone(), 1i64, "save.tes:114:8 in function `save__header`"), t_index(&v_words.clone(), 2i64, "save.tes:114:18 in function `save__header`"), t_index(&v_words.clone(), 3i64, "save.tes:114:28 in function `save__header`")]))
+}
+
+// note: A one-line description for the save menu: map and game time.
+fn f_save__describe(v_text: Rc<String>) -> Rc<String> {
+    t_enter("save.tes:118:8 in function `save__describe`");
+    match &(f_save__header(v_text)) {
+        Some(t1) => { let v_h = t1.clone(); {
+            let v_seconds: i64 = t_div(f_save__number(t_index(&v_h.clone(), 2i64, "save.tes:121:22 in function `save__describe`")), 35i64, "save.tes:121:28 in function `save__describe`");
+            t_concat(t_concat(t_concat(t_concat((t_index(&v_h.clone(), 0i64, "save.tes:122:4 in function `save__describe`")), t_text("  ")), t_int_to_text(t_div(v_seconds.clone(), 60i64, "save.tes:122:21 in function `save__describe`"))), t_text(":")), (t_pad_left(t_int_to_text(t_rem(v_seconds.clone(), 60i64, "save.tes:122:54 in function `save__describe`")), 2i64, t_text("0"), "save.tes:122:29 in function `save__describe`")))
+        } }
+        None => { t_text("") }
+    }
+}
+
+fn f_save__bits(v_text: Rc<String>) -> Rc<Vec<bool>> {
+    t_enter("save.tes:128:4 in function `save__bits`");
+    let mut v_out: Rc<Vec<bool>> = Rc::new(Vec::<bool>::new());
+    for v_c in t_iter(t_split(&v_text.clone(), &t_text(""))) {
+        t_tick("save.tes:130:26 in function `save__bits`");
+        v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![(v_c.clone() == t_text("1"))]));
+    }
+    v_out
+}
+
+// note: The world of a saved game, on top of `l`, the freshly loaded level it names.
+fn f_save__read(v_text: Rc<String>, v_l: Rc<T_level__Level>) -> Result<Rc<T_state__World>, Rc<String>> {
+    t_enter("save.tes:137:8 in function `save__read`");
+    let v_h: Rc<Vec<Rc<String>>> = match f_save__header(v_text.clone()) { Some(t_value) => t_value, None => { return Result::<Rc<T_state__World>, Rc<String>>::Err(t_text("not a saved game")) } };
+    if (t_index(&v_h.clone(), 0i64, "save.tes:139:4 in function `save__read`") != (v_l.clone()).f_name.clone()) {
+        return Result::<Rc<T_state__World>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_text("the save is for "), (t_index(&v_h, 0i64, "save.tes:140:34 in function `save__read`"))), t_text(", not ")), ((v_l).f_name.clone())))
+    };
+    let mut v_w: Rc<T_state__World> = f_world__create_at_skill(v_l.clone(), f_save__number(t_index(&v_h.clone(), 1i64, "save.tes:142:41 in function `save__read`")));
+    { let t_value = Rc::new(Vec::<Rc<T_state__Mobj>>::new()); *&mut Rc::make_mut(&mut v_w).f_mobjs = t_value; }
+    { let t_value = Rc::new(Vec::<Rc<T_state__Light>>::new()); *&mut Rc::make_mut(&mut v_w).f_lights = t_value; }
+    for v_row in t_iter(t_lines(&v_text.clone())) {
+        t_tick("save.tes:146:24 in function `save__read`");
+        let v_v: Rc<Vec<Rc<String>>> = t_split(&v_row.clone(), &t_text(" "));
+        match (t_index(&v_v.clone(), 0i64, "save.tes:148:7 in function `save__read`")).as_str() {
+            "map" => { {
+                { let t_value = f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:150:20 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_tic = t_value; }
+                { let t_value = f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:151:21 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+                { let t_value = f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:152:23 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_exited = t_value; }
+            } }
+            "player" => { {
+                { let t_value = { let mut t1 = Rc::unwrap_or_clone((v_w.clone()).f_player.clone()); t1.f_x = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:155:42 in function `save__read`")); t1.f_y = f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:155:59 in function `save__read`")); t1.f_angle = f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:155:80 in function `save__read`")); t1.f_sector = f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:155:102 in function `save__read`")); Rc::new(t1) }; *&mut Rc::make_mut(&mut v_w).f_player = t_value; }
+                { let t_value = f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:156:27 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_momentum_x = t_value; }
+                { let t_value = f_save__number(t_index(&v_v.clone(), 6i64, "save.tes:157:27 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_momentum_y = t_value; }
+            } }
+            "stats" => { if (t_list_length(&v_v.clone()) >= 20i64) {
+                { let t_value = { let mut t2 = Rc::unwrap_or_clone((v_w.clone()).f_stats.clone()); t2.f_health = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:160:45 in function `save__read`")); t2.f_armor = f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:160:66 in function `save__read`")); t2.f_armor_class = f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:160:93 in function `save__read`")); t2.f_ammo = Rc::new(vec![f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:160:114 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:160:128 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 6i64, "save.tes:160:142 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 7i64, "save.tes:160:156 in function `save__read`"))]); t2.f_max_ammo = Rc::new(vec![f_save__number(t_index(&v_v.clone(), 8i64, "save.tes:160:182 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 9i64, "save.tes:160:196 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 10i64, "save.tes:160:210 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 11i64, "save.tes:160:225 in function `save__read`"))]); t2.f_weapons = f_save__bits(t_index(&v_v.clone(), 12i64, "save.tes:160:248 in function `save__read`")); t2.f_weapon = f_save__number(t_index(&v_v.clone(), 13i64, "save.tes:160:271 in function `save__read`")); t2.f_kills = f_save__number(t_index(&v_v.clone(), 14i64, "save.tes:160:293 in function `save__read`")); t2.f_items = f_save__number(t_index(&v_v.clone(), 15i64, "save.tes:160:315 in function `save__read`")); t2.f_secrets = f_save__number(t_index(&v_v.clone(), 16i64, "save.tes:160:339 in function `save__read`")); t2.f_berserk = (t_index(&v_v.clone(), 17i64, "save.tes:160:356 in function `save__read`") == t_text("1")); t2.f_invulnerable = f_save__number(t_index(&v_v.clone(), 18i64, "save.tes:160:391 in function `save__read`")); t2.f_radiation_suit = f_save__number(t_index(&v_v.clone(), 19i64, "save.tes:160:422 in function `save__read`")); Rc::new(t2) }; *&mut Rc::make_mut(&mut v_w).f_stats = t_value; }
+            } }
+            "keys" => { {
+                { let t_value = t_filter(t_slice(v_v.clone(), 1i64, t_list_length(&v_v.clone()), "save.tes:162:37 in function `save__read`"), (f_save__not_empty as fn(Rc<String>) -> bool)); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_keys = t_value; }
+            } }
+            "timers" => { {
+                { let t_value = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:164:25 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_cooldown = t_value; }
+                { let t_value = f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:165:23 in function `save__read`")); *&mut Rc::make_mut(&mut v_w).f_firing = t_value; }
+            } }
+            "sector" => { {
+                let v_i: i64 = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:168:16 in function `save__read`"));
+                { let t_place0: i64 = v_i.clone(); let t_value = { let mut t3 = Rc::unwrap_or_clone(t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_i.clone(), "save.tes:169:26 in function `save__read`")); t3.f_floor = f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:169:66 in function `save__read`")); t3.f_ceiling = f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:169:89 in function `save__read`")); t3.f_light = f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:169:110 in function `save__read`")); t3.f_special = f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:169:133 in function `save__read`")); Rc::new(t3) }; *t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "save.tes:169:5 in function `save__read`") = t_value; }
+            } }
+            "line" => { {
+                { let t_place0: i64 = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:171:39 in function `save__read`")); let t_value = f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:171:63 in function `save__read`")); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_linedefs, t_place0, "save.tes:171:15 in function `save__read`")).f_special = t_value; }
+            } }
+            "switch" => { {
+                { let t_place0: i64 = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:172:35 in function `save__read`")); let t_value = f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:172:51 in function `save__read`")); *t_slot(&mut Rc::make_mut(&mut v_w).f_switched, t_place0, "save.tes:172:17 in function `save__read`") = t_value; }
+            } }
+            "mobj" => { {
+                let v_kind: i64 = f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:174:19 in function `save__read`"));
+                { let t_value = t_concat_lists((v_w.clone()).f_mobjs.clone(), Rc::new(vec![Rc::new(T_state__Mobj { f_kind: v_kind.clone(), f_info: f_things__info(v_kind.clone()), f_x: f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:175:77 in function `save__read`")), f_y: f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:175:94 in function `save__read`")), f_angle: f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:175:115 in function `save__read`")), f_sector: f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:175:137 in function `save__read`")), f_health: f_save__number(t_index(&v_v.clone(), 6i64, "save.tes:175:159 in function `save__read`")), f_present: (t_index(&v_v.clone(), 7i64, "save.tes:175:175 in function `save__read`") == t_text("1")), f_state: f_save__read_state(t_index(&v_v.clone(), 8i64, "save.tes:175:206 in function `save__read`"), f_save__number(t_index(&v_v.clone(), 9i64, "save.tes:175:219 in function `save__read`"))) })])); *&mut Rc::make_mut(&mut v_w).f_mobjs = t_value; }
+            } }
+            "mover" => { {
+                { let t_value = t_concat_lists((v_w.clone()).f_movers.clone(), Rc::new(vec![Rc::new(T_state__Mover { f_sector: f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:177:58 in function `save__read`")), f_motion: f_save__read_motion(t_index(&v_v.clone(), 2i64, "save.tes:177:85 in function `save__read`"), f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:177:98 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:177:112 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:177:126 in function `save__read`")), f_save__number(t_index(&v_v.clone(), 6i64, "save.tes:177:140 in function `save__read`"))) })])); *&mut Rc::make_mut(&mut v_w).f_movers = t_value; }
+            } }
+            "light" => { {
+                { let t_value = t_concat_lists((v_w.clone()).f_lights.clone(), Rc::new(vec![Rc::new(T_state__Light { f_sector: f_save__number(t_index(&v_v.clone(), 1i64, "save.tes:178:58 in function `save__read`")), f_kind: f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:178:78 in function `save__read`")), f_bright: f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:178:100 in function `save__read`")), f_dark: f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:178:120 in function `save__read`")), f_timer: f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:178:141 in function `save__read`")) })])); *&mut Rc::make_mut(&mut v_w).f_lights = t_value; }
+            } }
+            "missile" => { {
+                { let t_value = t_concat_lists((v_w.clone()).f_missiles.clone(), Rc::new(vec![Rc::new(T_state__Missile { f_sprite: t_index(&v_v.clone(), 1i64, "save.tes:179:57 in function `save__read`"), f_x: f_save__number(t_index(&v_v.clone(), 2i64, "save.tes:179:73 in function `save__read`")), f_y: f_save__number(t_index(&v_v.clone(), 3i64, "save.tes:179:90 in function `save__read`")), f_z: f_save__number(t_index(&v_v.clone(), 4i64, "save.tes:179:107 in function `save__read`")), f_dx: f_save__number(t_index(&v_v.clone(), 5i64, "save.tes:179:125 in function `save__read`")), f_dy: f_save__number(t_index(&v_v.clone(), 6i64, "save.tes:179:143 in function `save__read`")), f_damage_min: f_save__number(t_index(&v_v.clone(), 7i64, "save.tes:179:169 in function `save__read`")), f_damage_max: f_save__number(t_index(&v_v.clone(), 8i64, "save.tes:179:195 in function `save__read`")), f_radius: f_save__number(t_index(&v_v.clone(), 9i64, "save.tes:179:217 in function `save__read`")), f_splash: (t_index(&v_v.clone(), 10i64, "save.tes:179:232 in function `save__read`") == t_text("1")), f_owner: f_save__number(t_index(&v_v.clone(), 11i64, "save.tes:179:260 in function `save__read`")) })])); *&mut Rc::make_mut(&mut v_w).f_missiles = t_value; }
+            } }
+            _ => { {
+            } }
+        }
+    }
+    Result::<Rc<T_state__World>, Rc<String>>::Ok(v_w)
+}
+
+fn f_save__not_empty(v_t: Rc<String>) -> bool {
+    t_enter("save.tes:186:4 in function `save__not_empty`");
+    (v_t != t_text(""))
 }
 
 fn f_std__math__min(v_a: i64, v_b: i64) -> i64 {
@@ -6816,7 +7447,7 @@ fn f_std__math__clamp(v_value: i64, v_low: i64, v_high: i64) -> i64 {
     if (v_low.clone() > v_high.clone()) {
         t_user_fail(t_concat(t_concat(t_concat(t_text("clamp: low "), t_int_to_text(v_low.clone())), t_text(" is greater than high ")), t_int_to_text(v_high.clone())), "<std/math.tes>:10:1 in function `std__math__clamp`")
     };
-    f_std__math__min(f_std__math__max(v_value.clone(), v_low.clone()), v_high.clone())
+    f_std__math__min(f_std__math__max(v_value, v_low), v_high)
 }
 
 // note: The absolute value. The smallest `Int` has no positive counterpart: R002.
@@ -6852,7 +7483,7 @@ fn f_std__math__isqrt(v_value: i64) -> i64 {
         };
         v_bit = t_shift_right(v_bit.clone(), 2i64, "<std/math.tes>:36:11 in function `std__math__isqrt`");
     }
-    v_root.clone()
+    v_root
 }
 
 // note: The 256 colors of the palette that starts at `at`. R001 if fewer than 768 bytes follow.
@@ -6864,22 +7495,22 @@ fn f_std__palette__read(v_data: Rc<Vec<u8>>, v_at: i64) -> Rc<Vec<i64>> {
         let v_base: i64 = t_add(v_at.clone(), t_mul(v_index.clone(), 3i64, "<std/palette.tes>:10:23 in function `std__palette__read`"), "<std/palette.tes>:10:15 in function `std__palette__read`");
         v_colors = t_concat_lists(std::mem::take(&mut v_colors), Rc::new(vec![t_rgb(t_bytes_index(&v_data.clone(), v_base.clone(), "<std/palette.tes>:11:20 in function `std__palette__read`"), t_bytes_index(&v_data.clone(), t_add(v_base.clone(), 1i64, "<std/palette.tes>:11:42 in function `std__palette__read`"), "<std/palette.tes>:11:32 in function `std__palette__read`"), t_bytes_index(&v_data.clone(), t_add(v_base.clone(), 2i64, "<std/palette.tes>:11:58 in function `std__palette__read`"), "<std/palette.tes>:11:48 in function `std__palette__read`"), "<std/palette.tes>:11:16 in function `std__palette__read`")]));
     }
-    v_colors.clone()
+    v_colors
 }
 
 fn f_std__palette__red(v_color: i64) -> i64 {
     t_enter("<std/palette.tes>:16:8 in function `std__palette__red`");
-    (t_shift_right(v_color.clone(), 16i64, "<std/palette.tes>:16:41 in function `std__palette__red`") & 255i64)
+    (t_shift_right(v_color, 16i64, "<std/palette.tes>:16:41 in function `std__palette__red`") & 255i64)
 }
 
 fn f_std__palette__green(v_color: i64) -> i64 {
     t_enter("<std/palette.tes>:18:8 in function `std__palette__green`");
-    (t_shift_right(v_color.clone(), 8i64, "<std/palette.tes>:18:43 in function `std__palette__green`") & 255i64)
+    (t_shift_right(v_color, 8i64, "<std/palette.tes>:18:43 in function `std__palette__green`") & 255i64)
 }
 
 fn f_std__palette__blue(v_color: i64) -> i64 {
     t_enter("<std/palette.tes>:20:8 in function `std__palette__blue`");
-    (v_color.clone() & 255i64)
+    (v_color & 255i64)
 }
 
 // note: An image of `width` x `height` palette indexes, row by row from the top left; `palette` holds colors packed like `rgb(...)`. R010 for a side that is not positive or a pixel count other than `width * height`; R001 for an index outside the palette.
@@ -6901,7 +7532,7 @@ fn f_std__ppm__encode(v_width: i64, v_height: i64, v_pixels: Rc<Vec<i64>>, v_pal
         { let t_place0: i64 = t_add(v_at.clone(), 2i64, "<std/ppm.tes>:18:13 in function `std__ppm__encode`"); let t_value = (v_color.clone() & 255i64); t_set_byte(&mut v_body, t_place0, t_value, "<std/ppm.tes>:18:5 in function `std__ppm__encode`"); }
         v_at = t_add(v_at.clone(), 3i64, "<std/ppm.tes>:19:8 in function `std__ppm__encode`");
     }
-    t_concat_lists(t_to_bytes(&t_concat(t_concat(t_concat(t_concat(t_text("P6\n"), t_int_to_text(v_width.clone())), t_text(" ")), t_int_to_text(v_height.clone())), t_text("\n255\n"))), v_body.clone())
+    t_concat_lists(t_to_bytes(&t_concat(t_concat(t_concat(t_concat(t_text("P6\n"), t_int_to_text(v_width)), t_text(" ")), t_int_to_text(v_height)), t_text("\n255\n"))), v_body)
 }
 
 // note: Unsigned 16-bit little-endian number at `at`: 0 to 65535.
@@ -6953,7 +7584,7 @@ fn f_std__bytes__read_ascii(v_data: Rc<Vec<u8>>, v_at: i64, v_count: i64) -> Rc<
             v_value.clone()
         }]));
     }
-    t_from_code_points(&v_codes.clone(), "<std/bytes.tes>:31:1 in function `std__bytes__read_ascii`")
+    t_from_code_points(&v_codes, "<std/bytes.tes>:31:1 in function `std__bytes__read_ascii`")
 }
 
 // note: 1.0 as a fixed-point number.
@@ -6964,25 +7595,25 @@ fn f_std__fixed__one() -> i64 {
 
 fn f_std__fixed__from_int(v_value: i64) -> i64 {
     t_enter("<std/fixed.tes>:9:8 in function `std__fixed__from_int`");
-    t_shift_left(v_value.clone(), 16i64, "<std/fixed.tes>:9:38 in function `std__fixed__from_int`")
+    t_shift_left(v_value, 16i64, "<std/fixed.tes>:9:38 in function `std__fixed__from_int`")
 }
 
 // note: The integer part, rounded toward negative infinity: 1.5 gives 1, -1.5 gives -2.
 fn f_std__fixed__floor_int(v_value: i64) -> i64 {
     t_enter("<std/fixed.tes>:12:8 in function `std__fixed__floor_int`");
-    t_shift_right(v_value.clone(), 16i64, "<std/fixed.tes>:12:39 in function `std__fixed__floor_int`")
+    t_shift_right(v_value, 16i64, "<std/fixed.tes>:12:39 in function `std__fixed__floor_int`")
 }
 
 // note: The product, rounded toward negative infinity like DOOM's FixedMul.
 fn f_std__fixed__mul(v_a: i64, v_b: i64) -> i64 {
     t_enter("<std/fixed.tes>:15:8 in function `std__fixed__mul`");
-    t_shift_right(t_mul(v_a.clone(), v_b.clone(), "<std/fixed.tes>:15:51 in function `std__fixed__mul`"), 16i64, "<std/fixed.tes>:15:37 in function `std__fixed__mul`")
+    t_shift_right(t_mul(v_a, v_b, "<std/fixed.tes>:15:51 in function `std__fixed__mul`"), 16i64, "<std/fixed.tes>:15:37 in function `std__fixed__mul`")
 }
 
 // note: The quotient, rounded toward zero. R003 when `b` is 0.
 fn f_std__fixed__div(v_a: i64, v_b: i64) -> i64 {
     t_enter("<std/fixed.tes>:18:8 in function `std__fixed__div`");
-    t_div(t_shift_left(v_a.clone(), 16i64, "<std/fixed.tes>:18:37 in function `std__fixed__div`"), v_b.clone(), "<std/fixed.tes>:18:55 in function `std__fixed__div`")
+    t_div(t_shift_left(v_a, 16i64, "<std/fixed.tes>:18:37 in function `std__fixed__div`"), v_b, "<std/fixed.tes>:18:55 in function `std__fixed__div`")
 }
 
 fn f_std__fixed__abs(v_value: i64) -> i64 {
@@ -6997,13 +7628,13 @@ fn f_std__fixed__abs(v_value: i64) -> i64 {
 // note: sin(2π · index / count) as a fixed-point number, rounded to the nearest unit. `count` must be positive (R010).
 fn f_std__fixed__sine(v_index: i64, v_count: i64) -> i64 {
     t_enter("<std/fixed.tes>:23:8 in function `std__fixed__sine`");
-    f_std__fixed__turn_sine(t_mul(4i64, v_index.clone(), "<std/fixed.tes>:23:58 in function `std__fixed__sine`"), t_mul(4i64, v_count.clone(), "<std/fixed.tes>:23:69 in function `std__fixed__sine`"))
+    f_std__fixed__turn_sine(t_mul(4i64, v_index, "<std/fixed.tes>:23:58 in function `std__fixed__sine`"), t_mul(4i64, v_count, "<std/fixed.tes>:23:69 in function `std__fixed__sine`"))
 }
 
 // note: cos(2π · index / count) as a fixed-point number, rounded to the nearest unit. `count` must be positive (R010).
 fn f_std__fixed__cosine(v_index: i64, v_count: i64) -> i64 {
     t_enter("<std/fixed.tes>:26:8 in function `std__fixed__cosine`");
-    f_std__fixed__turn_sine(t_add(t_mul(4i64, v_index.clone(), "<std/fixed.tes>:26:60 in function `std__fixed__cosine`"), v_count.clone(), "<std/fixed.tes>:26:68 in function `std__fixed__cosine`"), t_mul(4i64, v_count.clone(), "<std/fixed.tes>:26:79 in function `std__fixed__cosine`"))
+    f_std__fixed__turn_sine(t_add(t_mul(4i64, v_index, "<std/fixed.tes>:26:60 in function `std__fixed__cosine`"), v_count.clone(), "<std/fixed.tes>:26:68 in function `std__fixed__cosine`"), t_mul(4i64, v_count.clone(), "<std/fixed.tes>:26:79 in function `std__fixed__cosine`"))
 }
 
 // note: `sine(index, count)` for every index from 0 to `count - 1`.
@@ -7014,7 +7645,7 @@ fn f_std__fixed__sine_table(v_count: i64) -> Rc<Vec<i64>> {
         t_tick("<std/fixed.tes>:31:30 in function `std__fixed__sine_table`");
         v_table = t_concat_lists(std::mem::take(&mut v_table), Rc::new(vec![f_std__fixed__sine(v_index.clone(), v_count.clone())]));
     }
-    v_table.clone()
+    v_table
 }
 
 // note: `cosine(index, count)` for every index from 0 to `count - 1`.
@@ -7025,7 +7656,7 @@ fn f_std__fixed__cosine_table(v_count: i64) -> Rc<Vec<i64>> {
         t_tick("<std/fixed.tes>:40:30 in function `std__fixed__cosine_table`");
         v_table = t_concat_lists(std::mem::take(&mut v_table), Rc::new(vec![f_std__fixed__cosine(v_index.clone(), v_count.clone())]));
     }
-    v_table.clone()
+    v_table
 }
 
 // note: π · 2^28, rounded.
@@ -7051,10 +7682,10 @@ fn f_std__fixed__turn_sine(v_numerator: i64, v_denominator: i64) -> i64 {
         _ => { t_neg(f_std__fixed__series_cosine(v_x.clone()), "<std/fixed.tes>:63:6 in function `std__fixed__turn_sine`") }
     };
     let v_magnitude: i64 = t_shift_right(t_add(f_std__fixed__abs(v_value.clone()), 2048i64, "<std/fixed.tes>:65:40 in function `std__fixed__turn_sine`"), 12i64, "<std/fixed.tes>:65:17 in function `std__fixed__turn_sine`");
-    if (v_value.clone() < 0i64) {
-        t_neg(v_magnitude.clone(), "<std/fixed.tes>:66:16 in function `std__fixed__turn_sine`")
+    if (v_value < 0i64) {
+        t_neg(v_magnitude, "<std/fixed.tes>:66:16 in function `std__fixed__turn_sine`")
     } else {
-        v_magnitude.clone()
+        v_magnitude
     }
 }
 
@@ -7070,7 +7701,7 @@ fn f_std__fixed__series_sine(v_x: i64) -> i64 {
         v_sum = t_add(v_sum.clone(), v_term.clone(), "<std/fixed.tes>:76:9 in function `std__fixed__series_sine`");
         v_k = t_add(v_k.clone(), 1i64, "<std/fixed.tes>:77:7 in function `std__fixed__series_sine`");
     }
-    v_sum.clone()
+    v_sum
 }
 
 fn f_std__fixed__series_cosine(v_x: i64) -> i64 {
@@ -7085,86 +7716,1127 @@ fn f_std__fixed__series_cosine(v_x: i64) -> i64 {
         v_sum = t_add(v_sum.clone(), v_term.clone(), "<std/fixed.tes>:89:9 in function `std__fixed__series_cosine`");
         v_k = t_add(v_k.clone(), 1i64, "<std/fixed.tes>:90:7 in function `std__fixed__series_cosine`");
     }
-    v_sum.clone()
+    v_sum
+}
+
+// note: Exact quotient of a by b as a fixed value, without overflowing a * 65536: magnitudes up to 2^50 for `a` and 2^47 for `b` are safe.
+fn f_std__plane__ratio(v_a: i64, v_b: i64) -> i64 {
+    t_enter("<std/plane.tes>:17:8 in function `std__plane__ratio`");
+    let v_whole: i64 = t_div(v_a.clone(), v_b.clone(), "<std/plane.tes>:18:15 in function `std__plane__ratio`");
+    let v_rest: i64 = t_sub(v_a.clone(), t_mul(v_whole.clone(), v_b.clone(), "<std/plane.tes>:19:22 in function `std__plane__ratio`"), "<std/plane.tes>:19:14 in function `std__plane__ratio`");
+    t_add(t_mul(v_whole, f_std__fixed__one(), "<std/plane.tes>:20:7 in function `std__plane__ratio`"), t_div(t_mul(v_rest, f_std__fixed__one(), "<std/plane.tes>:20:28 in function `std__plane__ratio`"), v_b, "<std/plane.tes>:20:42 in function `std__plane__ratio`"), "<std/plane.tes>:20:21 in function `std__plane__ratio`")
+}
+
+// note: The ray from (px, py) along (dx, dy), all fixed, against the segment (ax, ay)-(bx, by) in whole units. Hits farther than 65536 times the ray direction are ignored.
+fn f_std__plane__intersect(v_px: i64, v_py: i64, v_dx: i64, v_dy: i64, v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> Rc<T_std__plane__Hit> {
+    t_enter("<std/plane.tes>:24:8 in function `std__plane__intersect`");
+    let v_none: Rc<T_std__plane__Hit> = Rc::new(T_std__plane__Hit { f_hit: false, f_distance: 0i64, f_along: 0i64 });
+    let v_lx: i64 = t_sub(v_bx.clone(), v_ax.clone(), "<std/plane.tes>:26:13 in function `std__plane__intersect`");
+    let v_ly: i64 = t_sub(v_by.clone(), v_ay.clone(), "<std/plane.tes>:27:13 in function `std__plane__intersect`");
+    let v_den: i64 = t_sub(t_mul(v_dx.clone(), v_ly.clone(), "<std/plane.tes>:28:14 in function `std__plane__intersect`"), t_mul(v_dy.clone(), v_lx.clone(), "<std/plane.tes>:28:24 in function `std__plane__intersect`"), "<std/plane.tes>:28:19 in function `std__plane__intersect`");
+    if (v_den.clone() == 0i64) {
+        return v_none
+    };
+    let v_ex: i64 = t_sub(f_std__fixed__from_int(v_ax.clone()), v_px.clone(), "<std/plane.tes>:32:29 in function `std__plane__intersect`");
+    let v_ey: i64 = t_sub(f_std__fixed__from_int(v_ay.clone()), v_py.clone(), "<std/plane.tes>:33:29 in function `std__plane__intersect`");
+    let v_t_num: i64 = t_sub(t_mul(v_ex.clone(), v_ly.clone(), "<std/plane.tes>:34:16 in function `std__plane__intersect`"), t_mul(v_ey.clone(), v_lx.clone(), "<std/plane.tes>:34:26 in function `std__plane__intersect`"), "<std/plane.tes>:34:21 in function `std__plane__intersect`");
+    let v_u_num: i64 = t_sub(f_std__fixed__mul(v_ex.clone(), v_dy.clone()), f_std__fixed__mul(v_ey.clone(), v_dx.clone()), "<std/plane.tes>:35:31 in function `std__plane__intersect`");
+    if (v_den.clone() > 0i64) {
+        if (((v_t_num.clone() <= 0i64) || (v_u_num.clone() < 0i64)) || (v_u_num.clone() > v_den.clone())) {
+            return v_none
+        }
+    } else if (((v_t_num.clone() >= 0i64) || (v_u_num.clone() > 0i64)) || (v_u_num.clone() < v_den.clone())) {
+        return v_none
+    };
+    if (t_div(v_t_num.clone(), v_den.clone(), "<std/plane.tes>:43:10 in function `std__plane__intersect`") > 65536i64) {
+        return v_none
+    };
+    Rc::new(T_std__plane__Hit { f_hit: true, f_distance: f_std__plane__ratio(v_t_num, v_den.clone()), f_along: f_std__plane__ratio(v_u_num, v_den.clone()) })
+}
+
+// note: Which side of the line a-b the point p is on (all fixed): 1 left, -1 right, 0 on it. Computed with 8 fraction bits so it cannot overflow.
+fn f_std__plane__orient(v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64, v_px: i64, v_py: i64) -> i64 {
+    t_enter("<std/plane.tes>:50:8 in function `std__plane__orient`");
+    let v_cross: i64 = t_sub(t_mul(t_shift_right(t_sub(v_bx.clone(), v_ax.clone(), "<std/plane.tes>:51:28 in function `std__plane__orient`"), 8i64, "<std/plane.tes>:51:13 in function `std__plane__orient`"), t_shift_right(t_sub(v_py.clone(), v_ay.clone(), "<std/plane.tes>:51:54 in function `std__plane__orient`"), 8i64, "<std/plane.tes>:51:39 in function `std__plane__orient`"), "<std/plane.tes>:51:37 in function `std__plane__orient`"), t_mul(t_shift_right(t_sub(v_by.clone(), v_ay.clone(), "<std/plane.tes>:51:80 in function `std__plane__orient`"), 8i64, "<std/plane.tes>:51:65 in function `std__plane__orient`"), t_shift_right(t_sub(v_px.clone(), v_ax.clone(), "<std/plane.tes>:51:106 in function `std__plane__orient`"), 8i64, "<std/plane.tes>:51:91 in function `std__plane__orient`"), "<std/plane.tes>:51:89 in function `std__plane__orient`"), "<std/plane.tes>:51:63 in function `std__plane__orient`");
+    if (v_cross.clone() > 0i64) {
+        1i64
+    } else if (v_cross.clone() < 0i64) {
+        (-1i64)
+    } else {
+        0i64
+    }
+}
+
+// note: Whether segment p-q properly crosses segment a-b (all fixed).
+fn f_std__plane__crosses(v_px: i64, v_py: i64, v_qx: i64, v_qy: i64, v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> bool {
+    t_enter("<std/plane.tes>:56:8 in function `std__plane__crosses`");
+    ((t_mul(f_std__plane__orient(v_px.clone(), v_py.clone(), v_qx.clone(), v_qy.clone(), v_ax.clone(), v_ay.clone()), f_std__plane__orient(v_px.clone(), v_py.clone(), v_qx.clone(), v_qy.clone(), v_bx.clone(), v_by.clone()), "<std/plane.tes>:57:32 in function `std__plane__crosses`") < 0i64) && (t_mul(f_std__plane__orient(v_ax.clone(), v_ay.clone(), v_bx.clone(), v_by.clone(), v_px.clone(), v_py.clone()), f_std__plane__orient(v_ax.clone(), v_ay.clone(), v_bx.clone(), v_by.clone(), v_qx.clone(), v_qy.clone()), "<std/plane.tes>:57:104 in function `std__plane__crosses`") < 0i64))
+}
+
+// note: Whether a circle of `radius` units at (x, y) (fixed) touches the segment (ax, ay)-(bx, by) in whole units. Distances are compared with 8 fraction bits, so squares stay below 2^52.
+fn f_std__plane__circle_touches(v_x: i64, v_y: i64, v_radius: i64, v_ax: i64, v_ay: i64, v_bx: i64, v_by: i64) -> bool {
+    t_enter("<std/plane.tes>:61:8 in function `std__plane__circle_touches`");
+    let v_r: i64 = f_std__fixed__from_int(v_radius.clone());
+    if ((((t_add(v_x.clone(), v_r.clone(), "<std/plane.tes>:63:6 in function `std__plane__circle_touches`") <= f_std__fixed__from_int(f_std__math__min(v_ax.clone(), v_bx.clone()))) || (t_sub(v_x.clone(), v_r.clone(), "<std/plane.tes>:63:51 in function `std__plane__circle_touches`") >= f_std__fixed__from_int(f_std__math__max(v_ax.clone(), v_bx.clone())))) || (t_add(v_y.clone(), v_r.clone(), "<std/plane.tes>:63:96 in function `std__plane__circle_touches`") <= f_std__fixed__from_int(f_std__math__min(v_ay.clone(), v_by.clone())))) || (t_sub(v_y.clone(), v_r.clone(), "<std/plane.tes>:63:141 in function `std__plane__circle_touches`") >= f_std__fixed__from_int(f_std__math__max(v_ay.clone(), v_by.clone())))) {
+        return false
+    };
+    let v_lx: i64 = t_sub(v_bx.clone(), v_ax.clone(), "<std/plane.tes>:66:13 in function `std__plane__circle_touches`");
+    let v_ly: i64 = t_sub(v_by.clone(), v_ay.clone(), "<std/plane.tes>:67:13 in function `std__plane__circle_touches`");
+    let v_ex: i64 = t_sub(v_x.clone(), f_std__fixed__from_int(v_ax.clone()), "<std/plane.tes>:68:12 in function `std__plane__circle_touches`");
+    let v_ey: i64 = t_sub(v_y.clone(), f_std__fixed__from_int(v_ay.clone()), "<std/plane.tes>:69:12 in function `std__plane__circle_touches`");
+    let v_length_squared: i64 = t_add(t_mul(v_lx.clone(), v_lx.clone(), "<std/plane.tes>:70:25 in function `std__plane__circle_touches`"), t_mul(v_ly.clone(), v_ly.clone(), "<std/plane.tes>:70:35 in function `std__plane__circle_touches`"), "<std/plane.tes>:70:30 in function `std__plane__circle_touches`");
+    let v_t: i64 = if (v_length_squared.clone() == 0i64) {
+        0i64
+    } else {
+        f_std__math__clamp(t_div(t_add(t_mul(v_ex.clone(), v_lx.clone(), "<std/plane.tes>:71:60 in function `std__plane__circle_touches`"), t_mul(v_ey.clone(), v_ly.clone(), "<std/plane.tes>:71:70 in function `std__plane__circle_touches`"), "<std/plane.tes>:71:65 in function `std__plane__circle_touches`"), v_length_squared.clone(), "<std/plane.tes>:71:76 in function `std__plane__circle_touches`"), 0i64, f_std__fixed__one())
+    };
+    let v_nx: i64 = t_shift_right(t_sub(v_ex.clone(), t_mul(v_lx.clone(), v_t.clone(), "<std/plane.tes>:72:30 in function `std__plane__circle_touches`"), "<std/plane.tes>:72:25 in function `std__plane__circle_touches`"), 8i64, "<std/plane.tes>:72:10 in function `std__plane__circle_touches`");
+    let v_ny: i64 = t_shift_right(t_sub(v_ey.clone(), t_mul(v_ly.clone(), v_t.clone(), "<std/plane.tes>:73:30 in function `std__plane__circle_touches`"), "<std/plane.tes>:73:25 in function `std__plane__circle_touches`"), 8i64, "<std/plane.tes>:73:10 in function `std__plane__circle_touches`");
+    let v_limit: i64 = t_shift_right(v_r.clone(), 8i64, "<std/plane.tes>:74:13 in function `std__plane__circle_touches`");
+    (t_add(t_mul(v_nx.clone(), v_nx.clone(), "<std/plane.tes>:75:4 in function `std__plane__circle_touches`"), t_mul(v_ny.clone(), v_ny.clone(), "<std/plane.tes>:75:14 in function `std__plane__circle_touches`"), "<std/plane.tes>:75:9 in function `std__plane__circle_touches`") < t_mul(v_limit.clone(), v_limit.clone(), "<std/plane.tes>:75:27 in function `std__plane__circle_touches`"))
+}
+
+// note: The index of the direction, among `count` evenly spaced ones from tables of cosines and sines (as made by std/fixed `cosine_table` and `sine_table`), that points most nearly along (dx, dy) (fixed). The result is an index into the tables.
+fn f_std__plane__direction(v_dx: i64, v_dy: i64, v_cosines: Rc<Vec<i64>>, v_sines: Rc<Vec<i64>>, v_count: i64) -> i64 {
+    t_enter("<std/plane.tes>:79:8 in function `std__plane__direction`");
+    let v_x: i64 = t_shift_right(v_dx.clone(), 8i64, "<std/plane.tes>:80:9 in function `std__plane__direction`");
+    let v_y: i64 = t_shift_right(v_dy.clone(), 8i64, "<std/plane.tes>:81:9 in function `std__plane__direction`");
+    let v_step: i64 = t_div(t_list_length(&v_cosines.clone()), v_count.clone(), "<std/plane.tes>:82:28 in function `std__plane__direction`");
+    let mut v_best: i64 = 0i64;
+    let mut v_best_dot: i64 = 0i64;
+    for v_k in t_iter(t_range(0i64, v_count.clone(), "<std/plane.tes>:85:10 in function `std__plane__direction`")) {
+        t_tick("<std/plane.tes>:85:26 in function `std__plane__direction`");
+        let v_a: i64 = t_mul(v_k.clone(), v_step.clone(), "<std/plane.tes>:86:11 in function `std__plane__direction`");
+        let v_dot: i64 = t_add(t_mul(v_x.clone(), t_shift_right(t_index(&v_cosines.clone(), v_a.clone(), "<std/plane.tes>:87:27 in function `std__plane__direction`"), 8i64, "<std/plane.tes>:87:15 in function `std__plane__direction`"), "<std/plane.tes>:87:13 in function `std__plane__direction`"), t_mul(v_y.clone(), t_shift_right(t_index(&v_sines.clone(), v_a.clone(), "<std/plane.tes>:87:60 in function `std__plane__direction`"), 8i64, "<std/plane.tes>:87:48 in function `std__plane__direction`"), "<std/plane.tes>:87:46 in function `std__plane__direction`"), "<std/plane.tes>:87:42 in function `std__plane__direction`");
+        if ((v_k.clone() == 0i64) || (v_dot.clone() > v_best_dot.clone())) {
+            v_best = v_a.clone();
+            v_best_dot = v_dot.clone();
+        }
+    }
+    v_best
+}
+
+// note: A `width` x `height` image filled with `value`. R010 for a side that is not positive.
+fn f_std__raster__blank(v_width: i64, v_height: i64, v_value: i64) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:23:8 in function `std__raster__blank`");
+    if ((v_width.clone() <= 0i64) || (v_height.clone() <= 0i64)) {
+        t_user_fail(t_concat(t_concat(t_concat(t_concat(t_text("raster.blank: the image is "), t_int_to_text(v_width.clone())), t_text(" x ")), t_int_to_text(v_height.clone())), t_text("; both sides must be positive")), "<std/raster.tes>:25:1 in function `std__raster__blank`")
+    };
+    Rc::new(T_std__raster__Image { f_width: v_width.clone(), f_height: v_height.clone(), f_pixels: t_repeat_list(Rc::new(vec![v_value]), t_mul(v_width.clone(), v_height.clone(), "<std/raster.tes>:27:69 in function `std__raster__blank`"), "<std/raster.tes>:27:47 in function `std__raster__blank`") })
+}
+
+// note: An image from a list of values, `width` per row. R010 if the length is not a multiple of `width`.
+fn f_std__raster__from_pixels(v_width: i64, v_pixels: Rc<Vec<i64>>) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:31:8 in function `std__raster__from_pixels`");
+    if ((v_width.clone() <= 0i64) || (t_rem(t_list_length(&v_pixels.clone()), v_width.clone(), "<std/raster.tes>:32:33 in function `std__raster__from_pixels`") != 0i64)) {
+        t_user_fail(t_concat(t_concat(t_concat(t_text("raster.from_pixels: "), t_int_to_text(t_list_length(&v_pixels.clone()))), t_text(" values do not make rows of ")), t_int_to_text(v_width.clone())), "<std/raster.tes>:33:1 in function `std__raster__from_pixels`")
+    };
+    Rc::new(T_std__raster__Image { f_width: v_width.clone(), f_height: t_div(t_list_length(&v_pixels.clone()), v_width.clone(), "<std/raster.tes>:35:46 in function `std__raster__from_pixels`"), f_pixels: v_pixels.clone() })
+}
+
+// note: The value at (x, y), or `outside` when that is not in the image.
+fn f_std__raster__pixel(v_image: Rc<T_std__raster__Image>, v_x: i64, v_y: i64, v_outside: i64) -> i64 {
+    t_enter("<std/raster.tes>:39:8 in function `std__raster__pixel`");
+    if ((((v_x.clone() < 0i64) || (v_y.clone() < 0i64)) || (v_x.clone() >= (v_image.clone()).f_width.clone())) || (v_y.clone() >= (v_image.clone()).f_height.clone())) {
+        v_outside
+    } else {
+        t_index(&(v_image.clone()).f_pixels.clone(), t_add(t_mul(v_y.clone(), (v_image.clone()).f_width.clone(), "<std/raster.tes>:39:160 in function `std__raster__pixel`"), v_x.clone(), "<std/raster.tes>:39:174 in function `std__raster__pixel`"), "<std/raster.tes>:39:145 in function `std__raster__pixel`")
+    }
+}
+
+// note: Fills the rectangle with its top-left corner at (x, y).
+fn f_std__raster__fill(v_image: Rc<T_std__raster__Image>, v_x: i64, v_y: i64, v_width: i64, v_height: i64, v_value: i64) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:42:8 in function `std__raster__fill`");
+    let mut v_out: Rc<T_std__raster__Image> = v_image;
+    let v_left: i64 = f_std__math__max(v_x.clone(), 0i64);
+    let v_right: i64 = f_std__math__min(t_add(v_x.clone(), v_width.clone(), "<std/raster.tes>:45:24 in function `std__raster__fill`"), (v_out.clone()).f_width.clone());
+    let v_top: i64 = f_std__math__max(v_y.clone(), 0i64);
+    let v_bottom: i64 = f_std__math__min(t_add(v_y.clone(), v_height.clone(), "<std/raster.tes>:47:25 in function `std__raster__fill`"), (v_out.clone()).f_height.clone());
+    if ((v_left.clone() >= v_right.clone()) || (v_top.clone() >= v_bottom.clone())) {
+        return v_out
+    };
+    for v_row in t_iter(t_range(v_top.clone(), v_bottom.clone(), "<std/raster.tes>:51:12 in function `std__raster__fill`")) {
+        t_tick("<std/raster.tes>:51:31 in function `std__raster__fill`");
+        for v_column in t_iter(t_range(v_left.clone(), v_right.clone(), "<std/raster.tes>:52:15 in function `std__raster__fill`")) {
+            t_tick("<std/raster.tes>:52:34 in function `std__raster__fill`");
+            { let t_place0: i64 = t_add(t_mul(v_row.clone(), (v_out.clone()).f_width.clone(), "<std/raster.tes>:53:20 in function `std__raster__fill`"), v_column.clone(), "<std/raster.tes>:53:32 in function `std__raster__fill`"); let t_value = v_value.clone(); *t_slot(&mut Rc::make_mut(&mut v_out).f_pixels, t_place0, "<std/raster.tes>:53:5 in function `std__raster__fill`") = t_value; }
+        }
+    }
+    v_out
+}
+
+// note: A straight line from (x0, y0) to (x1, y1), both ends included, with integer (Bresenham) steps.
+fn f_std__raster__line(v_image: Rc<T_std__raster__Image>, v_x0: i64, v_y0: i64, v_x1: i64, v_y1: i64, v_value: i64) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:60:8 in function `std__raster__line`");
+    let mut v_out: Rc<T_std__raster__Image> = v_image;
+    let v_dx: i64 = f_std__math__abs(t_sub(v_x1.clone(), v_x0.clone(), "<std/raster.tes>:62:22 in function `std__raster__line`"));
+    let v_dy: i64 = t_neg(f_std__math__abs(t_sub(v_y1.clone(), v_y0.clone(), "<std/raster.tes>:63:23 in function `std__raster__line`")), "<std/raster.tes>:63:10 in function `std__raster__line`");
+    let v_step_x: i64 = if (v_x0.clone() < v_x1.clone()) {
+        1i64
+    } else {
+        (-1i64)
+    };
+    let v_step_y: i64 = if (v_y0.clone() < v_y1.clone()) {
+        1i64
+    } else {
+        (-1i64)
+    };
+    let mut v_error: i64 = t_add(v_dx.clone(), v_dy.clone(), "<std/raster.tes>:66:16 in function `std__raster__line`");
+    let mut v_x: i64 = v_x0.clone();
+    let mut v_y: i64 = v_y0.clone();
+    while true {
+        t_tick("<std/raster.tes>:69:12 in function `std__raster__line`");
+        if ((((v_x.clone() >= 0i64) && (v_y.clone() >= 0i64)) && (v_x.clone() < (v_out.clone()).f_width.clone())) && (v_y.clone() < (v_out.clone()).f_height.clone())) {
+            { let t_place0: i64 = t_add(t_mul(v_y.clone(), (v_out.clone()).f_width.clone(), "<std/raster.tes>:71:18 in function `std__raster__line`"), v_x.clone(), "<std/raster.tes>:71:30 in function `std__raster__line`"); let t_value = v_value.clone(); *t_slot(&mut Rc::make_mut(&mut v_out).f_pixels, t_place0, "<std/raster.tes>:71:5 in function `std__raster__line`") = t_value; }
+        };
+        if ((v_x.clone() == v_x1.clone()) && (v_y.clone() == v_y1.clone())) {
+            break
+        };
+        let v_twice: i64 = t_mul(2i64, v_error.clone(), "<std/raster.tes>:76:15 in function `std__raster__line`");
+        if (v_twice.clone() >= v_dy.clone()) {
+            v_error = t_add(v_error.clone(), v_dy.clone(), "<std/raster.tes>:78:11 in function `std__raster__line`");
+            v_x = t_add(v_x.clone(), v_step_x.clone(), "<std/raster.tes>:79:7 in function `std__raster__line`");
+        };
+        if (v_twice.clone() <= v_dx.clone()) {
+            v_error = t_add(v_error.clone(), v_dx.clone(), "<std/raster.tes>:82:11 in function `std__raster__line`");
+            v_y = t_add(v_y.clone(), v_step_y.clone(), "<std/raster.tes>:83:7 in function `std__raster__line`");
+        }
+    }
+    v_out
+}
+
+// note: Copies `source` with its top-left corner at (x, y), leaving out pixels equal to `transparent`.
+fn f_std__raster__blit(v_image: Rc<T_std__raster__Image>, v_source: Rc<T_std__raster__Image>, v_x: i64, v_y: i64, v_transparent: i64) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:90:8 in function `std__raster__blit`");
+    let mut v_out: Rc<T_std__raster__Image> = v_image;
+    let v_left: i64 = f_std__math__max(v_x.clone(), 0i64);
+    let v_right: i64 = f_std__math__min(t_add(v_x.clone(), (v_source.clone()).f_width.clone(), "<std/raster.tes>:93:24 in function `std__raster__blit`"), (v_out.clone()).f_width.clone());
+    let v_top: i64 = f_std__math__max(v_y.clone(), 0i64);
+    let v_bottom: i64 = f_std__math__min(t_add(v_y.clone(), (v_source.clone()).f_height.clone(), "<std/raster.tes>:95:25 in function `std__raster__blit`"), (v_out.clone()).f_height.clone());
+    if ((v_left.clone() >= v_right.clone()) || (v_top.clone() >= v_bottom.clone())) {
+        return v_out
+    };
+    for v_row in t_iter(t_range(v_top.clone(), v_bottom.clone(), "<std/raster.tes>:99:12 in function `std__raster__blit`")) {
+        t_tick("<std/raster.tes>:99:31 in function `std__raster__blit`");
+        let v_from: i64 = t_sub(t_mul(t_sub(v_row.clone(), v_y.clone(), "<std/raster.tes>:100:17 in function `std__raster__blit`"), (v_source.clone()).f_width.clone(), "<std/raster.tes>:100:22 in function `std__raster__blit`"), v_x.clone(), "<std/raster.tes>:100:37 in function `std__raster__blit`");
+        for v_column in t_iter(t_range(v_left.clone(), v_right.clone(), "<std/raster.tes>:101:15 in function `std__raster__blit`")) {
+            t_tick("<std/raster.tes>:101:34 in function `std__raster__blit`");
+            let v_value: i64 = t_index(&(v_source.clone()).f_pixels.clone(), t_add(v_from.clone(), v_column.clone(), "<std/raster.tes>:102:32 in function `std__raster__blit`"), "<std/raster.tes>:102:13 in function `std__raster__blit`");
+            if (v_value.clone() != v_transparent.clone()) {
+                { let t_place0: i64 = t_add(t_mul(v_row.clone(), (v_out.clone()).f_width.clone(), "<std/raster.tes>:104:20 in function `std__raster__blit`"), v_column.clone(), "<std/raster.tes>:104:32 in function `std__raster__blit`"); let t_value = v_value.clone(); *t_slot(&mut Rc::make_mut(&mut v_out).f_pixels, t_place0, "<std/raster.tes>:104:5 in function `std__raster__blit`") = t_value; }
+            }
+        }
+    }
+    v_out
+}
+
+// note: Replaces every value v by `table[v]`: palette indexes to colors, or a light table that darkens. R001 for a value outside the table.
+fn f_std__raster__remap(v_image: Rc<T_std__raster__Image>, v_table: Rc<Vec<i64>>) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:112:8 in function `std__raster__remap`");
+    let mut v_out: Rc<T_std__raster__Image> = v_image;
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_out.clone()).f_pixels.clone()), "<std/raster.tes>:114:10 in function `std__raster__remap`")) {
+        t_tick("<std/raster.tes>:114:39 in function `std__raster__remap`");
+        { let t_place0: i64 = v_i.clone(); let t_value = t_index(&v_table.clone(), t_index(&(v_out.clone()).f_pixels.clone(), v_i.clone(), "<std/raster.tes>:115:27 in function `std__raster__remap`"), "<std/raster.tes>:115:21 in function `std__raster__remap`"); *t_slot(&mut Rc::make_mut(&mut v_out).f_pixels, t_place0, "<std/raster.tes>:115:5 in function `std__raster__remap`") = t_value; }
+    }
+    v_out
+}
+
+// note: Width in pixels of a text in a font.
+fn f_std__raster__measure(v_font: Rc<T_std__raster__Font>, v_message: Rc<String>) -> i64 {
+    t_enter("<std/raster.tes>:121:8 in function `std__raster__measure`");
+    let mut v_total: i64 = 0i64;
+    for v_code in t_iter(t_code_points(&v_message.clone())) {
+        t_tick("<std/raster.tes>:123:34 in function `std__raster__measure`");
+        v_total = t_add(v_total.clone(), match &(t_map_get(&(v_font.clone()).f_glyphs.clone(), &v_code.clone())) {
+            Some(t1) => { let v_g = t1.clone(); (v_g.clone()).f_width.clone() }
+            None => { (v_font.clone()).f_space.clone() }
+        }, "<std/raster.tes>:124:11 in function `std__raster__measure`");
+    }
+    v_total
+}
+
+// note: Draws a text with its top-left corner at (x, y).
+fn f_std__raster__text(v_image: Rc<T_std__raster__Image>, v_font: Rc<T_std__raster__Font>, v_x: i64, v_y: i64, v_message: Rc<String>) -> Rc<T_std__raster__Image> {
+    t_enter("<std/raster.tes>:133:8 in function `std__raster__text`");
+    let mut v_out: Rc<T_std__raster__Image> = v_image;
+    let mut v_at: i64 = v_x;
+    for v_code in t_iter(t_code_points(&v_message.clone())) {
+        t_tick("<std/raster.tes>:136:34 in function `std__raster__text`");
+        match &(t_map_get(&(v_font.clone()).f_glyphs.clone(), &v_code.clone())) {
+            Some(t1) => { let v_g = t1.clone(); {
+                v_out = f_std__raster__blit(v_out, v_g.clone(), v_at.clone(), v_y.clone(), (v_font.clone()).f_transparent.clone());
+                v_at = t_add(v_at.clone(), (v_g.clone()).f_width.clone(), "<std/raster.tes>:140:8 in function `std__raster__text`");
+            } }
+            None => { {
+                v_at = t_add(v_at.clone(), (v_font.clone()).f_space.clone(), "<std/raster.tes>:142:17 in function `std__raster__text`");
+            } }
+        }
+    }
+    v_out
+}
+
+fn f_std__sound__u16(v_b: Rc<Vec<u8>>, v_at: i64) -> i64 {
+    t_enter("<std/sound.tes>:13:4 in function `std__sound__u16`");
+    (t_bytes_index(&v_b.clone(), v_at.clone(), "<std/sound.tes>:13:43 in function `std__sound__u16`") | t_shift_left(t_bytes_index(&v_b.clone(), t_add(v_at.clone(), 1i64, "<std/sound.tes>:13:66 in function `std__sound__u16`"), "<std/sound.tes>:13:61 in function `std__sound__u16`"), 8i64, "<std/sound.tes>:13:50 in function `std__sound__u16`"))
+}
+
+fn f_std__sound__u32(v_b: Rc<Vec<u8>>, v_at: i64) -> i64 {
+    t_enter("<std/sound.tes>:15:4 in function `std__sound__u32`");
+    (f_std__sound__u16(v_b.clone(), v_at.clone()) | t_shift_left(f_std__sound__u16(v_b.clone(), t_add(v_at.clone(), 2i64, "<std/sound.tes>:15:76 in function `std__sound__u32`")), 16i64, "<std/sound.tes>:15:55 in function `std__sound__u32`"))
+}
+
+// note: Reads a WAV file (RIFF, uncompressed PCM, 8 or 16 bits, mono or stereo) as a mono 8-bit sound. Stereo is mixed down; 16-bit samples keep their top 8 bits.
+fn f_std__sound__from_wav(v_data: Rc<Vec<u8>>) -> Result<Rc<T_std__sound__Sound>, Rc<String>> {
+    t_enter("<std/sound.tes>:18:8 in function `std__sound__from_wav`");
+    if (((t_list_length(&v_data.clone()) < 12i64) || (t_from_bytes(&t_slice(v_data.clone(), 0i64, 4i64, "<std/sound.tes>:19:36 in function `std__sound__from_wav`")) != Some(t_text("RIFF")))) || (t_from_bytes(&t_slice(v_data.clone(), 8i64, 12i64, "<std/sound.tes>:19:86 in function `std__sound__from_wav`")) != Some(t_text("WAVE")))) {
+        return Result::<Rc<T_std__sound__Sound>, Rc<String>>::Err(t_text("not a WAV file"))
+    };
+    let mut v_at: i64 = 12i64;
+    let mut v_channels: i64 = 0i64;
+    let mut v_rate: i64 = 0i64;
+    let mut v_bits: i64 = 0i64;
+    while (t_add(v_at.clone(), 8i64, "<std/sound.tes>:26:10 in function `std__sound__from_wav`") <= t_list_length(&v_data.clone())) {
+        t_tick("<std/sound.tes>:26:30 in function `std__sound__from_wav`");
+        let v_id: Rc<String> = t_value_or(t_from_bytes(&t_slice(v_data.clone(), v_at.clone(), t_add(v_at.clone(), 4i64, "<std/sound.tes>:27:49 in function `std__sound__from_wav`"), "<std/sound.tes>:27:30 in function `std__sound__from_wav`")), t_text(""));
+        let v_size: i64 = f_std__sound__u32(v_data.clone(), t_add(v_at.clone(), 4i64, "<std/sound.tes>:28:25 in function `std__sound__from_wav`"));
+        let v_body: i64 = t_add(v_at.clone(), 8i64, "<std/sound.tes>:29:15 in function `std__sound__from_wav`");
+        if (t_add(v_body.clone(), v_size.clone(), "<std/sound.tes>:30:9 in function `std__sound__from_wav`") > t_list_length(&v_data.clone())) {
+            return Result::<Rc<T_std__sound__Sound>, Rc<String>>::Err(t_text("the WAV file is cut off"))
+        };
+        if (v_id.clone() == t_text("fmt ")) {
+            if ((v_size.clone() < 16i64) || (f_std__sound__u16(v_data.clone(), v_body.clone()) != 1i64)) {
+                return Result::<Rc<T_std__sound__Sound>, Rc<String>>::Err(t_text("only uncompressed (PCM) WAV files are supported"))
+            };
+            v_channels = f_std__sound__u16(v_data.clone(), t_add(v_body.clone(), 2i64, "<std/sound.tes>:37:31 in function `std__sound__from_wav`"));
+            v_rate = f_std__sound__u32(v_data.clone(), t_add(v_body.clone(), 4i64, "<std/sound.tes>:38:27 in function `std__sound__from_wav`"));
+            v_bits = f_std__sound__u16(v_data.clone(), t_add(v_body.clone(), 14i64, "<std/sound.tes>:39:27 in function `std__sound__from_wav`"));
+        };
+        if (v_id.clone() == t_text("data")) {
+            if (((v_channels.clone() < 1i64) || (v_channels.clone() > 2i64)) || ((v_bits.clone() != 8i64) && (v_bits.clone() != 16i64))) {
+                return Result::<Rc<T_std__sound__Sound>, Rc<String>>::Err(t_concat(t_concat(t_concat(t_concat(t_text("unsupported WAV format: "), t_int_to_text(v_channels)), t_text(" channels, ")), t_int_to_text(v_bits)), t_text(" bits")))
+            };
+            let v_frame: i64 = t_div(t_mul(v_channels.clone(), v_bits.clone(), "<std/sound.tes>:45:22 in function `std__sound__from_wav`"), 8i64, "<std/sound.tes>:45:29 in function `std__sound__from_wav`");
+            let v_count: i64 = t_div(v_size.clone(), v_frame.clone(), "<std/sound.tes>:46:18 in function `std__sound__from_wav`");
+            let mut v_out: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![128i64]), v_count.clone(), "<std/sound.tes>:47:11 in function `std__sound__from_wav`");
+            for v_i in t_iter(t_range(0i64, v_count.clone(), "<std/sound.tes>:48:10 in function `std__sound__from_wav`")) {
+                t_tick("<std/sound.tes>:48:26 in function `std__sound__from_wav`");
+                let mut v_total: i64 = 0i64;
+                for v_c in t_iter(t_range(0i64, v_channels.clone(), "<std/sound.tes>:50:10 in function `std__sound__from_wav`")) {
+                    t_tick("<std/sound.tes>:50:29 in function `std__sound__from_wav`");
+                    let v_p: i64 = t_add(t_add(v_body.clone(), t_mul(v_i.clone(), v_frame.clone(), "<std/sound.tes>:51:18 in function `std__sound__from_wav`"), "<std/sound.tes>:51:14 in function `std__sound__from_wav`"), t_div(t_mul(v_c.clone(), v_bits.clone(), "<std/sound.tes>:51:30 in function `std__sound__from_wav`"), 8i64, "<std/sound.tes>:51:37 in function `std__sound__from_wav`"), "<std/sound.tes>:51:26 in function `std__sound__from_wav`");
+                    v_total = t_add(v_total.clone(), if (v_bits.clone() == 8i64) {
+                        t_bytes_index(&v_data.clone(), v_p.clone(), "<std/sound.tes>:53:29 in function `std__sound__from_wav`")
+                    } else {
+                        t_rem(t_add(t_bytes_index(&v_data.clone(), t_add(v_p.clone(), 1i64, "<std/sound.tes>:53:54 in function `std__sound__from_wav`"), "<std/sound.tes>:53:47 in function `std__sound__from_wav`"), 128i64, "<std/sound.tes>:53:59 in function `std__sound__from_wav`"), 256i64, "<std/sound.tes>:53:66 in function `std__sound__from_wav`")
+                    }, "<std/sound.tes>:53:11 in function `std__sound__from_wav`");
+                }
+                { let t_place0: i64 = v_i.clone(); let t_value = t_div(v_total.clone(), v_channels.clone(), "<std/sound.tes>:55:20 in function `std__sound__from_wav`"); *t_slot(&mut v_out, t_place0, "<std/sound.tes>:55:5 in function `std__sound__from_wav`") = t_value; }
+            }
+            return Result::<Rc<T_std__sound__Sound>, Rc<String>>::Ok(Rc::new(T_std__sound__Sound { f_samples: t_bytes(v_out, "<std/sound.tes>:57:29 in function `std__sound__from_wav`"), f_rate: f_std__math__clamp(v_rate, 1000i64, 96000i64) }))
+        };
+        v_at = t_add(t_add(v_body.clone(), v_size.clone(), "<std/sound.tes>:59:15 in function `std__sound__from_wav`"), t_rem(v_size.clone(), 2i64, "<std/sound.tes>:59:29 in function `std__sound__from_wav`"), "<std/sound.tes>:59:22 in function `std__sound__from_wav`");
+    }
+    Result::<Rc<T_std__sound__Sound>, Rc<String>>::Err(t_text("the WAV file has no data"))
+}
+
+// note: A sine tone of `frequency` hertz lasting `milliseconds`, at 22,050 samples per second, made with integer arithmetic (std/fixed).
+fn f_std__sound__tone(v_frequency: i64, v_milliseconds: i64, v_loudness: i64) -> Rc<T_std__sound__Sound> {
+    t_enter("<std/sound.tes>:65:8 in function `std__sound__tone`");
+    let v_rate: i64 = 22050i64;
+    let v_count: i64 = f_std__math__max(t_div(t_mul(v_rate.clone(), v_milliseconds.clone(), "<std/sound.tes>:67:27 in function `std__sound__tone`"), 1000i64, "<std/sound.tes>:67:42 in function `std__sound__tone`"), 1i64);
+    let v_amplitude: i64 = t_div(t_mul(f_std__math__clamp(v_loudness.clone(), 0i64, 100i64), 127i64, "<std/sound.tes>:68:46 in function `std__sound__tone`"), 100i64, "<std/sound.tes>:68:52 in function `std__sound__tone`");
+    let mut v_out: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![128i64]), v_count.clone(), "<std/sound.tes>:69:11 in function `std__sound__tone`");
+    for v_i in t_iter(t_range(0i64, v_count.clone(), "<std/sound.tes>:70:10 in function `std__sound__tone`")) {
+        t_tick("<std/sound.tes>:70:26 in function `std__sound__tone`");
+        { let t_place0: i64 = v_i.clone(); let t_value = t_add(128i64, t_shift_right(t_mul(f_std__fixed__sine(t_mul(v_i.clone(), v_frequency.clone(), "<std/sound.tes>:71:45 in function `std__sound__tone`"), v_rate.clone()), v_amplitude.clone(), "<std/sound.tes>:71:64 in function `std__sound__tone`"), 16i64, "<std/sound.tes>:71:20 in function `std__sound__tone`"), "<std/sound.tes>:71:18 in function `std__sound__tone`"); *t_slot(&mut v_out, t_place0, "<std/sound.tes>:71:5 in function `std__sound__tone`") = t_value; }
+    }
+    Rc::new(T_std__sound__Sound { f_samples: t_bytes(v_out, "<std/sound.tes>:73:18 in function `std__sound__tone`"), f_rate: v_rate })
+}
+
+// note: How loud a sound is and where it sits left to right, for a listener facing some direction: `dx`, `dy` is the offset from listener to sound in whole units, (`right_x`, `right_y`) the listener's right-hand direction as fixed values (65536 is 1.0). Volume falls from 100 to 0 at distance `range`; pan is -100 (left) to 100 (right), at most 75 so both ears still hear it. Returns [volume, pan].
+fn f_std__sound__position(v_dx: i64, v_dy: i64, v_right_x: i64, v_right_y: i64, v_range: i64) -> Rc<Vec<i64>> {
+    t_enter("<std/sound.tes>:77:8 in function `std__sound__position`");
+    let v_distance: i64 = f_std__math__isqrt(t_add(t_mul(v_dx.clone(), v_dx.clone(), "<std/sound.tes>:78:30 in function `std__sound__position`"), t_mul(v_dy.clone(), v_dy.clone(), "<std/sound.tes>:78:40 in function `std__sound__position`"), "<std/sound.tes>:78:35 in function `std__sound__position`"));
+    if (v_distance.clone() >= v_range.clone()) {
+        return Rc::new(vec![0i64, 0i64])
+    };
+    let v_side: i64 = f_std__fixed__floor_int(t_add(t_mul(v_dx.clone(), v_right_x.clone(), "<std/sound.tes>:82:31 in function `std__sound__position`"), t_mul(v_dy.clone(), v_right_y.clone(), "<std/sound.tes>:82:46 in function `std__sound__position`"), "<std/sound.tes>:82:41 in function `std__sound__position`"));
+    let v_pan: i64 = if (v_distance.clone() < 32i64) {
+        0i64
+    } else {
+        t_div(t_mul(v_side.clone(), 75i64, "<std/sound.tes>:83:46 in function `std__sound__position`"), v_distance.clone(), "<std/sound.tes>:83:51 in function `std__sound__position`")
+    };
+    Rc::new(vec![t_sub(100i64, t_div(t_mul(v_distance, 100i64, "<std/sound.tes>:84:17 in function `std__sound__position`"), v_range, "<std/sound.tes>:84:23 in function `std__sound__position`"), "<std/sound.tes>:84:6 in function `std__sound__position`"), f_std__math__clamp(v_pan, (-75i64), 75i64)])
+}
+
+// note: Plays a sound at a volume (0 to 100) and pan (-100 to 100).
+fn f_std__sound__play(v_s: Rc<T_std__sound__Sound>, v_volume: i64, v_pan: i64) -> () {
+    t_enter("<std/sound.tes>:88:8 in function `std__sound__play`");
+    t_play_sound(&(v_s.clone()).f_samples.clone(), (v_s.clone()).f_rate.clone(), f_std__math__clamp(v_volume, 0i64, 100i64), f_std__math__clamp(v_pan, (-100i64), 100i64), "<std/sound.tes>:88:67 in function `std__sound__play`")
+}
+
+fn f_std__keys__none() -> Rc<T_std__keys__Keys> {
+    t_enter("<std/keys.tes>:10:8 in function `std__keys__none`");
+    Rc::new(T_std__keys__Keys { f_held: Rc::new(Vec::<Rc<String>>::new()), f_typed: t_text("") })
+}
+
+// note: The keys after a window event: `Key` holds a key down and adds a one-character key to the typed text (the last 32 characters are kept), `KeyUp` lets go. Other events change nothing.
+fn f_std__keys__update(v_keys: Rc<T_std__keys__Keys>, v_event: Rc<T_WindowEvent>) -> Rc<T_std__keys__Keys> {
+    t_enter("<std/keys.tes>:13:8 in function `std__keys__update`");
+    match &*(v_event) {
+        T_WindowEvent::V_Key(t1) => { let v_name = t1.clone(); {
+            let v_lower: Rc<String> = t_to_lower(&v_name.clone());
+            let v_held: Rc<Vec<Rc<String>>> = if t_contains(&(v_keys.clone()).f_held.clone(), &v_lower.clone()) {
+                (v_keys.clone()).f_held.clone()
+            } else {
+                t_concat_lists((v_keys.clone()).f_held.clone(), Rc::new(vec![v_lower.clone()]))
+            };
+            let mut v_typed: Rc<String> = (v_keys.clone()).f_typed.clone();
+            if (t_text_length(&v_name.clone()) == 1i64) {
+                v_typed = t_concat(std::mem::take(&mut v_typed), v_lower.clone());
+                if (t_text_length(&v_typed.clone()) > 32i64) {
+                    v_typed = t_slice_text(v_typed.clone(), t_sub(t_text_length(&v_typed.clone()), 32i64, "<std/keys.tes>:22:45 in function `std__keys__update`"), t_text_length(&v_typed.clone()), "<std/keys.tes>:22:13 in function `std__keys__update`");
+                }
+            };
+            { let mut t2 = Rc::unwrap_or_clone(v_keys.clone()); t2.f_held = v_held; t2.f_typed = v_typed.clone(); Rc::new(t2) }
+        } }
+        T_WindowEvent::V_KeyUp(t3) => { let v_name = t3.clone(); { let mut t4 = Rc::unwrap_or_clone(v_keys.clone()); t4.f_held = f_std__keys__filter_out((v_keys.clone()).f_held.clone(), t_to_lower(&v_name.clone())); Rc::new(t4) } }
+        _ => { v_keys.clone() }
+    }
+}
+
+fn f_std__keys__filter_out(v_names: Rc<Vec<Rc<String>>>, v_name: Rc<String>) -> Rc<Vec<Rc<String>>> {
+    t_enter("<std/keys.tes>:32:4 in function `std__keys__filter_out`");
+    let mut v_out: Rc<Vec<Rc<String>>> = Rc::new(Vec::<Rc<String>>::new());
+    for v_n in t_iter(v_names.clone()) {
+        t_tick("<std/keys.tes>:34:16 in function `std__keys__filter_out`");
+        if (v_n.clone() != v_name.clone()) {
+            v_out = t_concat_lists(std::mem::take(&mut v_out), Rc::new(vec![v_n.clone()]));
+        }
+    }
+    v_out
+}
+
+fn f_std__keys__held(v_keys: Rc<T_std__keys__Keys>, v_name: Rc<String>) -> bool {
+    t_enter("<std/keys.tes>:42:8 in function `std__keys__held`");
+    t_contains(&(v_keys).f_held.clone(), &t_to_lower(&v_name))
+}
+
+// note: Whether any of the named keys is held.
+fn f_std__keys__any_held(v_keys: Rc<T_std__keys__Keys>, v_names: Rc<Vec<Rc<String>>>) -> bool {
+    t_enter("<std/keys.tes>:45:8 in function `std__keys__any_held`");
+    for v_name in t_iter(v_names.clone()) {
+        t_tick("<std/keys.tes>:46:19 in function `std__keys__any_held`");
+        if f_std__keys__held(v_keys.clone(), v_name.clone()) {
+            return true
+        }
+    }
+    false
+}
+
+// note: Whether the typed text ends with `word` (lower case); use `forget_typed` after acting on it.
+fn f_std__keys__typed(v_keys: Rc<T_std__keys__Keys>, v_word: Rc<String>) -> bool {
+    t_enter("<std/keys.tes>:55:8 in function `std__keys__typed`");
+    t_ends_with(&(v_keys).f_typed.clone(), &t_to_lower(&v_word))
+}
+
+fn f_std__keys__forget_typed(v_keys: Rc<T_std__keys__Keys>) -> Rc<T_std__keys__Keys> {
+    t_enter("<std/keys.tes>:57:8 in function `std__keys__forget_typed`");
+    { let mut t1 = Rc::unwrap_or_clone(v_keys); t1.f_typed = t_text(""); Rc::new(t1) }
+}
+
+// note: Lets go of every key, for example when a menu opens.
+fn f_std__keys__release_all(v_keys: Rc<T_std__keys__Keys>) -> Rc<T_std__keys__Keys> {
+    t_enter("<std/keys.tes>:60:8 in function `std__keys__release_all`");
+    { let mut t1 = Rc::unwrap_or_clone(v_keys); t1.f_held = Rc::new(Vec::<Rc<String>>::new()); Rc::new(t1) }
+}
+
+// note: Tics between shots, by weapon slot.
+fn f_combat__weapon_cooldown(v_slot: i64) -> i64 {
+    t_enter("combat.tes:17:8 in function `combat__weapon_cooldown`");
+    t_index(&Rc::new(vec![14i64, 14i64, 37i64, 4i64, 20i64, 3i64, 60i64, 4i64]), v_slot, "combat.tes:17:44 in function `combat__weapon_cooldown`")
+}
+
+fn f_combat__ammo_per_shot(v_slot: i64) -> i64 {
+    t_enter("combat.tes:19:4 in function `combat__ammo_per_shot`");
+    if (v_slot == 6i64) {
+        40i64
+    } else {
+        1i64
+    }
+}
+
+fn f_combat__has_ammo(v_s: Rc<T_state__Stats>, v_slot: i64) -> bool {
+    t_enter("combat.tes:21:8 in function `combat__has_ammo`");
+    let v_kind: i64 = f_things__ammo_kind(v_slot.clone());
+    ((v_kind.clone() < 0i64) || (t_index(&(v_s).f_ammo.clone(), v_kind.clone(), "combat.tes:23:13 in function `combat__has_ammo`") >= f_combat__ammo_per_shot(v_slot)))
+}
+
+// note: The best weapon that still has ammunition, in the original game's order of preference.
+fn f_combat__best_weapon(v_s: Rc<T_state__Stats>) -> i64 {
+    t_enter("combat.tes:27:8 in function `combat__best_weapon`");
+    for v_slot in t_iter(Rc::new(vec![5i64, 3i64, 2i64, 1i64, 7i64, 4i64, 6i64])) {
+        t_tick("combat.tes:28:35 in function `combat__best_weapon`");
+        if (t_index(&(v_s.clone()).f_weapons.clone(), v_slot.clone(), "combat.tes:29:4 in function `combat__best_weapon`") && f_combat__has_ammo(v_s.clone(), v_slot.clone())) {
+            return v_slot
+        }
+    }
+    0i64
+}
+
+// note: Selects a weapon: slot 0 is the fist, or the chainsaw when the player has it and the fist is already selected.
+fn f_combat__select_weapon(v_world: Rc<T_state__World>, v_slot: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:37:8 in function `combat__select_weapon`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let mut v_wanted: i64 = v_slot.clone();
+    if (((v_slot.clone() == 0i64) && t_index(&((v_w.clone()).f_stats.clone()).f_weapons.clone(), 7i64, "combat.tes:40:18 in function `combat__select_weapon`")) && (((v_w.clone()).f_stats.clone()).f_weapon.clone() != 7i64)) {
+        v_wanted = 7i64;
+    };
+    if (t_index(&((v_w.clone()).f_stats.clone()).f_weapons.clone(), v_wanted.clone(), "combat.tes:43:4 in function `combat__select_weapon`") && (v_wanted.clone() != ((v_w.clone()).f_stats.clone()).f_weapon.clone())) {
+        { let t_value = v_wanted.clone(); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_weapon = t_value; }
+        { let t_value = (-1i64); *&mut Rc::make_mut(&mut v_w).f_firing = t_value; }
+        if (v_wanted.clone() == 7i64) {
+            v_w = f_state__sound_here(v_w, t_text("DSSAWUP"));
+        }
+    };
+    v_w
+}
+
+// note: Fires the current weapon: fist and chainsaw hit what is right in front, pistol, shotgun and chaingun fire instant shots, the rocket launcher, plasma gun and BFG fire projectiles. Gunfire wakes monsters that can see the player.
+fn f_combat__fire(v_world: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("combat.tes:54:8 in function `combat__fire`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_slot: i64 = ((v_w.clone()).f_stats.clone()).f_weapon.clone();
+    if (!f_combat__has_ammo((v_w.clone()).f_stats.clone(), v_slot.clone())) {
+        { let t_value = f_combat__best_weapon((v_w.clone()).f_stats.clone()); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_weapon = t_value; }
+        return v_w
+    };
+    let v_kind: i64 = f_things__ammo_kind(v_slot.clone());
+    if (v_kind.clone() >= 0i64) {
+        { let t_place0: i64 = v_kind.clone(); let t_value = t_sub(t_index(&((v_w.clone()).f_stats.clone()).f_ammo.clone(), v_kind.clone(), "combat.tes:63:5 in function `combat__fire`"), f_combat__ammo_per_shot(v_slot.clone()), "combat.tes:63:24 in function `combat__fire`"); *t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_ammo, t_place0, "combat.tes:63:5 in function `combat__fire`") = t_value; }
+    };
+    { let t_value = f_combat__weapon_cooldown(v_slot.clone()); *&mut Rc::make_mut(&mut v_w).f_cooldown = t_value; }
+    { let t_value = 0i64; *&mut Rc::make_mut(&mut v_w).f_firing = t_value; }
+    let v_angle: i64 = ((v_w.clone()).f_player.clone()).f_angle.clone();
+    match v_slot.clone() {
+        0 => { {
+            let v_r: Rc<Vec<i64>> = f_state__roll(v_w.clone(), 1i64, 10i64);
+            { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:71:14 in function `combat__fire`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+            v_w = f_combat__melee(v_w.clone(), v_trig.clone(), t_mul(t_mul(t_index(&v_r.clone(), 0i64, "combat.tes:72:24 in function `combat__fire`"), 2i64, "combat.tes:72:29 in function `combat__fire`"), if ((v_w.clone()).f_stats.clone()).f_berserk.clone() {
+                10i64
+            } else {
+                1i64
+            }, "combat.tes:72:33 in function `combat__fire`"), t_text("DSPUNCH"));
+        } }
+        7 => { {
+            let v_r: Rc<Vec<i64>> = f_state__roll(v_w.clone(), 1i64, 10i64);
+            { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:76:14 in function `combat__fire`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+            v_w = f_combat__melee(v_w, v_trig.clone(), t_mul(t_index(&v_r.clone(), 0i64, "combat.tes:77:24 in function `combat__fire`"), 2i64, "combat.tes:77:29 in function `combat__fire`"), t_text("DSSAWFUL"));
+        } }
+        1 => { {
+            v_w = f_state__sound_here(v_w, t_text("DSPISTOL"));
+            v_w = f_combat__spread_shot(v_w, v_trig.clone(), v_angle.clone(), 16i64);
+        } }
+        3 => { {
+            v_w = f_state__sound_here(v_w, t_text("DSPISTOL"));
+            v_w = f_combat__spread_shot(v_w, v_trig.clone(), v_angle.clone(), 32i64);
+        } }
+        2 => { {
+            v_w = f_state__sound_here(v_w, t_text("DSSHOTGN"));
+            for _ in t_iter(t_range(0i64, 7i64, "combat.tes:89:10 in function `combat__fire`")) {
+                t_tick("combat.tes:89:22 in function `combat__fire`");
+                v_w = f_combat__spread_shot(v_w, v_trig.clone(), v_angle.clone(), 128i64);
+            }
+        } }
+        4 => { {
+            v_w = f_state__sound_here(v_w, t_text("DSRLAUNC"));
+            v_w = f_combat__launch(v_w.clone(), v_trig.clone(), t_text("MISL"), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone(), t_add(f_combat__player_z(v_w.clone()), f_std__fixed__from_int(32i64), "combat.tes:95:69 in function `combat__fire`"), v_angle.clone(), 20i64, 20i64, 160i64, 11i64, true, (-1i64));
+        } }
+        5 => { {
+            v_w = f_state__sound_here(v_w, t_text("DSPLASMA"));
+            v_w = f_combat__launch(v_w.clone(), v_trig.clone(), t_text("PLSS"), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone(), t_add(f_combat__player_z(v_w.clone()), f_std__fixed__from_int(32i64), "combat.tes:99:69 in function `combat__fire`"), v_angle.clone(), 25i64, 5i64, 40i64, 13i64, false, (-1i64));
+        } }
+        _ => { {
+            v_w = f_state__sound_here(v_w, t_text("DSBFG"));
+            v_w = f_combat__launch(v_w.clone(), v_trig.clone(), t_text("BFS1"), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone(), t_add(f_combat__player_z(v_w.clone()), f_std__fixed__from_int(32i64), "combat.tes:103:69 in function `combat__fire`"), v_angle.clone(), 25i64, 100i64, 800i64, 13i64, true, (-1i64));
+        } }
+    };
+    if ((v_slot.clone() != 0i64) && (v_slot.clone() != 7i64)) {
+        v_w = f_combat__alert(v_w);
+    };
+    if (!f_combat__has_ammo((v_w.clone()).f_stats.clone(), v_slot.clone())) {
+        { let t_value = f_combat__best_weapon((v_w.clone()).f_stats.clone()); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_weapon = t_value; }
+    };
+    v_w
+}
+
+fn f_combat__player_z(v_w: Rc<T_state__World>) -> i64 {
+    t_enter("combat.tes:115:4 in function `combat__player_z`");
+    f_std__fixed__from_int(f_state__sector_floor(v_w.clone(), ((v_w.clone()).f_player.clone()).f_sector.clone()))
+}
+
+// note: A bullet or pellet up to `spread` fine angles to either side of `angle`, 5 to 15 damage.
+fn f_combat__spread_shot(v_world: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_angle: i64, v_spread: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:118:4 in function `combat__spread_shot`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_r: Rc<Vec<i64>> = f_std__rng__byte((v_w.clone()).f_seed.clone());
+    { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:121:14 in function `combat__spread_shot`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+    let v_d: Rc<Vec<i64>> = f_state__roll(v_w.clone(), 5i64, 15i64);
+    { let t_value = t_index(&v_d.clone(), 1i64, "combat.tes:123:14 in function `combat__spread_shot`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+    f_combat__hitscan(v_w, v_trig, f_geometry__wrap_angle(t_add(v_angle, t_div(t_mul(t_sub(t_index(&v_r, 0i64, "combat.tes:124:47 in function `combat__spread_shot`"), 128i64, "combat.tes:124:52 in function `combat__spread_shot`"), v_spread, "combat.tes:124:59 in function `combat__spread_shot`"), 128i64, "combat.tes:124:68 in function `combat__spread_shot`"), "combat.tes:124:44 in function `combat__spread_shot`")), t_index(&v_d, 0i64, "combat.tes:124:76 in function `combat__spread_shot`"), (-1i64))
+}
+
+// note: Hits the nearest monster or barrel within 64 units straight ahead.
+fn f_combat__melee(v_world: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_damage: i64, v_noise: Rc<String>) -> Rc<T_state__World> {
+    t_enter("combat.tes:128:4 in function `combat__melee`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_target: i64 = f_combat__aim(v_w.clone(), v_trig.clone(), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone(), ((v_w.clone()).f_player.clone()).f_angle.clone(), f_std__fixed__from_int(80i64), (-1i64));
+    if (v_target.clone() < 0i64) {
+        return v_w
+    };
+    v_w = f_state__sound_here(v_w, v_noise.clone());
+    f_combat__damage_mobj(v_w, v_target, v_damage)
+}
+
+// note: The nearest target (monster or barrel, not `self`) on the line from (x, y) at `angle` within `reach` (fixed) and not behind a wall, or -1.
+fn f_combat__aim(v_w: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_x: i64, v_y: i64, v_angle: i64, v_reach: i64, v_self: i64) -> i64 {
+    t_enter("combat.tes:139:4 in function `combat__aim`");
+    let v_dx: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), v_angle.clone(), "combat.tes:140:10 in function `combat__aim`");
+    let v_dy: i64 = t_index(&(v_trig.clone()).f_sine.clone(), v_angle.clone(), "combat.tes:141:10 in function `combat__aim`");
+    let mut v_target: i64 = (-1i64);
+    let mut v_target_distance: i64 = v_reach;
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "combat.tes:144:10 in function `combat__aim`")) {
+        t_tick("combat.tes:144:36 in function `combat__aim`");
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "combat.tes:145:9 in function `combat__aim`");
+        if ((v_i.clone() != v_self.clone()) && f_state__is_target(v_m.clone())) {
+            let v_along: i64 = t_add(f_std__fixed__mul(t_sub((v_m.clone()).f_x.clone(), v_x.clone(), "combat.tes:147:27 in function `combat__aim`"), v_dx.clone()), f_std__fixed__mul(t_sub((v_m.clone()).f_y.clone(), v_y.clone(), "combat.tes:147:52 in function `combat__aim`"), v_dy.clone()), "combat.tes:147:36 in function `combat__aim`");
+            let v_beside: i64 = f_std__math__abs(t_sub(f_std__fixed__mul(t_sub((v_m.clone()).f_x.clone(), v_x.clone(), "combat.tes:148:37 in function `combat__aim`"), v_dy.clone()), f_std__fixed__mul(t_sub((v_m.clone()).f_y.clone(), v_y.clone(), "combat.tes:148:62 in function `combat__aim`"), v_dx.clone()), "combat.tes:148:46 in function `combat__aim`"));
+            if (((v_along.clone() > 0i64) && (v_along.clone() < v_target_distance.clone())) && (v_beside.clone() < f_std__fixed__from_int(((v_m.clone()).f_info.clone()).f_radius.clone()))) {
+                v_target = v_i.clone();
+                v_target_distance = v_along.clone();
+            }
+        }
+    }
+    if ((v_target.clone() >= 0i64) && f_state__blocked(v_w.clone(), v_x.clone(), v_y.clone(), (t_index(&(v_w.clone()).f_mobjs.clone(), v_target.clone(), "combat.tes:155:43 in function `combat__aim`")).f_x.clone(), (t_index(&(v_w.clone()).f_mobjs.clone(), v_target.clone(), "combat.tes:155:62 in function `combat__aim`")).f_y.clone())) {
+        return (-1i64)
+    };
+    v_target
+}
+
+// note: Where a shot from (x, y) at `angle` hits the nearest wall: the fixed distance, or 8192 units when nothing is near.
+fn f_combat__wall_distance(v_w: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_x: i64, v_y: i64, v_angle: i64) -> i64 {
+    t_enter("combat.tes:162:4 in function `combat__wall_distance`");
+    let v_dx: i64 = t_index(&(v_trig.clone()).f_cosine.clone(), v_angle.clone(), "combat.tes:163:10 in function `combat__wall_distance`");
+    let v_dy: i64 = t_index(&(v_trig.clone()).f_sine.clone(), v_angle.clone(), "combat.tes:164:10 in function `combat__wall_distance`");
+    let mut v_best: i64 = f_std__fixed__from_int(8192i64);
+    for v_line in t_iter(((v_w.clone()).f_level.clone()).f_linedefs.clone()) {
+        t_tick("combat.tes:166:30 in function `combat__wall_distance`");
+        if f_state__solid_line((v_w.clone()).f_level.clone(), v_line.clone()) {
+            let v_a: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "combat.tes:168:9 in function `combat__wall_distance`");
+            let v_b: Rc<T_level__Vertex> = t_index(&((v_w.clone()).f_level.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "combat.tes:169:9 in function `combat__wall_distance`");
+            let v_hit: Rc<T_std__plane__Hit> = f_std__plane__intersect(v_x.clone(), v_y.clone(), v_dx.clone(), v_dy.clone(), (v_a.clone()).f_x.clone(), (v_a.clone()).f_y.clone(), (v_b.clone()).f_x.clone(), (v_b.clone()).f_y.clone());
+            if ((v_hit.clone()).f_hit.clone() && ((v_hit.clone()).f_distance.clone() < v_best.clone())) {
+                v_best = (v_hit.clone()).f_distance.clone();
+            }
+        }
+    }
+    v_best
+}
+
+// note: An instant shot from the player (`shooter` -1) or a monster. It hits the first target or wall; a puff of smoke shows where it hit a wall, blood where it hit a monster.
+fn f_combat__hitscan(v_world: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_angle: i64, v_damage: i64, v_shooter: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:180:4 in function `combat__hitscan`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_x: i64 = if (v_shooter.clone() < 0i64) {
+        ((v_w.clone()).f_player.clone()).f_x.clone()
+    } else {
+        (t_index(&(v_w.clone()).f_mobjs.clone(), v_shooter.clone(), "combat.tes:182:46 in function `combat__hitscan`")).f_x.clone()
+    };
+    let v_y: i64 = if (v_shooter.clone() < 0i64) {
+        ((v_w.clone()).f_player.clone()).f_y.clone()
+    } else {
+        (t_index(&(v_w.clone()).f_mobjs.clone(), v_shooter.clone(), "combat.tes:183:46 in function `combat__hitscan`")).f_y.clone()
+    };
+    let v_target: i64 = f_combat__aim(v_w.clone(), v_trig.clone(), v_x.clone(), v_y.clone(), v_angle.clone(), f_std__fixed__from_int(2048i64), v_shooter.clone());
+    if (v_target.clone() >= 0i64) {
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_target.clone(), "combat.tes:186:9 in function `combat__hitscan`");
+        v_w = f_state__add_effect(v_w.clone(), if f_state__is_monster(v_m.clone()) {
+            t_text("BLUD")
+        } else {
+            t_text("PUFF")
+        }, if f_state__is_monster(v_m.clone()) {
+            t_text("CBA")
+        } else {
+            t_text("ABCD")
+        }, (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), f_std__fixed__from_int(t_add(f_state__sector_floor(v_w.clone(), (v_m.clone()).f_sector.clone()), 32i64, "combat.tes:187:187 in function `combat__hitscan`")), 4i64);
+        return f_combat__damage_mobj(v_w, v_target, v_damage)
+    };
+    let v_distance: i64 = f_combat__wall_distance(v_w.clone(), v_trig.clone(), v_x.clone(), v_y.clone(), v_angle.clone());
+    if (v_distance.clone() < f_std__fixed__from_int(2048i64)) {
+        let v_back: i64 = t_sub(v_distance.clone(), f_std__fixed__from_int(4i64), "combat.tes:192:21 in function `combat__hitscan`");
+        let v_px: i64 = t_add(v_x.clone(), f_std__fixed__mul(v_back.clone(), t_index(&(v_trig.clone()).f_cosine.clone(), v_angle.clone(), "combat.tes:193:30 in function `combat__hitscan`")), "combat.tes:193:12 in function `combat__hitscan`");
+        let v_py: i64 = t_add(v_y.clone(), f_std__fixed__mul(v_back.clone(), t_index(&(v_trig.clone()).f_sine.clone(), v_angle.clone(), "combat.tes:194:30 in function `combat__hitscan`")), "combat.tes:194:12 in function `combat__hitscan`");
+        v_w = f_state__add_effect(v_w.clone(), t_text("PUFF"), t_text("ABCD"), v_px.clone(), v_py.clone(), f_std__fixed__from_int(t_add(f_state__sector_floor(v_w.clone(), ((v_w.clone()).f_player.clone()).f_sector.clone()), 32i64, "combat.tes:195:107 in function `combat__hitscan`")), 4i64);
+    };
+    v_w
+}
+
+// note: Starts a projectile flying `speed` units per tic in the direction `angle`, starting a little in front of the shooter.
+fn f_combat__launch(v_world: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>, v_sprite: Rc<String>, v_x: i64, v_y: i64, v_z: i64, v_angle: i64, v_speed: i64, v_low: i64, v_high: i64, v_size: i64, v_splash: bool, v_owner: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:203:8 in function `combat__launch`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_dx: i64 = t_mul(t_index(&(v_trig.clone()).f_cosine.clone(), v_angle.clone(), "combat.tes:205:10 in function `combat__launch`"), v_speed.clone(), "combat.tes:205:29 in function `combat__launch`");
+    let v_dy: i64 = t_mul(t_index(&(v_trig.clone()).f_sine.clone(), v_angle.clone(), "combat.tes:206:10 in function `combat__launch`"), v_speed.clone(), "combat.tes:206:27 in function `combat__launch`");
+    let v_start_x: i64 = t_add(v_x.clone(), f_std__fixed__mul(f_std__fixed__from_int(16i64), t_index(&(v_trig.clone()).f_cosine.clone(), v_angle.clone(), "combat.tes:207:49 in function `combat__launch`")), "combat.tes:207:17 in function `combat__launch`");
+    let v_start_y: i64 = t_add(v_y.clone(), f_std__fixed__mul(f_std__fixed__from_int(16i64), t_index(&(v_trig.clone()).f_sine.clone(), v_angle.clone(), "combat.tes:208:49 in function `combat__launch`")), "combat.tes:208:17 in function `combat__launch`");
+    { let t_value = t_concat_lists((v_w.clone()).f_missiles.clone(), Rc::new(vec![Rc::new(T_state__Missile { f_sprite: v_sprite.clone(), f_x: v_start_x.clone(), f_y: v_start_y.clone(), f_z: v_z.clone(), f_dx: v_dx.clone(), f_dy: v_dy.clone(), f_damage_min: v_low.clone(), f_damage_max: v_high.clone(), f_radius: v_size.clone(), f_splash: v_splash.clone(), f_owner: v_owner.clone() })])); *&mut Rc::make_mut(&mut v_w).f_missiles = t_value; }
+    v_w
+}
+
+fn f_combat__explosion_frames(v_sprite: Rc<String>) -> Rc<Vec<Rc<String>>> {
+    t_enter("combat.tes:213:4 in function `combat__explosion_frames`");
+    match (v_sprite.clone()).as_str() {
+        "MISL" => { Rc::new(vec![t_text("MISL"), t_text("BCD"), t_text("DSBAREXP")]) }
+        "PLSS" => { Rc::new(vec![t_text("PLSE"), t_text("ABCDE"), t_text("DSFIRXPL")]) }
+        "BFS1" => { Rc::new(vec![t_text("BFE1"), t_text("ABCDEF"), t_text("DSRXPLOD")]) }
+        _ => { Rc::new(vec![v_sprite.clone(), t_text("CDE"), t_text("DSFIRXPL")]) }
+    }
+}
+
+// note: Whether a projectile at (x, y), flying at height `z`, touches a wall: one-sided lines, and two-sided lines whose opening it does not fit through.
+fn f_combat__missile_hits_wall(v_w: Rc<T_state__World>, v_x: i64, v_y: i64, v_z: i64, v_size: i64) -> bool {
+    t_enter("combat.tes:223:4 in function `combat__missile_hits_wall`");
+    let v_l: Rc<T_level__Level> = (v_w.clone()).f_level.clone();
+    let v_bottom: i64 = f_std__fixed__floor_int(v_z.clone());
+    for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
+        t_tick("combat.tes:226:24 in function `combat__missile_hits_wall`");
+        if f_movement__touches_radius(v_x.clone(), v_y.clone(), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "combat.tes:227:34 in function `combat__missile_hits_wall`"), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "combat.tes:227:58 in function `combat__missile_hits_wall`"), v_size.clone()) {
+            if ((v_line.clone()).f_back.clone() < 0i64) {
+                return true
+            };
+            let v_front: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "combat.tes:231:23 in function `combat__missile_hits_wall`")).f_sector.clone(), "combat.tes:231:13 in function `combat__missile_hits_wall`");
+            let v_back: Rc<T_level__Sector> = t_index(&(v_l.clone()).f_sectors.clone(), (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "combat.tes:232:22 in function `combat__missile_hits_wall`")).f_sector.clone(), "combat.tes:232:12 in function `combat__missile_hits_wall`");
+            if ((f_std__math__min((v_front.clone()).f_ceiling.clone(), (v_back.clone()).f_ceiling.clone()) < t_add(v_bottom.clone(), 8i64, "combat.tes:233:51 in function `combat__missile_hits_wall`")) || (f_std__math__max((v_front.clone()).f_floor.clone(), (v_back.clone()).f_floor.clone()) > v_bottom.clone())) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// note: Moves every projectile in steps of at most 8 units; one that touches a wall, a target or the player explodes.
+fn f_combat__run_missiles(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("combat.tes:242:8 in function `combat__run_missiles`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let mut v_flying: Rc<Vec<Rc<T_state__Missile>>> = Rc::new(Vec::<Rc<T_state__Missile>>::new());
+    for v_start in t_iter((v_w.clone()).f_missiles.clone()) {
+        t_tick("combat.tes:245:25 in function `combat__run_missiles`");
+        let mut v_m: Rc<T_state__Missile> = v_start.clone();
+        let v_steps: i64 = f_std__math__max(1i64, t_div(t_sub(t_add(f_std__math__max(f_std__math__abs((v_m.clone()).f_dx.clone()), f_std__math__abs((v_m.clone()).f_dy.clone())), f_std__fixed__from_int(8i64), "combat.tes:247:67 in function `combat__run_missiles`"), 1i64, "combat.tes:247:87 in function `combat__run_missiles`"), f_std__fixed__from_int(8i64), "combat.tes:247:92 in function `combat__run_missiles`"));
+        let mut v_hit: bool = false;
+        let mut v_victim: i64 = (-2i64);
+        let mut v_i: i64 = 0i64;
+        while ((v_i.clone() < v_steps.clone()) && (!v_hit.clone())) {
+            t_tick("combat.tes:251:29 in function `combat__run_missiles`");
+            let v_x: i64 = t_add((v_m.clone()).f_x.clone(), t_div((v_m.clone()).f_dx.clone(), v_steps.clone(), "combat.tes:252:20 in function `combat__run_missiles`"), "combat.tes:252:13 in function `combat__run_missiles`");
+            let v_y: i64 = t_add((v_m.clone()).f_y.clone(), t_div((v_m.clone()).f_dy.clone(), v_steps.clone(), "combat.tes:253:20 in function `combat__run_missiles`"), "combat.tes:253:13 in function `combat__run_missiles`");
+            let v_reach_player: i64 = f_std__fixed__from_int(t_add(f_movement__radius(), (v_m.clone()).f_radius.clone(), "combat.tes:254:53 in function `combat__run_missiles`"));
+            if (((((v_m.clone()).f_owner.clone() >= 0i64) && (f_std__math__abs(t_sub(v_x.clone(), ((v_w.clone()).f_player.clone()).f_x.clone(), "combat.tes:255:32 in function `combat__run_missiles`")) < v_reach_player.clone())) && (f_std__math__abs(t_sub(v_y.clone(), ((v_w.clone()).f_player.clone()).f_y.clone(), "combat.tes:255:76 in function `combat__run_missiles`")) < v_reach_player.clone())) && (((v_w.clone()).f_stats.clone()).f_health.clone() > 0i64)) {
+                v_hit = true;
+                v_victim = (-1i64);
+            };
+            if (!v_hit.clone()) {
+                for v_j in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "combat.tes:260:10 in function `combat__run_missiles`")) {
+                    t_tick("combat.tes:260:36 in function `combat__run_missiles`");
+                    let v_t: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_j.clone(), "combat.tes:261:9 in function `combat__run_missiles`");
+                    if (((!v_hit.clone()) && (v_j.clone() != (v_m.clone()).f_owner.clone())) && f_state__is_target(v_t.clone())) {
+                        let v_reach: i64 = f_std__fixed__from_int(t_add(((v_t.clone()).f_info.clone()).f_radius.clone(), (v_m.clone()).f_radius.clone(), "combat.tes:263:42 in function `combat__run_missiles`"));
+                        if ((f_std__math__abs(t_sub(v_x.clone(), (v_t.clone()).f_x.clone(), "combat.tes:264:15 in function `combat__run_missiles`")) < v_reach.clone()) && (f_std__math__abs(t_sub(v_y.clone(), (v_t.clone()).f_y.clone(), "combat.tes:264:45 in function `combat__run_missiles`")) < v_reach.clone())) {
+                            v_hit = true;
+                            v_victim = v_j.clone();
+                        }
+                    }
+                }
+            };
+            if ((!v_hit.clone()) && f_combat__missile_hits_wall(v_w.clone(), v_x.clone(), v_y.clone(), (v_m.clone()).f_z.clone(), (v_m.clone()).f_radius.clone())) {
+                v_hit = true;
+            };
+            if (!v_hit.clone()) {
+                v_m = { let mut t1 = Rc::unwrap_or_clone(v_m); t1.f_x = v_x.clone(); t1.f_y = v_y.clone(); Rc::new(t1) };
+            };
+            v_i = t_add(v_i.clone(), 1i64, "combat.tes:277:7 in function `combat__run_missiles`");
+        }
+        if v_hit.clone() {
+            v_w = f_combat__explode(v_w, v_m.clone(), v_victim.clone());
+        } else {
+            v_flying = t_concat_lists(std::mem::take(&mut v_flying), Rc::new(vec![v_m.clone()]));
+        }
+    }
+    { let t_value = v_flying.clone(); *&mut Rc::make_mut(&mut v_w).f_missiles = t_value; }
+    v_w
+}
+
+fn f_combat__explode(v_world: Rc<T_state__World>, v_m: Rc<T_state__Missile>, v_victim: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:289:4 in function `combat__explode`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_look: Rc<Vec<Rc<String>>> = f_combat__explosion_frames((v_m.clone()).f_sprite.clone());
+    v_w = f_state__add_effect(v_w, t_index(&v_look.clone(), 0i64, "combat.tes:292:29 in function `combat__explode`"), t_index(&v_look.clone(), 1i64, "combat.tes:292:38 in function `combat__explode`"), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), t_sub((v_m.clone()).f_z.clone(), f_std__fixed__from_int(16i64), "combat.tes:292:61 in function `combat__explode`"), 5i64);
+    v_w = f_state__sound_at(v_w, t_index(&v_look.clone(), 2i64, "combat.tes:293:27 in function `combat__explode`"), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+    let v_r: Rc<Vec<i64>> = f_state__roll(v_w.clone(), (v_m.clone()).f_damage_min.clone(), (v_m.clone()).f_damage_max.clone());
+    { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:295:14 in function `combat__explode`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+    if (v_victim.clone() == (-1i64)) {
+        v_w = f_state__hurt_player(v_w, t_index(&v_r.clone(), 0i64, "combat.tes:297:30 in function `combat__explode`"));
+    } else if (v_victim.clone() >= 0i64) {
+        v_w = f_combat__damage_mobj(v_w, v_victim.clone(), t_index(&v_r.clone(), 0i64, "combat.tes:299:32 in function `combat__explode`"));
+    };
+    if (v_m.clone()).f_splash.clone() {
+        v_w = f_combat__splash(v_w, (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), 128i64, (v_m.clone()).f_owner.clone());
+    };
+    v_w
+}
+
+// note: Blast damage around a point: 128 minus the distance (in units) to everything within reach that is not behind a wall, the shooter included, as in the original.
+fn f_combat__splash(v_world: Rc<T_state__World>, v_x: i64, v_y: i64, v_power: i64, v_source: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:308:4 in function `combat__splash`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_d: i64 = t_sub(f_state__distance_units(v_x.clone(), v_y.clone(), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone()), f_movement__radius(), "combat.tes:310:60 in function `combat__splash`");
+    if ((v_d.clone() < v_power.clone()) && (!f_state__blocked(v_w.clone(), v_x.clone(), v_y.clone(), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone()))) {
+        v_w = f_state__hurt_player(v_w, t_sub(v_power.clone(), f_std__math__max(v_d.clone(), 0i64), "combat.tes:312:36 in function `combat__splash`"));
+    };
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "combat.tes:314:10 in function `combat__splash`")) {
+        t_tick("combat.tes:314:36 in function `combat__splash`");
+        let v_t: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "combat.tes:315:9 in function `combat__splash`");
+        if f_state__is_target(v_t.clone()) {
+            let v_td: i64 = t_sub(f_state__distance_units(v_x.clone(), v_y.clone(), (v_t.clone()).f_x.clone(), (v_t.clone()).f_y.clone()), ((v_t.clone()).f_info.clone()).f_radius.clone(), "combat.tes:317:47 in function `combat__splash`");
+            if ((v_td.clone() < v_power.clone()) && (!f_state__blocked(v_w.clone(), v_x.clone(), v_y.clone(), (v_t.clone()).f_x.clone(), (v_t.clone()).f_y.clone()))) {
+                v_w = f_combat__damage_mobj(v_w, v_i.clone(), t_sub(v_power.clone(), f_std__math__max(v_td.clone(), 0i64), "combat.tes:319:33 in function `combat__splash`"));
+            }
+        }
+    }
+    let _ = v_source.clone();
+    v_w
+}
+
+// note: Damage to a monster or barrel. A monster may flinch (pain) and turns on the player; at 0 health it dies and may drop an item. A barrel explodes, hurting what is around it.
+fn f_combat__damage_mobj(v_world: Rc<T_state__World>, v_index: i64, v_damage: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:330:8 in function `combat__damage_mobj`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "combat.tes:332:9 in function `combat__damage_mobj`");
+    if (!f_state__is_target(v_m.clone())) {
+        return v_w
+    };
+    let v_health: i64 = t_sub((v_m.clone()).f_health.clone(), v_damage.clone(), "combat.tes:336:23 in function `combat__damage_mobj`");
+    { let t_place0: i64 = v_index.clone(); let t_value = v_health.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:337:5 in function `combat__damage_mobj`")).f_health = t_value; }
+    if f_state__is_barrel(v_m.clone()) {
+        if (v_health.clone() <= 0i64) {
+            { let t_place0: i64 = v_index.clone(); let t_value = false; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:340:5 in function `combat__damage_mobj`")).f_present = t_value; }
+            v_w = f_state__add_effect(v_w.clone(), t_text("BEXP"), t_text("ABCDE"), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), f_std__fixed__from_int(f_state__sector_floor(v_w.clone(), (v_m.clone()).f_sector.clone())), 5i64);
+            v_w = f_state__sound_at(v_w, t_text("DSBAREXP"), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+            v_w = f_combat__splash(v_w, (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), 128i64, v_index.clone());
+        };
+        return v_w
+    };
+    let v_species: Rc<T_things__Species> = match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
+        T_things__Role::V_Monster(t1) => { let v_s = t1.clone(); v_s.clone() }
+        _ => { return v_w }
+    };
+    if (v_health.clone() <= 0i64) {
+        { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Dead(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:352:5 in function `combat__damage_mobj`")).f_state = t_value; }
+        { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_kills.clone(), 1i64, "combat.tes:353:19 in function `combat__damage_mobj`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_kills = t_value; }
+        v_w = f_state__sound_at(v_w, (v_species.clone()).f_dies.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+        if ((v_species.clone()).f_drop.clone() != 0i64) {
+            let v_info: Rc<T_things__Info> = f_things__info((v_species.clone()).f_drop.clone());
+            { let t_value = t_concat_lists((v_w.clone()).f_mobjs.clone(), Rc::new(vec![Rc::new(T_state__Mobj { f_kind: (v_species.clone()).f_drop.clone(), f_info: v_info.clone(), f_x: (v_m.clone()).f_x.clone(), f_y: (v_m.clone()).f_y.clone(), f_angle: 0i64, f_sector: (v_m.clone()).f_sector.clone(), f_health: 0i64, f_present: true, f_state: Rc::new(T_state__State::V_Idle) })])); *&mut Rc::make_mut(&mut v_w).f_mobjs = t_value; }
+        };
+        return v_w
+    };
+    let v_r: Rc<Vec<i64>> = f_std__rng__byte((v_w.clone()).f_seed.clone());
+    { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:362:14 in function `combat__damage_mobj`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+    if (t_index(&v_r.clone(), 0i64, "combat.tes:363:4 in function `combat__damage_mobj`") < 128i64) {
+        { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Pain(8i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:364:5 in function `combat__damage_mobj`")).f_state = t_value; }
+        v_w = f_state__sound_at(v_w, (v_species.clone()).f_hurt.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+    } else if ((v_m.clone()).f_state.clone() == Rc::new(T_state__State::V_Idle)) {
+        { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Chase(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:367:5 in function `combat__damage_mobj`")).f_state = t_value; }
+    };
+    v_w
+}
+
+// note: Whether a point is in the half of the map a monster faces (it sees 180 degrees).
+fn f_combat__in_front(v_m: Rc<T_state__Mobj>, v_x: i64, v_y: i64, v_trig: Rc<T_geometry__Trig>) -> bool {
+    t_enter("combat.tes:375:4 in function `combat__in_front`");
+    (t_add(t_mul(t_shift_right(t_sub(v_x, (v_m.clone()).f_x.clone(), "combat.tes:376:15 in function `combat__in_front`"), 8i64, "combat.tes:376:1 in function `combat__in_front`"), t_shift_right(t_index(&(v_trig.clone()).f_cosine.clone(), (v_m.clone()).f_angle.clone(), "combat.tes:376:39 in function `combat__in_front`"), 8i64, "combat.tes:376:27 in function `combat__in_front`"), "combat.tes:376:25 in function `combat__in_front`"), t_mul(t_shift_right(t_sub(v_y, (v_m.clone()).f_y.clone(), "combat.tes:376:80 in function `combat__in_front`"), 8i64, "combat.tes:376:66 in function `combat__in_front`"), t_shift_right(t_index(&(v_trig.clone()).f_sine.clone(), (v_m.clone()).f_angle.clone(), "combat.tes:376:104 in function `combat__in_front`"), 8i64, "combat.tes:376:92 in function `combat__in_front`"), "combat.tes:376:90 in function `combat__in_front`"), "combat.tes:376:64 in function `combat__in_front`") > 0i64)
+}
+
+fn f_combat__wake(v_world: Rc<T_state__World>, v_index: i64) -> Rc<T_state__World> {
+    t_enter("combat.tes:379:4 in function `combat__wake`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "combat.tes:381:9 in function `combat__wake`");
+    { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Chase(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:382:5 in function `combat__wake`")).f_state = t_value; }
+    match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
+        T_things__Role::V_Monster(t1) => { let v_s = t1.clone(); {
+            v_w = f_state__sound_at(v_w, (v_s.clone()).f_sight.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+        } }
+        _ => { {
+        } }
+    };
+    v_w
+}
+
+// note: Gunfire wakes idle monsters within 1200 units that have a line of sight to the player, whichever way they face.
+fn f_combat__alert(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("combat.tes:391:8 in function `combat__alert`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "combat.tes:394:10 in function `combat__alert`")) {
+        t_tick("combat.tes:394:36 in function `combat__alert`");
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "combat.tes:395:9 in function `combat__alert`");
+        if (((((v_m.clone()).f_present.clone() && f_state__is_monster(v_m.clone())) && ((v_m.clone()).f_state.clone() == Rc::new(T_state__State::V_Idle))) && (f_state__distance_units((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()) < 1200i64)) && (!f_state__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
+            v_w = f_combat__wake(v_w, v_i.clone());
+        }
+    }
+    v_w
+}
+
+// note: The fine angle from a point towards another: the nearest of 64 directions (std/plane).
+fn f_combat__direction(v_x: i64, v_y: i64, v_to_x: i64, v_to_y: i64, v_trig: Rc<T_geometry__Trig>) -> i64 {
+    t_enter("combat.tes:404:8 in function `combat__direction`");
+    f_std__plane__direction(t_sub(v_to_x, v_x, "combat.tes:404:107 in function `combat__direction`"), t_sub(v_to_y, v_y, "combat.tes:404:117 in function `combat__direction`"), (v_trig.clone()).f_cosine.clone(), (v_trig.clone()).f_sine.clone(), 64i64)
+}
+
+fn f_combat__run_monsters(v_world: Rc<T_state__World>, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("combat.tes:406:8 in function `combat__run_monsters`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "combat.tes:408:10 in function `combat__run_monsters`")) {
+        t_tick("combat.tes:408:36 in function `combat__run_monsters`");
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "combat.tes:409:9 in function `combat__run_monsters`");
+        if ((v_m.clone()).f_present.clone() && f_state__is_monster(v_m.clone())) {
+            v_w = f_combat__think(v_w, v_i.clone(), v_trig.clone());
+        }
+    }
+    v_w
+}
+
+// note: One tic of a monster. Idle monsters look for the player every 4 tics; chasing monsters walk towards the player and sometimes attack. An attack lands after 8 tics: a bite, an instant shot, or a projectile that has to fly.
+fn f_combat__think(v_world: Rc<T_state__World>, v_index: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("combat.tes:418:4 in function `combat__think`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "combat.tes:420:9 in function `combat__think`");
+    let v_species: Rc<T_things__Species> = match &*(((v_m.clone()).f_info.clone()).f_role.clone()) {
+        T_things__Role::V_Monster(t1) => { let v_s = t1.clone(); v_s.clone() }
+        _ => { return v_w }
+    };
+    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
+    let v_distance: i64 = f_state__distance_units((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone());
+    match &*((v_m.clone()).f_state.clone()) {
+        T_state__State::V_Idle => { {
+            if (((((t_rem(t_add((v_w.clone()).f_tic.clone(), v_index.clone(), "combat.tes:429:11 in function `combat__think`"), 4i64, "combat.tes:429:20 in function `combat__think`") == 0i64) && (v_distance.clone() < 2048i64)) && (((v_w.clone()).f_stats.clone()).f_health.clone() > 0i64)) && ((v_distance.clone() < 64i64) || f_combat__in_front(v_m.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone()))) && (!f_state__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
+                v_w = f_combat__wake(v_w, v_index.clone());
+            }
+        } }
+        T_state__State::V_Chase(t2) => { let v_stuck = t2.clone(); {
+            if (((v_w.clone()).f_stats.clone()).f_health.clone() <= 0i64) {
+                { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Idle); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:435:5 in function `combat__think`")).f_state = t_value; }
+                return v_w
+            };
+            v_w = f_combat__chase_step(v_w, v_index.clone(), v_stuck.clone(), v_trig.clone());
+            let v_r: Rc<Vec<i64>> = f_std__rng__byte((v_w.clone()).f_seed.clone());
+            { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:440:14 in function `combat__think`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+            let v_reach: i64 = t_add(t_add(((v_m.clone()).f_info.clone()).f_radius.clone(), f_movement__radius(), "combat.tes:441:27 in function `combat__think`"), 20i64, "combat.tes:441:47 in function `combat__think`");
+            let v_wants: bool = if (v_species.clone()).f_melee.clone() {
+                ((v_distance.clone() < v_reach.clone()) && (t_index(&v_r.clone(), 0i64, "combat.tes:442:53 in function `combat__think`") < 64i64))
+            } else {
+                ((v_distance.clone() < 1024i64) && (t_index(&v_r.clone(), 0i64, "combat.tes:442:92 in function `combat__think`") < 4i64))
+            };
+            if (v_wants.clone() && (!f_state__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()))) {
+                { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Attack(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:444:5 in function `combat__think`")).f_state = t_value; }
+            }
+        } }
+        T_state__State::V_Attack(t3) => { let v_time = t3.clone(); {
+            { let t_place0: i64 = v_index.clone(); let t_value = f_combat__direction((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:448:5 in function `combat__think`")).f_angle = t_value; }
+            if (v_time.clone() == 8i64) {
+                v_w = f_combat__attack(v_w, v_index.clone(), v_species.clone(), v_distance.clone(), v_trig.clone());
+            };
+            { let t_place0: i64 = v_index.clone(); let t_value = if (v_time.clone() >= 16i64) {
+                Rc::new(T_state__State::V_Chase(0i64))
+            } else {
+                Rc::new(T_state__State::V_Attack(t_add(v_time.clone(), 1i64, "combat.tes:452:98 in function `combat__think`")))
+            }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:452:5 in function `combat__think`")).f_state = t_value; }
+        } }
+        T_state__State::V_Pain(t4) => { let v_time = t4.clone(); {
+            { let t_place0: i64 = v_index.clone(); let t_value = if (v_time.clone() <= 1i64) {
+                Rc::new(T_state__State::V_Chase(0i64))
+            } else {
+                Rc::new(T_state__State::V_Pain(t_sub(v_time.clone(), 1i64, "combat.tes:454:110 in function `combat__think`")))
+            }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:454:20 in function `combat__think`")).f_state = t_value; }
+        } }
+        T_state__State::V_Dead(t5) => { let v_time = t5.clone(); {
+            { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Dead(f_std__math__min(t_add(v_time.clone(), 1i64, "combat.tes:455:63 in function `combat__think`"), 1000i64))); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:455:20 in function `combat__think`")).f_state = t_value; }
+        } }
+    };
+    v_w
+}
+
+fn f_combat__attack(v_world: Rc<T_state__World>, v_index: i64, v_species: Rc<T_things__Species>, v_distance: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("combat.tes:460:4 in function `combat__attack`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "combat.tes:462:9 in function `combat__attack`");
+    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
+    if f_state__blocked(v_w.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()) {
+        return v_w
+    };
+    let v_angle: i64 = f_combat__direction((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone());
+    if (v_species.clone()).f_melee.clone() {
+        if (v_distance.clone() < t_add(t_add(((v_m.clone()).f_info.clone()).f_radius.clone(), f_movement__radius(), "combat.tes:469:29 in function `combat__attack`"), 24i64, "combat.tes:469:49 in function `combat__attack`")) {
+            let v_r: Rc<Vec<i64>> = f_state__roll(v_w.clone(), (v_species.clone()).f_damage_min.clone(), (v_species.clone()).f_damage_max.clone());
+            { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:471:14 in function `combat__attack`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+            v_w = f_state__sound_at(v_w, t_text("DSSGTATK"), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+            v_w = f_state__hurt_player(v_w, t_index(&v_r.clone(), 0i64, "combat.tes:473:30 in function `combat__attack`"));
+        };
+        return v_w
+    };
+    if ((v_species.clone()).f_missile.clone() != t_text("")) {
+        v_w = f_state__sound_at(v_w, t_text("DSFIRSHT"), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+        let v_speed: i64 = if ((v_species.clone()).f_missile.clone() == t_text("BAL7")) {
+            15i64
+        } else {
+            10i64
+        };
+        return f_combat__launch(v_w.clone(), v_trig, (v_species.clone()).f_missile.clone(), (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), f_std__fixed__from_int(t_add(f_state__sector_floor(v_w.clone(), (v_m.clone()).f_sector.clone()), 32i64, "combat.tes:480:98 in function `combat__attack`")), v_angle, v_speed, (v_species.clone()).f_damage_min.clone(), (v_species.clone()).f_damage_max.clone(), 6i64, false, v_index)
+    };
+    v_w = f_state__sound_at(v_w, if ((v_species.clone()).f_name.clone() == t_text("shotgun guy")) {
+        t_text("DSSHOTGN")
+    } else {
+        t_text("DSPISTOL")
+    }, (v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone());
+    let v_r: Rc<Vec<i64>> = f_std__rng__byte((v_w.clone()).f_seed.clone());
+    { let t_value = t_index(&v_r.clone(), 1i64, "combat.tes:485:14 in function `combat__attack`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+    if (t_index(&v_r.clone(), 0i64, "combat.tes:486:4 in function `combat__attack`") < f_std__math__clamp(t_sub(192i64, t_div(v_distance.clone(), 4i64, "combat.tes:486:37 in function `combat__attack`"), "combat.tes:486:26 in function `combat__attack`"), 40i64, 192i64)) {
+        let v_d: Rc<Vec<i64>> = f_state__roll(v_w.clone(), (v_species.clone()).f_damage_min.clone(), (v_species.clone()).f_damage_max.clone());
+        { let t_value = t_index(&v_d.clone(), 1i64, "combat.tes:488:14 in function `combat__attack`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+        v_w = f_state__hurt_player(v_w, t_index(&v_d.clone(), 0i64, "combat.tes:489:30 in function `combat__attack`"));
+    };
+    v_w
+}
+
+// note: Moves a chasing monster towards the player at its speed. When walls or things block the way it tries each axis alone, then, for a while, a sideways direction.
+fn f_combat__chase_step(v_world: Rc<T_state__World>, v_index: i64, v_stuck: i64, v_trig: Rc<T_geometry__Trig>) -> Rc<T_state__World> {
+    t_enter("combat.tes:495:4 in function `combat__chase_step`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_index.clone(), "combat.tes:497:9 in function `combat__chase_step`");
+    let v_p: Rc<T_movement__Player> = (v_w.clone()).f_player.clone();
+    let v_dx: i64 = t_sub((v_p.clone()).f_x.clone(), (v_m.clone()).f_x.clone(), "combat.tes:499:14 in function `combat__chase_step`");
+    let v_dy: i64 = t_sub((v_p.clone()).f_y.clone(), (v_m.clone()).f_y.clone(), "combat.tes:500:14 in function `combat__chase_step`");
+    let v_length: i64 = f_std__math__max(1i64, f_state__distance_units((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone()));
+    let v_speed: i64 = f_std__fixed__from_int(((v_m.clone()).f_info.clone()).f_speed.clone());
+    let mut v_step_x: i64 = t_mul(t_div(v_dx.clone(), v_length.clone(), "combat.tes:503:17 in function `combat__chase_step`"), ((v_m.clone()).f_info.clone()).f_speed.clone(), "combat.tes:503:26 in function `combat__chase_step`");
+    let mut v_step_y: i64 = t_mul(t_div(v_dy.clone(), v_length.clone(), "combat.tes:504:17 in function `combat__chase_step`"), ((v_m.clone()).f_info.clone()).f_speed.clone(), "combat.tes:504:26 in function `combat__chase_step`");
+    if (v_stuck.clone() > 0i64) {
+        let v_old_x: i64 = v_step_x.clone();
+        v_step_x = t_neg(v_step_y.clone(), "combat.tes:507:14 in function `combat__chase_step`");
+        v_step_y = v_old_x.clone();
+    };
+    let v_floor: i64 = f_state__sector_floor(v_w.clone(), (v_m.clone()).f_sector.clone());
+    let v_reach: i64 = f_std__fixed__from_int(t_add(((v_m.clone()).f_info.clone()).f_radius.clone(), f_movement__radius(), "combat.tes:511:42 in function `combat__chase_step`"));
+    for v_attempt in t_iter(Rc::new(vec![Rc::new(vec![v_step_x.clone(), v_step_y.clone()]), Rc::new(vec![v_step_x.clone(), 0i64]), Rc::new(vec![0i64, v_step_y.clone()]), Rc::new(vec![f_std__math__clamp(v_step_x.clone(), t_neg(v_speed.clone(), "combat.tes:512:81 in function `combat__chase_step`"), v_speed.clone()), 0i64])])) {
+        t_tick("combat.tes:512:101 in function `combat__chase_step`");
+        let v_x: i64 = t_add((v_m.clone()).f_x.clone(), t_index(&v_attempt.clone(), 0i64, "combat.tes:513:15 in function `combat__chase_step`"), "combat.tes:513:13 in function `combat__chase_step`");
+        let v_y: i64 = t_add((v_m.clone()).f_y.clone(), t_index(&v_attempt.clone(), 1i64, "combat.tes:514:15 in function `combat__chase_step`"), "combat.tes:514:13 in function `combat__chase_step`");
+        let v_near_player: bool = ((f_std__math__abs(t_sub(v_x.clone(), (v_p.clone()).f_x.clone(), "combat.tes:515:30 in function `combat__chase_step`")) < v_reach.clone()) && (f_std__math__abs(t_sub(v_y.clone(), (v_p.clone()).f_y.clone(), "combat.tes:515:60 in function `combat__chase_step`")) < v_reach.clone()));
+        if (((((t_index(&v_attempt.clone(), 0i64, "combat.tes:516:5 in function `combat__chase_step`") != 0i64) || (t_index(&v_attempt.clone(), 1i64, "combat.tes:516:24 in function `combat__chase_step`") != 0i64)) && (!v_near_player.clone())) && f_movement__fits_radius((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone(), v_floor.clone(), ((v_m.clone()).f_info.clone()).f_radius.clone())) && (!f_state__hits_thing(v_w.clone(), v_x.clone(), v_y.clone(), ((v_m.clone()).f_info.clone()).f_radius.clone(), v_index.clone()))) {
+            { let t_place0: i64 = v_index.clone(); let t_value = v_x.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:517:5 in function `combat__chase_step`")).f_x = t_value; }
+            { let t_place0: i64 = v_index.clone(); let t_value = v_y.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:518:5 in function `combat__chase_step`")).f_y = t_value; }
+            { let t_place0: i64 = v_index.clone(); let t_value = f_geometry__sector_at((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:519:5 in function `combat__chase_step`")).f_sector = t_value; }
+            { let t_place0: i64 = v_index.clone(); let t_value = f_combat__direction((v_m.clone()).f_x.clone(), (v_m.clone()).f_y.clone(), (v_p.clone()).f_x.clone(), (v_p.clone()).f_y.clone(), v_trig.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:520:5 in function `combat__chase_step`")).f_angle = t_value; }
+            { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Chase(f_std__math__max(t_sub(v_stuck.clone(), 1i64, "combat.tes:521:50 in function `combat__chase_step`"), 0i64))); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:521:5 in function `combat__chase_step`")).f_state = t_value; }
+            return v_w
+        }
+    }
+    { let t_place0: i64 = v_index.clone(); let t_value = Rc::new(T_state__State::V_Chase(if (v_stuck.clone() > 0i64) {
+        t_sub(v_stuck.clone(), 1i64, "combat.tes:525:56 in function `combat__chase_step`")
+    } else {
+        16i64
+    })); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "combat.tes:525:5 in function `combat__chase_step`")).f_state = t_value; }
+    v_w
 }
 
 fn f_things__decoration(v_sprite: Rc<String>, v_frames: Rc<String>) -> Rc<T_things__Info> {
-    t_enter("things.tes:45:4 in function `things__decoration`");
-    Rc::new(T_things__Info { f_sprite: v_sprite.clone(), f_frames: v_frames.clone(), f_radius: 16i64, f_height: 16i64, f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Decoration) })
+    t_enter("things.tes:53:4 in function `things__decoration`");
+    Rc::new(T_things__Info { f_sprite: v_sprite, f_frames: v_frames, f_radius: 16i64, f_height: 16i64, f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Decoration) })
 }
 
 fn f_things__obstacle(v_sprite: Rc<String>, v_frames: Rc<String>, v_radius: i64, v_height: i64) -> Rc<T_things__Info> {
-    t_enter("things.tes:47:4 in function `things__obstacle`");
-    Rc::new(T_things__Info { f_sprite: v_sprite.clone(), f_frames: v_frames.clone(), f_radius: v_radius.clone(), f_height: v_height.clone(), f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Obstacle) })
+    t_enter("things.tes:55:4 in function `things__obstacle`");
+    Rc::new(T_things__Info { f_sprite: v_sprite, f_frames: v_frames, f_radius: v_radius, f_height: v_height, f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Obstacle) })
 }
 
 fn f_things__item(v_sprite: Rc<String>, v_frames: Rc<String>, v_effect: Rc<T_things__Pickup>) -> Rc<T_things__Info> {
-    t_enter("things.tes:49:4 in function `things__item`");
-    Rc::new(T_things__Info { f_sprite: v_sprite.clone(), f_frames: v_frames.clone(), f_radius: 20i64, f_height: 16i64, f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Item(v_effect.clone())) })
+    t_enter("things.tes:57:4 in function `things__item`");
+    Rc::new(T_things__Info { f_sprite: v_sprite, f_frames: v_frames, f_radius: 20i64, f_height: 16i64, f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Item(v_effect)) })
 }
 
 fn f_things__monster(v_sprite: Rc<String>, v_radius: i64, v_height: i64, v_health: i64, v_speed: i64, v_species: Rc<T_things__Species>) -> Rc<T_things__Info> {
-    t_enter("things.tes:51:4 in function `things__monster`");
-    Rc::new(T_things__Info { f_sprite: v_sprite.clone(), f_frames: (v_species.clone()).f_walk.clone(), f_radius: v_radius.clone(), f_height: v_height.clone(), f_health: v_health.clone(), f_speed: v_speed.clone(), f_role: Rc::new(T_things__Role::V_Monster(v_species.clone())) })
+    t_enter("things.tes:59:4 in function `things__monster`");
+    Rc::new(T_things__Info { f_sprite: v_sprite, f_frames: (v_species.clone()).f_walk.clone(), f_radius: v_radius, f_height: v_height, f_health: v_health, f_speed: v_speed, f_role: Rc::new(T_things__Role::V_Monster(v_species.clone())) })
 }
 
 fn f_things__species(v_name: Rc<String>, v_attack: Rc<String>, v_pain: Rc<String>, v_death: Rc<String>, v_melee: bool, v_low: i64, v_high: i64) -> Rc<T_things__Species> {
-    t_enter("things.tes:53:4 in function `things__species`");
-    Rc::new(T_things__Species { f_name: v_name.clone(), f_walk: t_text("ABCD"), f_attack: v_attack.clone(), f_pain: v_pain.clone(), f_death: v_death.clone(), f_melee: v_melee.clone(), f_damage_min: v_low.clone(), f_damage_max: v_high.clone() })
+    t_enter("things.tes:61:4 in function `things__species`");
+    Rc::new(T_things__Species { f_name: v_name, f_walk: t_text("ABCD"), f_attack: v_attack, f_pain: v_pain, f_death: v_death, f_melee: v_melee, f_damage_min: v_low, f_damage_max: v_high, f_missile: t_text(""), f_sight: t_text("DSPOSIT1"), f_hurt: t_text("DSPOPAIN"), f_dies: t_text("DSPODTH1"), f_drop: 0i64 })
 }
 
 fn f_things__hidden() -> Rc<T_things__Info> {
-    t_enter("things.tes:55:8 in function `things__hidden`");
+    t_enter("things.tes:63:8 in function `things__hidden`");
     Rc::new(T_things__Info { f_sprite: t_text(""), f_frames: t_text("A"), f_radius: 0i64, f_height: 0i64, f_health: 0i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Hidden) })
 }
 
 fn f_things__info(v_kind: i64) -> Rc<T_things__Info> {
-    t_enter("things.tes:57:8 in function `things__info`");
-    match v_kind.clone() {
-        3004 => { f_things__monster(t_text("POSS"), 20i64, 56i64, 20i64, 8i64, f_things__species(t_text("zombieman"), t_text("EF"), t_text("G"), t_text("HIJKL"), false, 3i64, 15i64)) }
-        9 => { f_things__monster(t_text("SPOS"), 20i64, 56i64, 30i64, 8i64, f_things__species(t_text("shotgun guy"), t_text("EF"), t_text("G"), t_text("HIJKL"), false, 9i64, 30i64)) }
-        3001 => { f_things__monster(t_text("TROO"), 20i64, 56i64, 60i64, 8i64, f_things__species(t_text("imp"), t_text("EFG"), t_text("H"), t_text("IJKLM"), false, 3i64, 24i64)) }
-        3002 => { f_things__monster(t_text("SARG"), 30i64, 56i64, 150i64, 10i64, f_things__species(t_text("demon"), t_text("EFG"), t_text("H"), t_text("IJKLMN"), true, 4i64, 40i64)) }
-        58 => { f_things__monster(t_text("SARG"), 30i64, 56i64, 150i64, 10i64, f_things__species(t_text("spectre"), t_text("EFG"), t_text("H"), t_text("IJKLMN"), true, 4i64, 40i64)) }
-        65 => { f_things__monster(t_text("CPOS"), 20i64, 56i64, 70i64, 8i64, f_things__species(t_text("chaingunner"), t_text("EF"), t_text("G"), t_text("HIJKLMN"), false, 3i64, 15i64)) }
-        3006 => { f_things__monster(t_text("SKUL"), 16i64, 56i64, 100i64, 8i64, f_things__species(t_text("lost soul"), t_text("CD"), t_text("E"), t_text("FGHIJK"), true, 3i64, 24i64)) }
-        3005 => { f_things__monster(t_text("HEAD"), 31i64, 56i64, 400i64, 8i64, f_things__species(t_text("cacodemon"), t_text("BCD"), t_text("E"), t_text("GHIJKL"), false, 5i64, 40i64)) }
-        3003 => { f_things__monster(t_text("BOSS"), 24i64, 64i64, 1000i64, 8i64, f_things__species(t_text("baron"), t_text("EFG"), t_text("H"), t_text("IJKLMNO"), false, 8i64, 64i64)) }
+    t_enter("things.tes:65:8 in function `things__info`");
+    match v_kind {
+        3004 => { f_things__monster(t_text("POSS"), 20i64, 56i64, 20i64, 8i64, { let mut t1 = Rc::unwrap_or_clone(f_things__species(t_text("zombieman"), t_text("EF"), t_text("G"), t_text("HIJKL"), false, 3i64, 15i64)); t1.f_drop = 2007i64; Rc::new(t1) }) }
+        9 => { f_things__monster(t_text("SPOS"), 20i64, 56i64, 30i64, 8i64, { let mut t2 = Rc::unwrap_or_clone(f_things__species(t_text("shotgun guy"), t_text("EF"), t_text("G"), t_text("HIJKL"), false, 9i64, 30i64)); t2.f_sight = t_text("DSPOSIT2"); t2.f_dies = t_text("DSPODTH2"); t2.f_drop = 2001i64; Rc::new(t2) }) }
+        3001 => { f_things__monster(t_text("TROO"), 20i64, 56i64, 60i64, 8i64, { let mut t3 = Rc::unwrap_or_clone(f_things__species(t_text("imp"), t_text("EFG"), t_text("H"), t_text("IJKLM"), false, 3i64, 24i64)); t3.f_missile = t_text("BAL1"); t3.f_sight = t_text("DSBGSIT1"); t3.f_hurt = t_text("DSPOPAIN"); t3.f_dies = t_text("DSBGDTH1"); Rc::new(t3) }) }
+        3002 => { f_things__monster(t_text("SARG"), 30i64, 56i64, 150i64, 10i64, { let mut t4 = Rc::unwrap_or_clone(f_things__species(t_text("demon"), t_text("EFG"), t_text("H"), t_text("IJKLMN"), true, 4i64, 40i64)); t4.f_sight = t_text("DSSGTSIT"); t4.f_hurt = t_text("DSDMPAIN"); t4.f_dies = t_text("DSSGTDTH"); Rc::new(t4) }) }
+        58 => { f_things__monster(t_text("SARG"), 30i64, 56i64, 150i64, 10i64, { let mut t5 = Rc::unwrap_or_clone(f_things__species(t_text("spectre"), t_text("EFG"), t_text("H"), t_text("IJKLMN"), true, 4i64, 40i64)); t5.f_sight = t_text("DSSGTSIT"); t5.f_hurt = t_text("DSDMPAIN"); t5.f_dies = t_text("DSSGTDTH"); Rc::new(t5) }) }
+        65 => { f_things__monster(t_text("CPOS"), 20i64, 56i64, 70i64, 8i64, { let mut t6 = Rc::unwrap_or_clone(f_things__species(t_text("chaingunner"), t_text("EF"), t_text("G"), t_text("HIJKLMN"), false, 3i64, 15i64)); t6.f_sight = t_text("DSPOSIT2"); t6.f_dies = t_text("DSPODTH2"); t6.f_drop = 2002i64; Rc::new(t6) }) }
+        3006 => { f_things__monster(t_text("SKUL"), 16i64, 56i64, 100i64, 8i64, { let mut t7 = Rc::unwrap_or_clone(f_things__species(t_text("lost soul"), t_text("CD"), t_text("E"), t_text("FGHIJK"), true, 3i64, 24i64)); t7.f_sight = t_text("DSSKLATK"); t7.f_hurt = t_text("DSDMPAIN"); t7.f_dies = t_text("DSFIRXPL"); Rc::new(t7) }) }
+        3005 => { f_things__monster(t_text("HEAD"), 31i64, 56i64, 400i64, 8i64, { let mut t8 = Rc::unwrap_or_clone(f_things__species(t_text("cacodemon"), t_text("BCD"), t_text("E"), t_text("GHIJKL"), false, 5i64, 40i64)); t8.f_missile = t_text("BAL2"); t8.f_sight = t_text("DSCACSIT"); t8.f_hurt = t_text("DSDMPAIN"); t8.f_dies = t_text("DSCACDTH"); Rc::new(t8) }) }
+        3003 => { f_things__monster(t_text("BOSS"), 24i64, 64i64, 1000i64, 8i64, { let mut t9 = Rc::unwrap_or_clone(f_things__species(t_text("baron"), t_text("EFG"), t_text("H"), t_text("IJKLMNO"), false, 8i64, 64i64)); t9.f_missile = t_text("BAL7"); t9.f_sight = t_text("DSBRSSIT"); t9.f_hurt = t_text("DSDMPAIN"); t9.f_dies = t_text("DSBRSDTH"); Rc::new(t9) }) }
         2011 => { f_things__item(t_text("STIM"), t_text("A"), Rc::new(T_things__Pickup::V_Health(10i64, 100i64))) }
         2012 => { f_things__item(t_text("MEDI"), t_text("A"), Rc::new(T_things__Pickup::V_Health(25i64, 100i64))) }
         2014 => { f_things__item(t_text("BON1"), t_text("ABCDCB"), Rc::new(T_things__Pickup::V_Health(1i64, 200i64))) }
         2013 => { f_things__item(t_text("SOUL"), t_text("ABCDCB"), Rc::new(T_things__Pickup::V_Health(100i64, 200i64))) }
+        83 => { f_things__item(t_text("MEGA"), t_text("ABCD"), Rc::new(T_things__Pickup::V_Health(200i64, 200i64))) }
         2015 => { f_things__item(t_text("BON2"), t_text("ABCDCB"), Rc::new(T_things__Pickup::V_Armor(1i64, 200i64))) }
         2018 => { f_things__item(t_text("ARM1"), t_text("AB"), Rc::new(T_things__Pickup::V_SetArmor(100i64))) }
         2019 => { f_things__item(t_text("ARM2"), t_text("AB"), Rc::new(T_things__Pickup::V_SetArmor(200i64))) }
-        2007 => { f_things__item(t_text("CLIP"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(10i64))) }
-        2048 => { f_things__item(t_text("AMMO"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(50i64))) }
-        2008 => { f_things__item(t_text("SHEL"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(4i64))) }
-        2049 => { f_things__item(t_text("SBOX"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(20i64))) }
-        2010 => { f_things__item(t_text("ROCK"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(1i64))) }
-        2046 => { f_things__item(t_text("BROK"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(5i64))) }
-        2047 => { f_things__item(t_text("CELL"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(20i64))) }
-        17 => { f_things__item(t_text("CELP"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(100i64))) }
-        8 => { f_things__item(t_text("BPAK"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(20i64))) }
+        2007 => { f_things__item(t_text("CLIP"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(0i64, 10i64))) }
+        2048 => { f_things__item(t_text("AMMO"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(0i64, 50i64))) }
+        2008 => { f_things__item(t_text("SHEL"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(1i64, 4i64))) }
+        2049 => { f_things__item(t_text("SBOX"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(1i64, 20i64))) }
+        2010 => { f_things__item(t_text("ROCK"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(2i64, 1i64))) }
+        2046 => { f_things__item(t_text("BROK"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(2i64, 5i64))) }
+        2047 => { f_things__item(t_text("CELL"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(3i64, 20i64))) }
+        17 => { f_things__item(t_text("CELP"), t_text("A"), Rc::new(T_things__Pickup::V_Ammo(3i64, 100i64))) }
+        8 => { f_things__item(t_text("BPAK"), t_text("A"), Rc::new(T_things__Pickup::V_Backpack)) }
         5 => { f_things__item(t_text("BKEY"), t_text("AB"), Rc::new(T_things__Pickup::V_Key(t_text("blue")))) }
         6 => { f_things__item(t_text("YKEY"), t_text("AB"), Rc::new(T_things__Pickup::V_Key(t_text("yellow")))) }
         13 => { f_things__item(t_text("RKEY"), t_text("AB"), Rc::new(T_things__Pickup::V_Key(t_text("red")))) }
         40 => { f_things__item(t_text("BSKU"), t_text("AB"), Rc::new(T_things__Pickup::V_Key(t_text("blue")))) }
         39 => { f_things__item(t_text("YSKU"), t_text("AB"), Rc::new(T_things__Pickup::V_Key(t_text("yellow")))) }
         38 => { f_things__item(t_text("RSKU"), t_text("AB"), Rc::new(T_things__Pickup::V_Key(t_text("red")))) }
-        2001 => { f_things__item(t_text("SHOT"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(t_text("shotgun"), 8i64))) }
-        2002 => { f_things__item(t_text("MGUN"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(t_text("chaingun"), 20i64))) }
-        2003 => { f_things__item(t_text("LAUN"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(t_text("rocket launcher"), 2i64))) }
-        2004 => { f_things__item(t_text("PLAS"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(t_text("plasma gun"), 40i64))) }
-        2005 => { f_things__item(t_text("CSAW"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(t_text("chainsaw"), 0i64))) }
-        2006 => { f_things__item(t_text("BFUG"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(t_text("BFG"), 40i64))) }
-        2022 => { f_things__item(t_text("PINV"), t_text("ABCD"), Rc::new(T_things__Pickup::V_Other(t_text("invulnerability")))) }
-        2023 => { f_things__item(t_text("PSTR"), t_text("A"), Rc::new(T_things__Pickup::V_Other(t_text("berserk")))) }
-        2024 => { f_things__item(t_text("PINS"), t_text("ABCD"), Rc::new(T_things__Pickup::V_Other(t_text("partial invisibility")))) }
-        2025 => { f_things__item(t_text("SUIT"), t_text("A"), Rc::new(T_things__Pickup::V_Other(t_text("radiation suit")))) }
-        2026 => { f_things__item(t_text("PMAP"), t_text("ABCDCB"), Rc::new(T_things__Pickup::V_Other(t_text("computer map")))) }
-        2045 => { f_things__item(t_text("PVIS"), t_text("AB"), Rc::new(T_things__Pickup::V_Other(t_text("light amplification")))) }
-        2035 => { f_things__obstacle(t_text("BAR1"), t_text("AB"), 10i64, 42i64) }
+        2001 => { f_things__item(t_text("SHOT"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(2i64, 1i64, 8i64))) }
+        2002 => { f_things__item(t_text("MGUN"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(3i64, 0i64, 20i64))) }
+        2003 => { f_things__item(t_text("LAUN"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(4i64, 2i64, 2i64))) }
+        2004 => { f_things__item(t_text("PLAS"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(5i64, 3i64, 40i64))) }
+        2005 => { f_things__item(t_text("CSAW"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(7i64, 0i64, 0i64))) }
+        2006 => { f_things__item(t_text("BFUG"), t_text("A"), Rc::new(T_things__Pickup::V_Weapon(6i64, 3i64, 40i64))) }
+        2022 => { f_things__item(t_text("PINV"), t_text("ABCD"), Rc::new(T_things__Pickup::V_Power(t_text("invulnerability"), 1050i64))) }
+        2023 => { f_things__item(t_text("PSTR"), t_text("A"), Rc::new(T_things__Pickup::V_Power(t_text("berserk"), 0i64))) }
+        2024 => { f_things__item(t_text("PINS"), t_text("ABCD"), Rc::new(T_things__Pickup::V_Power(t_text("partial invisibility"), 2100i64))) }
+        2025 => { f_things__item(t_text("SUIT"), t_text("A"), Rc::new(T_things__Pickup::V_Power(t_text("radiation suit"), 2100i64))) }
+        2026 => { f_things__item(t_text("PMAP"), t_text("ABCDCB"), Rc::new(T_things__Pickup::V_Power(t_text("computer map"), 0i64))) }
+        2045 => { f_things__item(t_text("PVIS"), t_text("AB"), Rc::new(T_things__Pickup::V_Power(t_text("light amplification"), 4200i64))) }
+        2035 => { Rc::new(T_things__Info { f_sprite: t_text("BAR1"), f_frames: t_text("AB"), f_radius: 10i64, f_height: 42i64, f_health: 20i64, f_speed: 0i64, f_role: Rc::new(T_things__Role::V_Barrel) }) }
         2028 => { f_things__obstacle(t_text("COLU"), t_text("A"), 16i64, 48i64) }
         43 => { f_things__obstacle(t_text("TRE1"), t_text("A"), 16i64, 56i64) }
         47 => { f_things__obstacle(t_text("SMIT"), t_text("A"), 16i64, 56i64) }
@@ -7221,8 +8893,42 @@ fn f_things__info(v_kind: i64) -> Rc<T_things__Info> {
 }
 
 // note: Whether a THINGS entry appears at a skill level (0 to 4) in single player: flag 1 for the two easiest, 2 for the middle and 4 for the two hardest; not flag 16 (multiplayer only), and not a player start.
+// note: The weapon slot names, in slot order.
+fn f_things__weapon_name(v_slot: i64) -> Rc<String> {
+    t_enter("things.tes:177:8 in function `things__weapon_name`");
+    t_index(&Rc::new(vec![t_text("fist"), t_text("pistol"), t_text("shotgun"), t_text("chaingun"), t_text("rocket launcher"), t_text("plasma gun"), t_text("BFG 9000"), t_text("chainsaw")]), v_slot, "things.tes:177:41 in function `things__weapon_name`")
+}
+
+// note: Weapon sprites (on screen) and their flashes, by slot.
+fn f_things__weapon_sprite(v_slot: i64) -> Rc<String> {
+    t_enter("things.tes:180:8 in function `things__weapon_sprite`");
+    t_index(&Rc::new(vec![t_text("PUNG"), t_text("PISG"), t_text("SHTG"), t_text("CHGG"), t_text("MISG"), t_text("PLSG"), t_text("BFGG"), t_text("SAWG")]), v_slot, "things.tes:180:43 in function `things__weapon_sprite`")
+}
+
+fn f_things__weapon_flash(v_slot: i64) -> Rc<String> {
+    t_enter("things.tes:182:8 in function `things__weapon_flash`");
+    t_index(&Rc::new(vec![t_text(""), t_text("PISF"), t_text("SHTF"), t_text("CHGF"), t_text("MISF"), t_text("PLSF"), t_text("BFGF"), t_text("")]), v_slot, "things.tes:182:42 in function `things__weapon_flash`")
+}
+
+// note: The sprite frames a weapon shows while firing, over its whole cooldown.
+fn f_things__weapon_frames(v_slot: i64) -> Rc<String> {
+    t_enter("things.tes:185:8 in function `things__weapon_frames`");
+    t_index(&Rc::new(vec![t_text("BCDCB"), t_text("ABCB"), t_text("ABCDCB"), t_text("AB"), t_text("AB"), t_text("AB"), t_text("ABC"), t_text("AB")]), v_slot, "things.tes:185:43 in function `things__weapon_frames`")
+}
+
+// note: Ammunition kind used by a weapon slot, or -1 (fist, chainsaw).
+fn f_things__ammo_kind(v_slot: i64) -> i64 {
+    t_enter("things.tes:188:8 in function `things__ammo_kind`");
+    t_index(&Rc::new(vec![(-1i64), 0i64, 1i64, 0i64, 2i64, 3i64, 3i64, (-1i64)]), v_slot, "things.tes:188:38 in function `things__ammo_kind`")
+}
+
+fn f_things__ammo_name(v_kind: i64) -> Rc<String> {
+    t_enter("things.tes:190:8 in function `things__ammo_name`");
+    t_index(&Rc::new(vec![t_text("bullets"), t_text("shells"), t_text("rockets"), t_text("cells")]), v_kind, "things.tes:190:39 in function `things__ammo_name`")
+}
+
 fn f_things__spawns_at(v_kind: i64, v_flags: i64, v_skill: i64) -> bool {
-    t_enter("things.tes:167:8 in function `things__spawns_at`");
+    t_enter("things.tes:192:8 in function `things__spawns_at`");
     let v_wanted: i64 = if (v_skill.clone() <= 1i64) {
         1i64
     } else if (v_skill.clone() == 2i64) {
@@ -7230,7 +8936,680 @@ fn f_things__spawns_at(v_kind: i64, v_flags: i64, v_skill: i64) -> bool {
     } else {
         4i64
     };
-    ((((((((v_flags.clone() & v_wanted.clone()) != 0i64) && ((v_flags.clone() & 16i64) == 0i64)) && (v_kind.clone() != 1i64)) && (v_kind.clone() != 2i64)) && (v_kind.clone() != 3i64)) && (v_kind.clone() != 4i64)) && (v_kind.clone() != 11i64))
+    ((((((((v_flags.clone() & v_wanted) != 0i64) && ((v_flags.clone() & 16i64) == 0i64)) && (v_kind.clone() != 1i64)) && (v_kind.clone() != 2i64)) && (v_kind.clone() != 3i64)) && (v_kind.clone() != 4i64)) && (v_kind.clone() != 11i64))
+}
+
+// note: Manual doors, opened from the side facing the player; they act on the sector behind the line.
+fn f_sectors__is_manual_door(v_special: i64) -> bool {
+    t_enter("sectors.tes:15:4 in function `sectors__is_manual_door`");
+    t_contains(&Rc::new(vec![1i64, 26i64, 27i64, 28i64, 31i64, 32i64, 33i64, 34i64, 117i64, 118i64]), &v_special)
+}
+
+fn f_sectors__is_walk_special(v_special: i64) -> bool {
+    t_enter("sectors.tes:17:8 in function `sectors__is_walk_special`");
+    t_contains(&Rc::new(vec![2i64, 3i64, 4i64, 6i64, 10i64, 19i64, 25i64, 38i64, 39i64, 52i64, 57i64, 73i64, 74i64, 75i64, 77i64, 82i64, 83i64, 86i64, 88i64, 90i64, 97i64, 105i64, 108i64, 109i64, 120i64, 121i64, 124i64, 141i64]), &v_special)
+}
+
+// note: Specials that work once; the others repeat.
+fn f_sectors__is_once(v_special: i64) -> bool {
+    t_enter("sectors.tes:20:4 in function `sectors__is_once`");
+    t_contains(&Rc::new(vec![2i64, 3i64, 4i64, 6i64, 10i64, 11i64, 19i64, 21i64, 23i64, 25i64, 29i64, 38i64, 39i64, 49i64, 50i64, 51i64, 52i64, 57i64, 102i64, 103i64, 108i64, 109i64, 112i64, 121i64, 122i64, 124i64, 141i64]), &v_special)
+}
+
+fn f_sectors__is_teleport(v_special: i64) -> bool {
+    t_enter("sectors.tes:22:8 in function `sectors__is_teleport`");
+    ((v_special.clone() == 39i64) || (v_special.clone() == 97i64))
+}
+
+fn f_sectors__lowest_neighbor_ceiling(v_w: Rc<T_state__World>, v_sector: i64) -> i64 {
+    t_enter("sectors.tes:24:4 in function `sectors__lowest_neighbor_ceiling`");
+    let mut v_lowest: i64 = 32767i64;
+    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "sectors.tes:26:10 in function `sectors__lowest_neighbor_ceiling`")) {
+        t_tick("sectors.tes:26:30 in function `sectors__lowest_neighbor_ceiling`");
+        v_lowest = f_std__math__min(v_lowest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "sectors.tes:27:31 in function `sectors__lowest_neighbor_ceiling`")).f_ceiling.clone());
+    }
+    if (v_lowest.clone() == 32767i64) {
+        (t_index(&((v_w).f_level.clone()).f_sectors.clone(), v_sector, "sectors.tes:29:22 in function `sectors__lowest_neighbor_ceiling`")).f_ceiling.clone()
+    } else {
+        v_lowest.clone()
+    }
+}
+
+fn f_sectors__lowest_neighbor_floor(v_w: Rc<T_state__World>, v_sector: i64) -> i64 {
+    t_enter("sectors.tes:32:4 in function `sectors__lowest_neighbor_floor`");
+    let mut v_lowest: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:33:14 in function `sectors__lowest_neighbor_floor`")).f_floor.clone();
+    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "sectors.tes:34:10 in function `sectors__lowest_neighbor_floor`")) {
+        t_tick("sectors.tes:34:30 in function `sectors__lowest_neighbor_floor`");
+        v_lowest = f_std__math__min(v_lowest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "sectors.tes:35:31 in function `sectors__lowest_neighbor_floor`")).f_floor.clone());
+    }
+    v_lowest
+}
+
+fn f_sectors__highest_neighbor_floor(v_w: Rc<T_state__World>, v_sector: i64) -> i64 {
+    t_enter("sectors.tes:40:4 in function `sectors__highest_neighbor_floor`");
+    let mut v_highest: i64 = (-32768i64);
+    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "sectors.tes:42:10 in function `sectors__highest_neighbor_floor`")) {
+        t_tick("sectors.tes:42:30 in function `sectors__highest_neighbor_floor`");
+        v_highest = f_std__math__max(v_highest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "sectors.tes:43:33 in function `sectors__highest_neighbor_floor`")).f_floor.clone());
+    }
+    if (v_highest.clone() == (-32768i64)) {
+        (t_index(&((v_w).f_level.clone()).f_sectors.clone(), v_sector, "sectors.tes:45:24 in function `sectors__highest_neighbor_floor`")).f_floor.clone()
+    } else {
+        v_highest.clone()
+    }
+}
+
+fn f_sectors__lowest_neighbor_light(v_w: Rc<T_state__World>, v_sector: i64) -> i64 {
+    t_enter("sectors.tes:48:4 in function `sectors__lowest_neighbor_light`");
+    let mut v_lowest: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:49:14 in function `sectors__lowest_neighbor_light`")).f_light.clone();
+    for v_n in t_iter(t_index(&(v_w.clone()).f_neighbors.clone(), v_sector.clone(), "sectors.tes:50:10 in function `sectors__lowest_neighbor_light`")) {
+        t_tick("sectors.tes:50:30 in function `sectors__lowest_neighbor_light`");
+        v_lowest = f_std__math__min(v_lowest.clone(), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_n.clone(), "sectors.tes:51:31 in function `sectors__lowest_neighbor_light`")).f_light.clone());
+    }
+    v_lowest
+}
+
+// note: For every sector, the sectors that share a two-sided line with it.
+fn f_sectors__find_neighbors(v_l: Rc<T_level__Level>) -> Rc<Vec<Rc<Vec<i64>>>> {
+    t_enter("sectors.tes:59:8 in function `sectors__find_neighbors`");
+    let mut v_found: Rc<Vec<Rc<Vec<i64>>>> = t_repeat_list(Rc::new(vec![Rc::new(vec![0i64])]), t_list_length(&(v_l.clone()).f_sectors.clone()), "sectors.tes:60:13 in function `sectors__find_neighbors`");
+    for v_i in t_iter(t_range(0i64, t_list_length(&v_found.clone()), "sectors.tes:61:10 in function `sectors__find_neighbors`")) {
+        t_tick("sectors.tes:61:34 in function `sectors__find_neighbors`");
+        { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(Vec::<i64>::new()); *t_slot(&mut v_found, t_place0, "sectors.tes:62:5 in function `sectors__find_neighbors`") = t_value; }
+    }
+    for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
+        t_tick("sectors.tes:64:24 in function `sectors__find_neighbors`");
+        if ((v_line.clone()).f_back.clone() >= 0i64) {
+            let v_a: i64 = (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_front.clone(), "sectors.tes:66:9 in function `sectors__find_neighbors`")).f_sector.clone();
+            let v_b: i64 = (t_index(&(v_l.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "sectors.tes:67:9 in function `sectors__find_neighbors`")).f_sector.clone();
+            if (v_a.clone() != v_b.clone()) {
+                if (!t_contains(&t_index(&v_found.clone(), v_a.clone(), "sectors.tes:69:17 in function `sectors__find_neighbors`"), &v_b.clone())) {
+                    { let t_place0: i64 = v_a.clone(); let t_value = t_concat_lists(t_index(&v_found.clone(), v_a.clone(), "sectors.tes:70:5 in function `sectors__find_neighbors`"), Rc::new(vec![v_b.clone()])); *t_slot(&mut v_found, t_place0, "sectors.tes:70:5 in function `sectors__find_neighbors`") = t_value; }
+                };
+                if (!t_contains(&t_index(&v_found.clone(), v_b.clone(), "sectors.tes:72:17 in function `sectors__find_neighbors`"), &v_a.clone())) {
+                    { let t_place0: i64 = v_b.clone(); let t_value = t_concat_lists(t_index(&v_found.clone(), v_b.clone(), "sectors.tes:73:5 in function `sectors__find_neighbors`"), Rc::new(vec![v_a.clone()])); *t_slot(&mut v_found, t_place0, "sectors.tes:73:5 in function `sectors__find_neighbors`") = t_value; }
+                }
+            }
+        }
+    }
+    v_found
+}
+
+// note: The middle of every sector's bounding box (fixed), where its sounds come from.
+fn f_sectors__find_centers(v_l: Rc<T_level__Level>) -> Rc<Vec<Rc<Vec<i64>>>> {
+    t_enter("sectors.tes:82:8 in function `sectors__find_centers`");
+    let mut v_low_x: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![32767i64]), t_list_length(&(v_l.clone()).f_sectors.clone()), "sectors.tes:83:13 in function `sectors__find_centers`");
+    let mut v_low_y: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![32767i64]), t_list_length(&(v_l.clone()).f_sectors.clone()), "sectors.tes:84:13 in function `sectors__find_centers`");
+    let mut v_high_x: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![(-32768i64)]), t_list_length(&(v_l.clone()).f_sectors.clone()), "sectors.tes:85:14 in function `sectors__find_centers`");
+    let mut v_high_y: Rc<Vec<i64>> = t_repeat_list(Rc::new(vec![(-32768i64)]), t_list_length(&(v_l.clone()).f_sectors.clone()), "sectors.tes:86:14 in function `sectors__find_centers`");
+    for v_line in t_iter((v_l.clone()).f_linedefs.clone()) {
+        t_tick("sectors.tes:87:24 in function `sectors__find_centers`");
+        for v_side in t_iter(Rc::new(vec![(v_line.clone()).f_front.clone(), (v_line.clone()).f_back.clone()])) {
+            t_tick("sectors.tes:88:37 in function `sectors__find_centers`");
+            if (v_side.clone() >= 0i64) {
+                let v_s: i64 = (t_index(&(v_l.clone()).f_sidedefs.clone(), v_side.clone(), "sectors.tes:90:9 in function `sectors__find_centers`")).f_sector.clone();
+                for v_v in t_iter(Rc::new(vec![t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_start.clone(), "sectors.tes:91:11 in function `sectors__find_centers`"), t_index(&(v_l.clone()).f_vertexes.clone(), (v_line.clone()).f_end.clone(), "sectors.tes:91:35 in function `sectors__find_centers`")])) {
+                    t_tick("sectors.tes:91:57 in function `sectors__find_centers`");
+                    { let t_place0: i64 = v_s.clone(); let t_value = f_std__math__min(t_index(&v_low_x.clone(), v_s.clone(), "sectors.tes:92:25 in function `sectors__find_centers`"), (v_v.clone()).f_x.clone()); *t_slot(&mut v_low_x, t_place0, "sectors.tes:92:5 in function `sectors__find_centers`") = t_value; }
+                    { let t_place0: i64 = v_s.clone(); let t_value = f_std__math__min(t_index(&v_low_y.clone(), v_s.clone(), "sectors.tes:93:25 in function `sectors__find_centers`"), (v_v.clone()).f_y.clone()); *t_slot(&mut v_low_y, t_place0, "sectors.tes:93:5 in function `sectors__find_centers`") = t_value; }
+                    { let t_place0: i64 = v_s.clone(); let t_value = f_std__math__max(t_index(&v_high_x.clone(), v_s.clone(), "sectors.tes:94:26 in function `sectors__find_centers`"), (v_v.clone()).f_x.clone()); *t_slot(&mut v_high_x, t_place0, "sectors.tes:94:5 in function `sectors__find_centers`") = t_value; }
+                    { let t_place0: i64 = v_s.clone(); let t_value = f_std__math__max(t_index(&v_high_y.clone(), v_s.clone(), "sectors.tes:95:26 in function `sectors__find_centers`"), (v_v.clone()).f_y.clone()); *t_slot(&mut v_high_y, t_place0, "sectors.tes:95:5 in function `sectors__find_centers`") = t_value; }
+                }
+            }
+        }
+    }
+    let mut v_centers: Rc<Vec<Rc<Vec<i64>>>> = Rc::new(Vec::<Rc<Vec<i64>>>::new());
+    for v_s in t_iter(t_range(0i64, t_list_length(&(v_l.clone()).f_sectors.clone()), "sectors.tes:101:10 in function `sectors__find_centers`")) {
+        t_tick("sectors.tes:101:38 in function `sectors__find_centers`");
+        v_centers = t_concat_lists(std::mem::take(&mut v_centers), Rc::new(vec![Rc::new(vec![f_std__fixed__from_int(t_div(t_add(t_index(&v_low_x.clone(), v_s.clone(), "sectors.tes:102:34 in function `sectors__find_centers`"), t_index(&v_high_x.clone(), v_s.clone(), "sectors.tes:102:45 in function `sectors__find_centers`"), "sectors.tes:102:43 in function `sectors__find_centers`"), 2i64, "sectors.tes:102:56 in function `sectors__find_centers`")), f_std__fixed__from_int(t_div(t_add(t_index(&v_low_y.clone(), v_s.clone(), "sectors.tes:102:78 in function `sectors__find_centers`"), t_index(&v_high_y.clone(), v_s.clone(), "sectors.tes:102:89 in function `sectors__find_centers`"), "sectors.tes:102:87 in function `sectors__find_centers`"), 2i64, "sectors.tes:102:100 in function `sectors__find_centers`"))])]));
+    }
+    v_centers
+}
+
+// note: Light effects for the sectors whose special asks for one. Strobes alternate with the lowest neighboring light (or darkness when that is as bright); synchronized strobes (12, 13) start together.
+fn f_sectors__find_lights(v_w: Rc<T_state__World>) -> Rc<Vec<Rc<T_state__Light>>> {
+    t_enter("sectors.tes:108:8 in function `sectors__find_lights`");
+    let mut v_lights: Rc<Vec<Rc<T_state__Light>>> = Rc::new(Vec::<Rc<T_state__Light>>::new());
+    for v_s in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_sectors.clone()), "sectors.tes:110:10 in function `sectors__find_lights`")) {
+        t_tick("sectors.tes:110:44 in function `sectors__find_lights`");
+        let v_sector: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_s.clone(), "sectors.tes:111:14 in function `sectors__find_lights`");
+        let v_k: i64 = (v_sector.clone()).f_special.clone();
+        if t_contains(&Rc::new(vec![1i64, 2i64, 3i64, 4i64, 8i64, 12i64, 13i64, 17i64]), &v_k.clone()) {
+            let mut v_dark: i64 = f_sectors__lowest_neighbor_light(v_w.clone(), v_s.clone());
+            if (((v_dark.clone() >= (v_sector.clone()).f_light.clone()) && (v_k.clone() != 8i64)) && (v_k.clone() != 17i64)) {
+                v_dark = 0i64;
+            };
+            if (v_k.clone() == 17i64) {
+                v_dark = f_std__math__min(t_add(v_dark.clone(), 16i64, "sectors.tes:119:26 in function `sectors__find_lights`"), (v_sector.clone()).f_light.clone());
+            };
+            let v_start: i64 = if ((v_k.clone() == 12i64) || (v_k.clone() == 13i64)) {
+                1i64
+            } else if (v_k.clone() == 8i64) {
+                (-1i64)
+            } else {
+                t_add(1i64, t_rem(t_mul(v_s.clone(), 7i64, "sectors.tes:121:77 in function `sectors__find_lights`"), 8i64, "sectors.tes:121:82 in function `sectors__find_lights`"), "sectors.tes:121:72 in function `sectors__find_lights`")
+            };
+            v_lights = t_concat_lists(std::mem::take(&mut v_lights), Rc::new(vec![Rc::new(T_state__Light { f_sector: v_s.clone(), f_kind: v_k.clone(), f_bright: (v_sector.clone()).f_light.clone(), f_dark: v_dark.clone(), f_timer: v_start.clone() })]));
+        }
+    }
+    v_lights
+}
+
+// note: Carries out a line's special. `by_use` is true when the player pressed `use` on it, which also flips switch textures. Door specials work on the sector behind the line; the others on every sector with the line's tag.
+fn f_sectors__trigger(v_world: Rc<T_state__World>, v_index: i64, v_by_use: bool) -> Rc<T_state__World> {
+    t_enter("sectors.tes:131:8 in function `sectors__trigger`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "sectors.tes:133:12 in function `sectors__trigger`");
+    let v_special: i64 = (v_line.clone()).f_special.clone();
+    let v_key: Rc<String> = match v_special.clone() {
+        26 => { t_text("blue") }
+        32 => { t_text("blue") }
+        27 => { t_text("yellow") }
+        34 => { t_text("yellow") }
+        28 => { t_text("red") }
+        33 => { t_text("red") }
+        _ => { t_text("") }
+    };
+    if ((v_key.clone() != t_text("")) && (!t_contains(&((v_w.clone()).f_stats.clone()).f_keys.clone(), &v_key.clone()))) {
+        v_w = f_state__sound_here(v_w, t_text("DSNOWAY"));
+        return f_state__say(v_w, t_concat(t_concat(t_text("You need a "), (v_key)), t_text(" key to open this door")))
+    };
+    if f_sectors__is_manual_door(v_special.clone()) {
+        if ((v_line.clone()).f_back.clone() < 0i64) {
+            return v_w
+        };
+        let v_sector: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sidedefs.clone(), (v_line.clone()).f_back.clone(), "sectors.tes:152:14 in function `sectors__trigger`")).f_sector.clone();
+        let v_stays: bool = t_contains(&Rc::new(vec![31i64, 32i64, 33i64, 34i64, 118i64]), &v_special.clone());
+        let v_speed: i64 = if ((v_special.clone() == 117i64) || (v_special.clone() == 118i64)) {
+            8i64
+        } else {
+            2i64
+        };
+        v_w = f_sectors__start_door(v_w, v_sector.clone(), v_speed.clone(), if v_stays.clone() {
+            (-1i64)
+        } else {
+            150i64
+        });
+        if v_stays.clone() {
+            { let t_place0: i64 = v_index.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_linedefs, t_place0, "sectors.tes:157:5 in function `sectors__trigger`")).f_special = t_value; }
+        };
+        return v_w
+    };
+    for v_sector in t_iter(t_range(0i64, t_list_length(&((v_w.clone()).f_level.clone()).f_sectors.clone()), "sectors.tes:161:15 in function `sectors__trigger`")) {
+        t_tick("sectors.tes:161:49 in function `sectors__trigger`");
+        if (((v_line.clone()).f_tag.clone() != 0i64) && ((t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:162:22 in function `sectors__trigger`")).f_tag.clone() == (v_line.clone()).f_tag.clone())) {
+            v_w = f_sectors__tagged_action(v_w, v_special.clone(), v_sector.clone());
+        }
+    }
+    if t_contains(&Rc::new(vec![11i64, 51i64, 52i64, 124i64]), &v_special.clone()) {
+        { let t_value = if ((v_special.clone() == 51i64) || (v_special.clone() == 124i64)) {
+            2i64
+        } else {
+            1i64
+        }; *&mut Rc::make_mut(&mut v_w).f_exited = t_value; }
+        v_w = f_state__say(v_w, t_text("Level complete"));
+    };
+    if v_by_use.clone() {
+        let v_once: bool = f_sectors__is_once(v_special.clone());
+        v_w = f_sectors__flip_switch(v_w, (v_line.clone()).f_front.clone(), if v_once.clone() {
+            (-1i64)
+        } else {
+            35i64
+        });
+        v_w = f_state__sound_here(v_w, if ((v_special.clone() == 11i64) || (v_special.clone() == 51i64)) {
+            t_text("DSSWTCHX")
+        } else {
+            t_text("DSSWTCHN")
+        });
+    };
+    if f_sectors__is_once(v_special.clone()) {
+        { let t_place0: i64 = v_index.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_linedefs, t_place0, "sectors.tes:176:5 in function `sectors__trigger`")).f_special = t_value; }
+    };
+    v_w
+}
+
+// note: Switch textures (SW1... and SW2...) of a sidedef swap; `time` tics later they swap back, or never for -1. The renderer reads `switched`.
+fn f_sectors__flip_switch(v_world: Rc<T_state__World>, v_side: i64, v_time: i64) -> Rc<T_state__World> {
+    t_enter("sectors.tes:182:4 in function `sectors__flip_switch`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    if (v_side.clone() >= 0i64) {
+        { let t_place0: i64 = v_side.clone(); let t_value = v_time.clone(); *t_slot(&mut Rc::make_mut(&mut v_w).f_switched, t_place0, "sectors.tes:185:5 in function `sectors__flip_switch`") = t_value; }
+    };
+    v_w
+}
+
+// note: Counts down switches that swap back (repeatable switches, after one second).
+fn f_sectors__run_switches(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("sectors.tes:191:8 in function `sectors__run_switches`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    for v_side in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_switched.clone()), "sectors.tes:193:13 in function `sectors__run_switches`")) {
+        t_tick("sectors.tes:193:42 in function `sectors__run_switches`");
+        let v_t: i64 = t_index(&(v_w.clone()).f_switched.clone(), v_side.clone(), "sectors.tes:194:9 in function `sectors__run_switches`");
+        if (v_t.clone() > 0i64) {
+            { let t_place0: i64 = v_side.clone(); let t_value = t_sub(v_t.clone(), 1i64, "sectors.tes:196:26 in function `sectors__run_switches`"); *t_slot(&mut Rc::make_mut(&mut v_w).f_switched, t_place0, "sectors.tes:196:5 in function `sectors__run_switches`") = t_value; }
+        }
+    }
+    v_w
+}
+
+fn f_sectors__tagged_action(v_w: Rc<T_state__World>, v_special: i64, v_sector: i64) -> Rc<T_state__World> {
+    t_enter("sectors.tes:202:4 in function `sectors__tagged_action`");
+    if t_contains(&Rc::new(vec![2i64, 86i64, 103i64, 61i64, 109i64, 112i64, 114i64]), &v_special.clone()) {
+        return f_sectors__start_door(v_w, v_sector, if (v_special >= 109i64) {
+            8i64
+        } else {
+            2i64
+        }, (-1i64))
+    };
+    if t_contains(&Rc::new(vec![4i64, 90i64, 29i64, 63i64, 105i64, 108i64, 111i64]), &v_special.clone()) {
+        return f_sectors__start_door(v_w, v_sector, if (v_special >= 105i64) {
+            8i64
+        } else {
+            2i64
+        }, 150i64)
+    };
+    if t_contains(&Rc::new(vec![3i64, 75i64, 50i64, 42i64]), &v_special.clone()) {
+        let v_started: Rc<T_state__World> = f_sectors__add_mover(v_w.clone(), Rc::new(T_state__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_state__Motion::V_DoorClosing((t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:210:79 in function `sectors__tagged_action`")).f_ceiling.clone(), 2i64, (-1i64))) }));
+        return f_state__sector_sound(v_started, t_text("DSDORCLS"), v_sector)
+    };
+    if t_contains(&Rc::new(vec![10i64, 88i64, 21i64, 62i64, 120i64, 121i64, 122i64, 123i64]), &v_special.clone()) {
+        let v_speed: i64 = if (v_special.clone() >= 120i64) {
+            8i64
+        } else {
+            4i64
+        };
+        let v_started: Rc<T_state__World> = f_sectors__add_mover(v_w.clone(), Rc::new(T_state__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_state__Motion::V_LiftLowering(f_sectors__lowest_neighbor_floor(v_w.clone(), v_sector.clone()), (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:215:114 in function `sectors__tagged_action`")).f_floor.clone(), v_speed.clone())) }));
+        return f_state__sector_sound(v_started, t_text("DSPSTART"), v_sector)
+    };
+    if t_contains(&Rc::new(vec![23i64, 38i64, 82i64, 60i64]), &v_special.clone()) {
+        return f_sectors__add_mover(v_w.clone(), Rc::new(T_state__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_state__Motion::V_FloorLowering(f_sectors__lowest_neighbor_floor(v_w.clone(), v_sector.clone()), 1i64)) }))
+    };
+    if t_contains(&Rc::new(vec![19i64, 102i64, 83i64, 45i64]), &v_special.clone()) {
+        return f_sectors__add_mover(v_w.clone(), Rc::new(T_state__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_state__Motion::V_FloorLowering(f_sectors__highest_neighbor_floor(v_w.clone(), v_sector.clone()), 1i64)) }))
+    };
+    if t_contains(&Rc::new(vec![6i64, 25i64, 73i64, 77i64, 49i64, 141i64]), &v_special.clone()) {
+        let v_speed: i64 = if ((v_special.clone() == 6i64) || (v_special.clone() == 77i64)) {
+            2i64
+        } else {
+            1i64
+        };
+        return f_sectors__add_mover(v_w.clone(), Rc::new(T_state__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_state__Motion::V_Crushing((t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:226:69 in function `sectors__tagged_action`")).f_ceiling.clone(), v_speed, true, (v_special == 141i64))) }))
+    };
+    if ((v_special.clone() == 57i64) || (v_special.clone() == 74i64)) {
+        return f_sectors__stop_crushers(v_w, v_sector)
+    };
+    v_w
+}
+
+fn f_sectors__stop_crushers(v_world: Rc<T_state__World>, v_sector: i64) -> Rc<T_state__World> {
+    t_enter("sectors.tes:234:4 in function `sectors__stop_crushers`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let mut v_kept: Rc<Vec<Rc<T_state__Mover>>> = Rc::new(Vec::<Rc<T_state__Mover>>::new());
+    for v_m in t_iter((v_w.clone()).f_movers.clone()) {
+        t_tick("sectors.tes:237:19 in function `sectors__stop_crushers`");
+        let v_crusher: bool = match &*((v_m.clone()).f_motion.clone()) {
+            T_state__Motion::V_Crushing(_, _, _, _) => { true }
+            _ => { false }
+        };
+        if (!(v_crusher.clone() && ((v_m.clone()).f_sector.clone() == v_sector.clone()))) {
+            v_kept = t_concat_lists(std::mem::take(&mut v_kept), Rc::new(vec![v_m.clone()]));
+        }
+    }
+    { let t_value = v_kept.clone(); *&mut Rc::make_mut(&mut v_w).f_movers = t_value; }
+    v_w
+}
+
+// note: Opens a door sector up to 4 units below its lowest neighboring ceiling. A door that is already moving reverses instead (as pressing `use` on an open door closes it).
+fn f_sectors__start_door(v_world: Rc<T_state__World>, v_sector: i64, v_speed: i64, v_wait: i64) -> Rc<T_state__World> {
+    t_enter("sectors.tes:251:4 in function `sectors__start_door`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_top: i64 = t_sub(f_sectors__lowest_neighbor_ceiling(v_w.clone(), v_sector.clone()), 4i64, "sectors.tes:253:46 in function `sectors__start_door`");
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_movers.clone()), "sectors.tes:254:10 in function `sectors__start_door`")) {
+        t_tick("sectors.tes:254:37 in function `sectors__start_door`");
+        if ((t_index(&(v_w.clone()).f_movers.clone(), v_i.clone(), "sectors.tes:255:4 in function `sectors__start_door`")).f_sector.clone() == v_sector.clone()) {
+            match &*((t_index(&(v_w.clone()).f_movers.clone(), v_i.clone(), "sectors.tes:256:7 in function `sectors__start_door`")).f_motion.clone()) {
+                T_state__Motion::V_DoorClosing(t1, t2, t3) => { let v_t = t1.clone(); let v_s = t2.clone(); let v_wt = t3.clone(); {
+                    { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(T_state__Motion::V_DoorOpening(v_t.clone(), v_s.clone(), v_wt.clone())); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_movers, t_place0, "sectors.tes:257:31 in function `sectors__start_door`")).f_motion = t_value; }
+                } }
+                T_state__Motion::V_DoorWaiting(t4, t5, _, t6) => { let v_t = t4.clone(); let v_s = t5.clone(); let v_wt = t6.clone(); {
+                    { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(T_state__Motion::V_DoorClosing(v_t.clone(), v_s.clone(), v_wt.clone())); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_movers, t_place0, "sectors.tes:259:5 in function `sectors__start_door`")).f_motion = t_value; }
+                    v_w = f_state__sector_sound(v_w, if (v_s.clone() > 2i64) {
+                        t_text("DSBDCLS")
+                    } else {
+                        t_text("DSDORCLS")
+                    }, v_sector.clone());
+                } }
+                _ => { {
+                } }
+            };
+            return v_w
+        }
+    }
+    v_w = f_sectors__add_mover(v_w, Rc::new(T_state__Mover { f_sector: v_sector.clone(), f_motion: Rc::new(T_state__Motion::V_DoorOpening(v_top.clone(), v_speed.clone(), v_wait.clone())) }));
+    f_state__sector_sound(v_w, if (v_speed > 2i64) {
+        t_text("DSBDOPN")
+    } else {
+        t_text("DSDOROPN")
+    }, v_sector)
+}
+
+fn f_sectors__add_mover(v_world: Rc<T_state__World>, v_mover: Rc<T_state__Mover>) -> Rc<T_state__World> {
+    t_enter("sectors.tes:271:4 in function `sectors__add_mover`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    for v_m in t_iter((v_w.clone()).f_movers.clone()) {
+        t_tick("sectors.tes:273:19 in function `sectors__add_mover`");
+        if ((v_m.clone()).f_sector.clone() == (v_mover.clone()).f_sector.clone()) {
+            return v_w
+        }
+    }
+    { let t_value = t_concat_lists((v_w.clone()).f_movers.clone(), Rc::new(vec![v_mover.clone()])); *&mut Rc::make_mut(&mut v_w).f_movers = t_value; }
+    v_w
+}
+
+// note: Teleports the player to the teleport destination (thing 14) in a sector with the line's tag, facing the destination's direction; momentum stops. Teleport fog appears at both ends.
+fn f_sectors__teleport(v_world: Rc<T_state__World>, v_index: i64) -> Rc<T_state__World> {
+    t_enter("sectors.tes:283:8 in function `sectors__teleport`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_line: Rc<T_level__Linedef> = t_index(&((v_w.clone()).f_level.clone()).f_linedefs.clone(), v_index.clone(), "sectors.tes:285:12 in function `sectors__teleport`");
+    for v_t in t_iter(((v_w.clone()).f_level.clone()).f_things.clone()) {
+        t_tick("sectors.tes:286:25 in function `sectors__teleport`");
+        if ((v_t.clone()).f_kind.clone() == 14i64) {
+            let v_x: i64 = f_std__fixed__from_int((v_t.clone()).f_x.clone());
+            let v_y: i64 = f_std__fixed__from_int((v_t.clone()).f_y.clone());
+            let v_sector: i64 = f_geometry__sector_at((v_w.clone()).f_level.clone(), v_x.clone(), v_y.clone());
+            if (((v_line.clone()).f_tag.clone() != 0i64) && ((t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:291:22 in function `sectors__teleport`")).f_tag.clone() == (v_line.clone()).f_tag.clone())) {
+                let v_from_floor: i64 = f_std__fixed__from_int(f_state__sector_floor(v_w.clone(), ((v_w.clone()).f_player.clone()).f_sector.clone()));
+                v_w = f_state__add_effect(v_w.clone(), t_text("TFOG"), t_text("ABCDEFGHIJ"), ((v_w.clone()).f_player.clone()).f_x.clone(), ((v_w.clone()).f_player.clone()).f_y.clone(), v_from_floor.clone(), 3i64);
+                { let t_value = { let mut t1 = Rc::unwrap_or_clone((v_w.clone()).f_player.clone()); t1.f_x = v_x.clone(); t1.f_y = v_y.clone(); t1.f_sector = v_sector.clone(); t1.f_angle = f_geometry__degrees_to_fine((v_t.clone()).f_angle.clone()); Rc::new(t1) }; *&mut Rc::make_mut(&mut v_w).f_player = t_value; }
+                { let t_value = 0i64; *&mut Rc::make_mut(&mut v_w).f_momentum_x = t_value; }
+                { let t_value = 0i64; *&mut Rc::make_mut(&mut v_w).f_momentum_y = t_value; }
+                v_w = f_state__add_effect(v_w.clone(), t_text("TFOG"), t_text("ABCDEFGHIJ"), v_x.clone(), v_y.clone(), f_std__fixed__from_int(f_state__sector_floor(v_w.clone(), v_sector.clone())), 3i64);
+                v_w = f_state__sound_here(v_w, t_text("DSTELEPT"));
+                if ((v_line.clone()).f_special.clone() == 39i64) {
+                    { let t_place0: i64 = v_index.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_linedefs, t_place0, "sectors.tes:300:5 in function `sectors__teleport`")).f_special = t_value; }
+                };
+                return v_w
+            }
+        }
+    }
+    v_w
+}
+
+// note: Whether the player or a living monster stands in a sector.
+fn f_sectors__occupied(v_w: Rc<T_state__World>, v_sector: i64) -> bool {
+    t_enter("sectors.tes:312:4 in function `sectors__occupied`");
+    if ((((v_w.clone()).f_player.clone()).f_sector.clone() == v_sector.clone()) && (((v_w.clone()).f_stats.clone()).f_health.clone() > 0i64)) {
+        return true
+    };
+    for v_m in t_iter((v_w.clone()).f_mobjs.clone()) {
+        t_tick("sectors.tes:316:18 in function `sectors__occupied`");
+        if (((((v_m.clone()).f_sector.clone() == v_sector.clone()) && f_state__is_monster(v_m.clone())) && (!f_state__is_dead(v_m.clone()))) && (v_m.clone()).f_present.clone()) {
+            return true
+        }
+    }
+    false
+}
+
+// note: A crusher hurts what is under it every 4 tics while the gap is lower than the thing: 10 health.
+fn f_sectors__crush(v_world: Rc<T_state__World>, v_sector: i64) -> Rc<T_state__World> {
+    t_enter("sectors.tes:325:4 in function `sectors__crush`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    if (t_rem((v_w.clone()).f_tic.clone(), 4i64, "sectors.tes:327:10 in function `sectors__crush`") != 0i64) {
+        return v_w
+    };
+    let v_s: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_sector.clone(), "sectors.tes:330:9 in function `sectors__crush`");
+    let v_gap: i64 = t_sub((v_s.clone()).f_ceiling.clone(), (v_s.clone()).f_floor.clone(), "sectors.tes:331:21 in function `sectors__crush`");
+    if ((((v_w.clone()).f_player.clone()).f_sector.clone() == v_sector.clone()) && (v_gap.clone() < f_movement__player_height())) {
+        v_w = f_state__hurt_player(v_w, 10i64);
+    };
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_mobjs.clone()), "sectors.tes:335:10 in function `sectors__crush`")) {
+        t_tick("sectors.tes:335:36 in function `sectors__crush`");
+        let v_m: Rc<T_state__Mobj> = t_index(&(v_w.clone()).f_mobjs.clone(), v_i.clone(), "sectors.tes:336:9 in function `sectors__crush`");
+        if (((((v_m.clone()).f_present.clone() && ((v_m.clone()).f_sector.clone() == v_sector.clone())) && f_state__is_monster(v_m.clone())) && (!f_state__is_dead(v_m.clone()))) && (v_gap.clone() < ((v_m.clone()).f_info.clone()).f_height.clone())) {
+            let v_health: i64 = t_sub((v_m.clone()).f_health.clone(), 10i64, "sectors.tes:338:23 in function `sectors__crush`");
+            { let t_place0: i64 = v_i.clone(); let t_value = v_health.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "sectors.tes:339:5 in function `sectors__crush`")).f_health = t_value; }
+            if (v_health.clone() <= 0i64) {
+                { let t_place0: i64 = v_i.clone(); let t_value = Rc::new(T_state__State::V_Dead(0i64)); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_mobjs, t_place0, "sectors.tes:341:5 in function `sectors__crush`")).f_state = t_value; }
+                { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_kills.clone(), 1i64, "sectors.tes:342:19 in function `sectors__crush`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_kills = t_value; }
+            }
+        }
+    }
+    v_w
+}
+
+fn f_sectors__run_movers(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("sectors.tes:349:8 in function `sectors__run_movers`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let mut v_still: Rc<Vec<Rc<T_state__Mover>>> = Rc::new(Vec::<Rc<T_state__Mover>>::new());
+    for v_mover in t_iter((v_w.clone()).f_movers.clone()) {
+        t_tick("sectors.tes:352:23 in function `sectors__run_movers`");
+        let v_s: i64 = (v_mover.clone()).f_sector.clone();
+        let v_sector: Rc<T_level__Sector> = t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_s.clone(), "sectors.tes:354:14 in function `sectors__run_movers`");
+        let v_next: Rc<T_state__Motion> = match &*((v_mover.clone()).f_motion.clone()) {
+            T_state__Motion::V_DoorOpening(t1, t2, t3) => { let v_top = t1.clone(); let v_speed = t2.clone(); let v_wait = t3.clone(); {
+                let v_ceiling: i64 = f_std__math__min(t_add((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "sectors.tes:357:39 in function `sectors__run_movers`"), v_top.clone());
+                { let t_place0: i64 = v_s.clone(); let t_value = v_ceiling.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:358:5 in function `sectors__run_movers`")).f_ceiling = t_value; }
+                if (v_ceiling.clone() < v_top.clone()) {
+                    (v_mover.clone()).f_motion.clone()
+                } else if (v_wait.clone() < 0i64) {
+                    Rc::new(T_state__Motion::V_Finished)
+                } else {
+                    Rc::new(T_state__Motion::V_DoorWaiting(v_top.clone(), v_speed.clone(), v_wait.clone(), v_wait.clone()))
+                }
+            } }
+            T_state__Motion::V_DoorWaiting(t4, t5, t6, t7) => { let v_top = t4.clone(); let v_speed = t5.clone(); let v_time = t6.clone(); let v_wait = t7.clone(); {
+                if (v_time.clone() > 1i64) {
+                    Rc::new(T_state__Motion::V_DoorWaiting(v_top.clone(), v_speed.clone(), t_sub(v_time.clone(), 1i64, "sectors.tes:363:43 in function `sectors__run_movers`"), v_wait.clone()))
+                } else {
+                    v_w = f_state__sector_sound(v_w, if (v_speed.clone() > 2i64) {
+                        t_text("DSBDCLS")
+                    } else {
+                        t_text("DSDORCLS")
+                    }, v_s.clone());
+                    Rc::new(T_state__Motion::V_DoorClosing(v_top.clone(), v_speed.clone(), v_wait.clone()))
+                }
+            } }
+            T_state__Motion::V_DoorClosing(t8, t9, t10) => { let v_top = t8.clone(); let v_speed = t9.clone(); let v_wait = t10.clone(); {
+                if (f_sectors__occupied(v_w.clone(), v_s.clone()) && (t_sub(t_sub((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "sectors.tes:370:38 in function `sectors__run_movers`"), (v_sector.clone()).f_floor.clone(), "sectors.tes:370:46 in function `sectors__run_movers`") < f_movement__player_height())) {
+                    v_w = f_state__sector_sound(v_w, if (v_speed.clone() > 2i64) {
+                        t_text("DSBDOPN")
+                    } else {
+                        t_text("DSDOROPN")
+                    }, v_s.clone());
+                    Rc::new(T_state__Motion::V_DoorOpening(v_top.clone(), v_speed.clone(), v_wait.clone()))
+                } else {
+                    let v_ceiling: i64 = f_std__math__max(t_sub((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "sectors.tes:374:39 in function `sectors__run_movers`"), (v_sector.clone()).f_floor.clone());
+                    { let t_place0: i64 = v_s.clone(); let t_value = v_ceiling.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:375:5 in function `sectors__run_movers`")).f_ceiling = t_value; }
+                    if (v_ceiling.clone() > (v_sector.clone()).f_floor.clone()) {
+                        (v_mover.clone()).f_motion.clone()
+                    } else {
+                        Rc::new(T_state__Motion::V_Finished)
+                    }
+                }
+            } }
+            T_state__Motion::V_LiftLowering(t11, t12, t13) => { let v_low = t11.clone(); let v_high = t12.clone(); let v_speed = t13.clone(); {
+                let v_floor: i64 = f_std__math__max(t_sub((v_sector.clone()).f_floor.clone(), v_speed.clone(), "sectors.tes:380:35 in function `sectors__run_movers`"), v_low.clone());
+                { let t_place0: i64 = v_s.clone(); let t_value = v_floor.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:381:5 in function `sectors__run_movers`")).f_floor = t_value; }
+                if (v_floor.clone() > v_low.clone()) {
+                    (v_mover.clone()).f_motion.clone()
+                } else {
+                    v_w = f_state__sector_sound(v_w, t_text("DSPSTOP"), v_s.clone());
+                    Rc::new(T_state__Motion::V_LiftWaiting(v_low.clone(), v_high.clone(), v_speed.clone(), 105i64))
+                }
+            } }
+            T_state__Motion::V_LiftWaiting(t14, t15, t16, t17) => { let v_low = t14.clone(); let v_high = t15.clone(); let v_speed = t16.clone(); let v_time = t17.clone(); {
+                if (v_time.clone() > 1i64) {
+                    Rc::new(T_state__Motion::V_LiftWaiting(v_low.clone(), v_high.clone(), v_speed.clone(), t_sub(v_time.clone(), 1i64, "sectors.tes:391:49 in function `sectors__run_movers`")))
+                } else {
+                    v_w = f_state__sector_sound(v_w, t_text("DSPSTART"), v_s.clone());
+                    Rc::new(T_state__Motion::V_LiftRising(v_low.clone(), v_high.clone(), v_speed.clone()))
+                }
+            } }
+            T_state__Motion::V_LiftRising(t18, t19, t20) => { let v_low = t18.clone(); let v_high = t19.clone(); let v_speed = t20.clone(); {
+                let v_floor: i64 = f_std__math__min(t_add((v_sector.clone()).f_floor.clone(), v_speed.clone(), "sectors.tes:398:35 in function `sectors__run_movers`"), v_high.clone());
+                { let t_place0: i64 = v_s.clone(); let t_value = v_floor.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:399:5 in function `sectors__run_movers`")).f_floor = t_value; }
+                if (v_floor.clone() < v_high.clone()) {
+                    (v_mover.clone()).f_motion.clone()
+                } else {
+                    v_w = f_state__sector_sound(v_w, t_text("DSPSTOP"), v_s.clone());
+                    Rc::new(T_state__Motion::V_Finished)
+                }
+            } }
+            T_state__Motion::V_FloorLowering(t21, t22) => { let v_target = t21.clone(); let v_speed = t22.clone(); {
+                let v_floor: i64 = f_std__math__max(t_sub((v_sector.clone()).f_floor.clone(), v_speed.clone(), "sectors.tes:408:35 in function `sectors__run_movers`"), v_target.clone());
+                { let t_place0: i64 = v_s.clone(); let t_value = v_floor.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:409:5 in function `sectors__run_movers`")).f_floor = t_value; }
+                if (t_rem((v_w.clone()).f_tic.clone(), 8i64, "sectors.tes:410:10 in function `sectors__run_movers`") == 0i64) {
+                    v_w = f_state__sector_sound(v_w, t_text("DSSTNMOV"), v_s.clone());
+                };
+                if (v_floor.clone() > v_target.clone()) {
+                    (v_mover.clone()).f_motion.clone()
+                } else {
+                    Rc::new(T_state__Motion::V_Finished)
+                }
+            } }
+            T_state__Motion::V_Crushing(t23, t24, t25, t26) => { let v_top = t23.clone(); let v_speed = t24.clone(); let v_down = t25.clone(); let v_silent = t26.clone(); {
+                if ((!v_silent.clone()) && (t_rem((v_w.clone()).f_tic.clone(), 8i64, "sectors.tes:416:25 in function `sectors__run_movers`") == 0i64)) {
+                    v_w = f_state__sector_sound(v_w, t_text("DSSTNMOV"), v_s.clone());
+                };
+                if v_down.clone() {
+                    let v_ceiling: i64 = f_std__math__max(t_sub((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "sectors.tes:420:39 in function `sectors__run_movers`"), t_add((v_sector.clone()).f_floor.clone(), 8i64, "sectors.tes:420:61 in function `sectors__run_movers`"));
+                    { let t_place0: i64 = v_s.clone(); let t_value = v_ceiling.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:421:5 in function `sectors__run_movers`")).f_ceiling = t_value; }
+                    v_w = f_sectors__crush(v_w, v_s.clone());
+                    Rc::new(T_state__Motion::V_Crushing(v_top.clone(), v_speed.clone(), (v_ceiling.clone() > t_add((v_sector.clone()).f_floor.clone(), 8i64, "sectors.tes:423:58 in function `sectors__run_movers`")), v_silent.clone()))
+                } else {
+                    let v_ceiling: i64 = f_std__math__min(t_add((v_sector.clone()).f_ceiling.clone(), v_speed.clone(), "sectors.tes:425:39 in function `sectors__run_movers`"), v_top.clone());
+                    { let t_place0: i64 = v_s.clone(); let t_value = v_ceiling.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:426:5 in function `sectors__run_movers`")).f_ceiling = t_value; }
+                    Rc::new(T_state__Motion::V_Crushing(v_top.clone(), v_speed.clone(), (v_ceiling.clone() >= v_top.clone()), v_silent.clone()))
+                }
+            } }
+            T_state__Motion::V_Finished => { Rc::new(T_state__Motion::V_Finished) }
+        };
+        if (v_next.clone() != Rc::new(T_state__Motion::V_Finished)) {
+            v_still = t_concat_lists(std::mem::take(&mut v_still), Rc::new(vec![{ let mut t27 = Rc::unwrap_or_clone(v_mover.clone()); t27.f_motion = v_next.clone(); Rc::new(t27) }]));
+        }
+    }
+    { let t_value = v_still.clone(); *&mut Rc::make_mut(&mut v_w).f_movers = t_value; }
+    v_w
+}
+
+fn f_sectors__run_lights(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("sectors.tes:442:8 in function `sectors__run_lights`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    for v_i in t_iter(t_range(0i64, t_list_length(&(v_w.clone()).f_lights.clone()), "sectors.tes:444:10 in function `sectors__run_lights`")) {
+        t_tick("sectors.tes:444:37 in function `sectors__run_lights`");
+        let v_light: Rc<T_state__Light> = t_index(&(v_w.clone()).f_lights.clone(), v_i.clone(), "sectors.tes:445:13 in function `sectors__run_lights`");
+        let v_s: i64 = (v_light.clone()).f_sector.clone();
+        let v_current: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_s.clone(), "sectors.tes:447:15 in function `sectors__run_lights`")).f_light.clone();
+        match (v_light.clone()).f_kind.clone() {
+            8 => { {
+                let v_step: i64 = if ((v_light.clone()).f_timer.clone() < 0i64) {
+                    (-8i64)
+                } else {
+                    8i64
+                };
+                let v_next: i64 = f_std__math__clamp(t_add(v_current.clone(), v_step.clone(), "sectors.tes:452:31 in function `sectors__run_lights`"), (v_light.clone()).f_dark.clone(), (v_light.clone()).f_bright.clone());
+                { let t_place0: i64 = v_s.clone(); let t_value = v_next.clone(); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:453:5 in function `sectors__run_lights`")).f_light = t_value; }
+                if ((v_next.clone() == (v_light.clone()).f_dark.clone()) || (v_next.clone() == (v_light.clone()).f_bright.clone())) {
+                    { let t_place0: i64 = v_i.clone(); let t_value = if (v_next.clone() == (v_light.clone()).f_dark.clone()) {
+                        1i64
+                    } else {
+                        (-1i64)
+                    }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_lights, t_place0, "sectors.tes:455:5 in function `sectors__run_lights`")).f_timer = t_value; }
+                }
+            } }
+            17 => { {
+                if ((v_light.clone()).f_timer.clone() <= 1i64) {
+                    let v_r: Rc<Vec<i64>> = f_std__rng__byte((v_w.clone()).f_seed.clone());
+                    { let t_value = t_index(&v_r.clone(), 1i64, "sectors.tes:461:14 in function `sectors__run_lights`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+                    { let t_place0: i64 = v_s.clone(); let t_value = f_std__math__max(t_sub((v_light.clone()).f_bright.clone(), t_mul(t_rem(t_index(&v_r.clone(), 0i64, "sectors.tes:462:57 in function `sectors__run_lights`"), 4i64, "sectors.tes:462:62 in function `sectors__run_lights`"), 16i64, "sectors.tes:462:67 in function `sectors__run_lights`"), "sectors.tes:462:54 in function `sectors__run_lights`"), (v_light.clone()).f_dark.clone()); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:462:5 in function `sectors__run_lights`")).f_light = t_value; }
+                    { let t_place0: i64 = v_i.clone(); let t_value = 4i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_lights, t_place0, "sectors.tes:463:5 in function `sectors__run_lights`")).f_timer = t_value; }
+                } else {
+                    { let t_place0: i64 = v_i.clone(); let t_value = t_sub((v_light.clone()).f_timer.clone(), 1i64, "sectors.tes:465:37 in function `sectors__run_lights`"); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_lights, t_place0, "sectors.tes:465:5 in function `sectors__run_lights`")).f_timer = t_value; }
+                }
+            } }
+            _ => { {
+                if ((v_light.clone()).f_timer.clone() <= 1i64) {
+                    let v_r: Rc<Vec<i64>> = f_std__rng__byte((v_w.clone()).f_seed.clone());
+                    { let t_value = t_index(&v_r.clone(), 1i64, "sectors.tes:471:14 in function `sectors__run_lights`"); *&mut Rc::make_mut(&mut v_w).f_seed = t_value; }
+                    let v_to_dark: bool = (v_current.clone() != (v_light.clone()).f_dark.clone());
+                    { let t_place0: i64 = v_s.clone(); let t_value = if v_to_dark.clone() {
+                        (v_light.clone()).f_dark.clone()
+                    } else {
+                        (v_light.clone()).f_bright.clone()
+                    }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:473:5 in function `sectors__run_lights`")).f_light = t_value; }
+                    { let t_place0: i64 = v_i.clone(); let t_value = match (v_light.clone()).f_kind.clone() {
+                        1 => { if v_to_dark.clone() {
+                            t_add(1i64, t_rem(t_index(&v_r.clone(), 0i64, "sectors.tes:476:23 in function `sectors__run_lights`"), 8i64, "sectors.tes:476:28 in function `sectors__run_lights`"), "sectors.tes:476:21 in function `sectors__run_lights`")
+                        } else {
+                            t_add(1i64, t_rem(t_index(&v_r.clone(), 0i64, "sectors.tes:476:45 in function `sectors__run_lights`"), 64i64, "sectors.tes:476:50 in function `sectors__run_lights`"), "sectors.tes:476:43 in function `sectors__run_lights`")
+                        } }
+                        3 => { if v_to_dark.clone() {
+                            35i64
+                        } else {
+                            5i64
+                        } }
+                        12 => { if v_to_dark.clone() {
+                            35i64
+                        } else {
+                            5i64
+                        } }
+                        _ => { if v_to_dark.clone() {
+                            15i64
+                        } else {
+                            5i64
+                        } }
+                    }; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_lights, t_place0, "sectors.tes:475:5 in function `sectors__run_lights`")).f_timer = t_value; }
+                } else {
+                    { let t_place0: i64 = v_i.clone(); let t_value = t_sub((v_light.clone()).f_timer.clone(), 1i64, "sectors.tes:482:37 in function `sectors__run_lights`"); *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut v_w).f_lights, t_place0, "sectors.tes:482:5 in function `sectors__run_lights`")).f_timer = t_value; }
+                }
+            } }
+        }
+    }
+    v_w
+}
+
+// note: Damaging floors (sector specials 4, 5, 7 and 16) hurt every 32 tics unless the player wears a radiation suit; entering a secret sector (9) counts it once.
+fn f_sectors__floor_effects(v_world: Rc<T_state__World>) -> Rc<T_state__World> {
+    t_enter("sectors.tes:493:8 in function `sectors__floor_effects`");
+    let mut v_w: Rc<T_state__World> = v_world;
+    let v_s: i64 = ((v_w.clone()).f_player.clone()).f_sector.clone();
+    let v_special: i64 = (t_index(&((v_w.clone()).f_level.clone()).f_sectors.clone(), v_s.clone(), "sectors.tes:496:15 in function `sectors__floor_effects`")).f_special.clone();
+    if (v_special.clone() == 9i64) {
+        { let t_value = t_add(((v_w.clone()).f_stats.clone()).f_secrets.clone(), 1i64, "sectors.tes:498:21 in function `sectors__floor_effects`"); *&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_stats).f_secrets = t_value; }
+        { let t_place0: i64 = v_s.clone(); let t_value = 0i64; *&mut Rc::make_mut(t_slot(&mut Rc::make_mut(&mut Rc::make_mut(&mut v_w).f_level).f_sectors, t_place0, "sectors.tes:499:5 in function `sectors__floor_effects`")).f_special = t_value; }
+        return f_state__say(v_w, t_text("You found a secret area"))
+    };
+    if ((t_rem((v_w.clone()).f_tic.clone(), 32i64, "sectors.tes:502:10 in function `sectors__floor_effects`") == 0i64) && (((v_w.clone()).f_stats.clone()).f_radiation_suit.clone() == 0i64)) {
+        let v_damage: i64 = match v_special.clone() {
+            5 => { 10i64 }
+            7 => { 5i64 }
+            4 => { 20i64 }
+            16 => { 20i64 }
+            _ => { 0i64 }
+        };
+        v_w = f_state__hurt_player(v_w, v_damage.clone());
+    };
+    v_w
+}
+
+// note: The next seed after `seed` (0 to 2^31 - 1).
+fn f_std__rng__next(v_seed: i64) -> i64 {
+    t_enter("<std/rng.tes>:7:8 in function `std__rng__next`");
+    t_rem(t_add(t_mul(v_seed, 1103515245i64, "<std/rng.tes>:7:39 in function `std__rng__next`"), 12345i64, "<std/rng.tes>:7:52 in function `std__rng__next`"), 2147483648i64, "<std/rng.tes>:7:61 in function `std__rng__next`")
+}
+
+// note: A number from 0 to 255 and the next seed: [value, seed].
+fn f_std__rng__byte(v_seed: i64) -> Rc<Vec<i64>> {
+    t_enter("<std/rng.tes>:10:8 in function `std__rng__byte`");
+    let v_n: i64 = f_std__rng__next(v_seed.clone());
+    Rc::new(vec![t_rem(t_shift_right(v_n.clone(), 16i64, "<std/rng.tes>:12:2 in function `std__rng__byte`"), 256i64, "<std/rng.tes>:12:21 in function `std__rng__byte`"), v_n.clone()])
+}
+
+// note: A number from `low` to `high` (inclusive, at most 256 apart for an even spread) and the next seed: [value, seed].
+fn f_std__rng__roll(v_seed: i64, v_low: i64, v_high: i64) -> Rc<Vec<i64>> {
+    t_enter("<std/rng.tes>:16:8 in function `std__rng__roll`");
+    let v_r: Rc<Vec<i64>> = f_std__rng__byte(v_seed.clone());
+    Rc::new(vec![t_add(v_low.clone(), t_div(t_mul(t_index(&v_r.clone(), 0i64, "<std/rng.tes>:18:8 in function `std__rng__roll`"), t_add(t_sub(v_high, v_low.clone(), "<std/rng.tes>:18:21 in function `std__rng__roll`"), 1i64, "<std/rng.tes>:18:27 in function `std__rng__roll`"), "<std/rng.tes>:18:13 in function `std__rng__roll`"), 256i64, "<std/rng.tes>:18:32 in function `std__rng__roll`"), "<std/rng.tes>:18:6 in function `std__rng__roll`"), t_index(&v_r.clone(), 1i64, "<std/rng.tes>:18:39 in function `std__rng__roll`")])
 }
 
 fn main() {

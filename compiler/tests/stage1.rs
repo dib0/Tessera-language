@@ -319,8 +319,9 @@ fn stage1_builds_tesseradoom() {
     let dir = root().join("examples/tesseradoom");
     let exe = work_dir().join("tesseradoom");
     check_build(Command::new(stage1()).arg("build").arg(dir.join("main.tes")).arg("-o").arg(&exe).arg("--opt").arg("1").output().unwrap(), "building examples/tesseradoom");
-    let usage = Command::new(&exe).output().unwrap();
-    assert_eq!(usage.status.code(), Some(64), "tesseradoom without arguments should print its usage");
+    // Without arguments it opens the game's window, so the test asks for an unknown command.
+    let usage = Command::new(&exe).arg("no-such-command").output().unwrap();
+    assert_eq!(usage.status.code(), Some(64), "tesseradoom with an unknown command should print its usage");
     if dir.join("WAD/freedoom1.wad").exists() && Command::new("python3").arg("--version").output().is_ok() {
         let checks = Command::new(dir.join("checks/run_checks.sh")).output().unwrap();
         assert!(checks.status.success(), "tesseradoom milestone checks failed:\n{}", String::from_utf8_lossy(&checks.stdout));

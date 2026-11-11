@@ -17,7 +17,7 @@ import std/math
 import std/palette
 import std/ppm
 
-fn usage() -> Text = "usage: tesseradoom [--wad FILE] start | info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
+fn usage() -> Text = "usage: tesseradoom [--wad FILE] [start] | info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
 
 fn load(path: Text) -> wad.Wad uses io, fs, env {
 let data = match read_bytes(path) {
@@ -255,7 +255,11 @@ if length(arguments) >= 2 and arguments[0] == "--wad" {
 set path = arguments[1]
 set arguments = slice(arguments, 2, length(arguments))
 }
+// Without a command the game starts at the title screen and menu.
 if length(arguments) == 0 {
+set arguments = ["start"]
+}
+if not contains(["start", "info", "map", "ascii", "raycast", "columns", "render", "bench", "walk", "play", "game", "demo", "watch"], arguments[0]) {
 exit_with(64, usage())
 }
 let w = load(path)
