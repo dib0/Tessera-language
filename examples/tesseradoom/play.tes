@@ -2,7 +2,7 @@
 // quit), the game at 35 tics per second with sound, the weapon in hand and a status line, the
 // screen between levels, and demo viewing. Menu graphics, the font and the sounds come from the
 // WAD. Keys in the game: arrows or W/S to walk, Left/Right to turn, A/D (or , and .) to step
-// sideways, Shift to run, Space or E to use, Control or F to fire, 1 to 7 to pick a weapon,
+// sideways (or Alt with Left/Right), Shift to run, Space or E to use, Control or F to fire, 1 to 7 to pick a weapon,
 // Escape for the menu, F2 to save, F3 to load.
 
 import std/keys
@@ -28,8 +28,12 @@ let forward = if run { 50 } else { 25 }
 let side = if run { 40 } else { 24 }
 let turn = if run { 160 } else { 80 }
 let forward_move = (if keys.any_held(k, ["up", "w"]) { forward } else { 0 }) - (if keys.any_held(k, ["down", "s"]) { forward } else { 0 })
-let side_move = (if keys.any_held(k, ["d", "."]) { side } else { 0 }) - (if keys.any_held(k, ["a", ","]) { side } else { 0 })
-let turning = (if keys.held(k, "left") { turn } else { 0 }) - (if keys.held(k, "right") { turn } else { 0 })
+// With Alt held, Left and Right step sideways instead of turning.
+let strafe = keys.held(k, "alt")
+let step_right = keys.any_held(k, ["d", "."]) or (strafe and keys.held(k, "right"))
+let step_left = keys.any_held(k, ["a", ","]) or (strafe and keys.held(k, "left"))
+let side_move = (if step_right { side } else { 0 }) - (if step_left { side } else { 0 })
+let turning = if strafe { 0 } else { (if keys.held(k, "left") { turn } else { 0 }) - (if keys.held(k, "right") { turn } else { 0 }) }
 state.no_input() with { forward_move: forward_move, side_move: side_move, turn: turning, use: keys.any_held(k, [" ", "e"]), fire: keys.any_held(k, ["control", "f"]) }
 }
 

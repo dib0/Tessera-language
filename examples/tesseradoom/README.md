@@ -3,10 +3,10 @@
 A DOOM-style engine written in Tessera, following the DOOM roadmap (milestones M1 to M9). It is the
 largest example program in this repository and the test bed for the language features it needs.
 
-[![Tesseradoom playing Freedoom's E1M1](../../resources/tesseradoom-preview.gif)](../../resources/tesseradoom.webm)
+[![Tesseradoom: a chainsaw fight in Freedoom](../../resources/tesseradoom-preview.gif)](../../resources/tesseradoom.webm)
 
-*Freedoom's E1M1 in Tesseradoom; click for the full recording
-([`resources/tesseradoom.webm`](../../resources/tesseradoom.webm), 1:41).*
+*Tesseradoom playing Freedoom at 1024 x 768; click for the full recording
+([`resources/tesseradoom.webm`](../../resources/tesseradoom.webm), 5:47, with sound).*
 
 ## Game data: not included
 
@@ -58,8 +58,8 @@ All commands (without one, the game starts at the menu): `start`, `info`, `map M
 `game MAP`, `demo DEMOn [TICS]`, `watch DEMOn`; `--wad FILE` before the command picks another WAD.
 `walk` and `game` read commands from standard input (see `checks/m8_route.txt`).
 
-Keys in the window: arrows or W/S to walk, Left/Right to turn, A/D (or `,` and `.`) to step
-sideways, Shift to run, Space or E to use doors and switches, Control or F to fire, 1 to 7 to pick a
+Keys in the window: arrows or W/S to walk, Left/Right to turn, A/D (or `,` and `.`, or Alt with
+Left/Right) to step sideways, Shift to run, Space or E to use doors and switches, Control or F to fire, 1 to 7 to pick a
 weapon (1 again for the chainsaw), Escape for the menu, F2 to save, F3 to load. The classic codes
 `idkfa` (all weapons, ammunition and keys) and `iddqd` (invulnerability) work while playing.
 

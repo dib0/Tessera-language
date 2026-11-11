@@ -34,7 +34,7 @@ set mobjs += [state.Mobj { kind: t.kind, info: info, x: x, y: y, angle: geometry
 }
 }
 let stats = carried with { keys: [], kills: 0, items: 0, secrets: 0, berserk: false, invulnerable: 0, radiation_suit: 0 }
-var w = state.World { level: l, skill: skill, neighbors: sectors.find_neighbors(l), centers: sectors.find_centers(l), player: movement.start(l), stats: stats, mobjs: mobjs, movers: [], lights: [], missiles: [], effects: [], switched: repeat([0], length(l.sidedefs)), sounds: [], tic: 0, seed: 1, message: "", message_time: 0, cooldown: 0, firing: -1, fire_held: false, use_held: false, exited: 0, momentum_x: 0, momentum_y: 0, damage_flash: 0, bonus_flash: 0 }
+var w = state.World { level: l, skill: skill, neighbors: sectors.find_neighbors(l), sector_lines: sectors.find_sector_lines(l), centers: sectors.find_centers(l), player: movement.start(l), stats: stats, mobjs: mobjs, movers: [], lights: [], missiles: [], effects: [], switched: repeat([0], length(l.sidedefs)), sounds: [], tic: 0, seed: 1, message: "", message_time: 0, cooldown: 0, firing: -1, fire_held: false, use_held: false, exited: 0, momentum_x: 0, momentum_y: 0, damage_flash: 0, bonus_flash: 0 }
 set w.lights = sectors.find_lights(w)
 w
 }
@@ -368,17 +368,17 @@ var out: List[render.SpriteDraw] = []
 for m in w.mobjs {
 if m.present and m.info.sprite != "" {
 let sector = w.level.sectors[m.sector]
-set out += [render.SpriteDraw { x: m.x, y: m.y, z: fixed.from_int(sector.floor), sprite: m.info.sprite, frame: frame_of(m, w.tic), angle: m.angle, light: sector.light }]
+set out += [render.SpriteDraw { x: m.x, y: m.y, z: fixed.from_int(sector.floor), sprite: m.info.sprite, frame: frame_of(m, w.tic), angle: m.angle, light: sector.light, radius: m.info.radius }]
 }
 }
 for m in w.missiles {
 let frame = if (w.tic / 4) % 2 == 0 { "A" } else { "B" }
 let angle = if math.abs(m.dx) >= math.abs(m.dy) { if m.dx > 0 { 0 } else { 4096 } } else if m.dy > 0 { 2048 } else { 6144 }
-set out += [render.SpriteDraw { x: m.x, y: m.y, z: m.z - fixed.from_int(8), sprite: m.sprite, frame: frame, angle: angle, light: 255 }]
+set out += [render.SpriteDraw { x: m.x, y: m.y, z: m.z - fixed.from_int(8), sprite: m.sprite, frame: frame, angle: angle, light: 255, radius: m.radius }]
 }
 for e in w.effects {
 let index = math.min(e.time / e.speed, length(e.frames) - 1)
-set out += [render.SpriteDraw { x: e.x, y: e.y, z: e.z, sprite: e.sprite, frame: slice_text(e.frames, index, index + 1), angle: 0, light: 255 }]
+set out += [render.SpriteDraw { x: e.x, y: e.y, z: e.z, sprite: e.sprite, frame: slice_text(e.frames, index, index + 1), angle: 0, light: 255, radius: 8 }]
 }
 out
 }

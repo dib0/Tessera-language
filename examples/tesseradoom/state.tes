@@ -126,6 +126,7 @@ pub type World {
 level: level.Level
 skill: Int
 neighbors: List[List[Int]]
+sector_lines: List[List[Int]]
 centers: List[List[Int]]
 player: movement.Player
 stats: Stats

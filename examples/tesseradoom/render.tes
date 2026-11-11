@@ -48,7 +48,7 @@ camera: geometry.Camera
 rays: geometry.Rays
 }
 
-note "A thing to draw: position and floor height (fixed), its sprite name and frame letter, the direction it faces (fine angle) and the light of its sector."
+note "A thing to draw: position and floor height (fixed), its sprite name and frame letter, the direction it faces (fine angle), the light of its sector, and its radius in units (walls hide it only where they are nearer than its front)."
 pub type SpriteDraw {
 x: Int
 y: Int
@@ -57,6 +57,7 @@ sprite: Text
 frame: Text
 angle: Int
 light: Int
+radius: Int
 }
 
 note "A sprite after projection, ready to draw from back to front."
@@ -67,6 +68,7 @@ z: Int
 picture: Int
 flipped: Bool
 light: Int
+front: Int
 }
 
 pub fn prepare(l: level.Level, a: art.Art) -> Scene {
@@ -447,7 +449,7 @@ let entry: Option[Int] = match rotated {
 }
 match entry {
 .Some(e) => {
-set projected += [Projected { depth: depth, center: center, z: t.z, picture: e / 2, flipped: e % 2 == 1, light: t.light }]
+set projected += [Projected { depth: depth, center: center, z: t.z, picture: e / 2, flipped: e % 2 == 1, light: t.light, front: depth - fixed.from_int(t.radius) }]
 }
 .None => {}
 }
@@ -499,7 +501,9 @@ set u = picture.width - 1 - u
 let column = u * picture.height
 for y in range(first_y, last_y) {
 let at = y * width + x
-if p.depth < c.depth[at] {
+// A wall hides the sprite only where it is nearer than the front of the thing: a wall beside a
+// monster (which collision keeps at least its radius away) must not cut into its picture.
+if p.front < c.depth[at] {
 let v = math.min(shift_right((y - top) * per_pixel_y + per_pixel_y / 2, 16), picture.height - 1)
 let texel = pixels[column + v]
 if texel >= 0 {

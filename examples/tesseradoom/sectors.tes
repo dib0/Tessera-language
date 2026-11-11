@@ -78,6 +78,26 @@ set found[b] += [a]
 found
 }
 
+note "For every sector, the lines on its edge."
+pub fn find_sector_lines(l: level.Level) -> List[List[Int]] {
+var found = repeat([[0]], length(l.sectors))
+for i in range(0, length(found)) {
+set found[i] = []
+}
+for index in range(0, length(l.linedefs)) {
+let line = l.linedefs[index]
+for side in [line.front, line.back] {
+if side >= 0 {
+let s = l.sidedefs[side].sector
+if not contains(found[s], index) {
+set found[s] += [index]
+}
+}
+}
+}
+found
+}
+
 note "The middle of every sector's bounding box (fixed), where its sounds come from."
 pub fn find_centers(l: level.Level) -> List[List[Int]] {
 var low_x = repeat([32767], length(l.sectors))
@@ -308,13 +328,27 @@ w
 
 // ---------- moving sectors ----------
 
-note "Whether the player or a living monster stands in a sector."
+note "Whether a circle of `size` units at (x, y) reaches into a sector: its centre is inside, or it overlaps one of the sector's edges."
+fn reaches(w: state.World, sector: Int, inside: Int, x: Int, y: Int, size: Int) -> Bool {
+if inside == sector {
+return true
+}
+for index in w.sector_lines[sector] {
+let line = w.level.linedefs[index]
+if movement.touches_radius(x, y, w.level.vertexes[line.start], w.level.vertexes[line.end], size) {
+return true
+}
+}
+false
+}
+
+note "Whether the player or a living monster is (even partly) in a sector, so a closing door must go back up."
 fn occupied(w: state.World, sector: Int) -> Bool {
-if w.player.sector == sector and w.stats.health > 0 {
+if w.stats.health > 0 and reaches(w, sector, w.player.sector, w.player.x, w.player.y, movement.radius()) {
 return true
 }
 for m in w.mobjs {
-if m.sector == sector and state.is_monster(m) and not state.is_dead(m) and m.present {
+if m.present and state.is_monster(m) and not state.is_dead(m) and reaches(w, sector, m.sector, m.x, m.y, m.info.radius) {
 return true
 }
 }
