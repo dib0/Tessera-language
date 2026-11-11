@@ -44,14 +44,30 @@ dx: List[Int]
 dy: List[Int]
 }
 
-pub fn column_rays(trig: Trig, angle: Int) -> Rays {
+note "The screen a view is drawn on: its size and the focal lengths in pixels, horizontally and vertically. They differ when pixels are not square: the original 320 x 200 picture was shown at 4:3, so its pixels were 1.2 times taller than wide."
+pub type Screen {
+width: Int
+height: Int
+focal_x: Int
+focal_y: Int
+}
+
+note "The original 320 x 200 view with a 90 degree field of view; the checks (M4) use it."
+pub fn classic_screen() -> Screen = Screen { width: screen_width(), height: screen_height(), focal_x: focal(), focal_y: focal() }
+
+note "1024 x 768 with square pixels: the same 90 degree field of view, and the original's proportions (vertical focal length 1.2 times the horizontal one)."
+pub fn high_screen() -> Screen = Screen { width: 1024, height: 768, focal_x: 512, focal_y: 614 }
+
+pub fn column_rays(trig: Trig, angle: Int) -> Rays = column_rays_for(trig, angle, classic_screen())
+
+pub fn column_rays_for(trig: Trig, angle: Int, screen: Screen) -> Rays {
 let c = trig.cosine[angle]
 let s = trig.sine[angle]
 var dx: List[Int] = []
 var dy: List[Int] = []
-for x in range(0, screen_width()) {
+for x in range(0, screen.width) {
 // k = (x + 0.5 - width / 2) / focal, as a fixed value.
-let k = (2 * x + 1 - screen_width()) * fixed.one() / (2 * focal())
+let k = (2 * x + 1 - screen.width) * fixed.one() / (2 * screen.focal_x)
 // right = (sin, -cos)
 set dx += [c + fixed.mul(s, k)]
 set dy += [s - fixed.mul(c, k)]

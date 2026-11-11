@@ -17,7 +17,7 @@ import std/math
 import std/palette
 import std/ppm
 
-fn usage() -> Text = "usage: tesseradoom [--wad FILE] [start] | info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
+fn usage() -> Text = "usage: tesseradoom [--wad FILE] [start [--classic]] | info | map MAP | ascii MAP [WIDTH] | raycast MAP OUT.ppm | columns MAP | render MAP OUT.ppm [X Y ANGLE] | bench MAP [FRAMES] [--still] | walk MAP (commands on standard input) | play MAP [--uncapped] [--seconds N] [--no-monsters] [--classic] | game MAP [--no-monsters] (commands on standard input) | demo DEMO1 [TICS] [--no-monsters] | watch DEMO1"
 
 fn load(path: Text) -> wad.Wad uses io, fs, env {
 let data = match read_bytes(path) {
@@ -168,7 +168,7 @@ print("monster \(m.kind) at \(shift_right(m.x, 16)) \(shift_right(m.y, 16)) heal
 let s = game.level.sectors[amount]
 print("sector \(amount) floor \(s.floor) ceiling \(s.ceiling) light \(s.light)")
 }
-"look" => if length(words) > 1 { write_image(w, render.render_world(scene, game.level.sectors, game.switched, world.camera(game), trig, world.sprites(game), sprites), words[1]) }
+"look" => if length(words) > 1 { write_image(w, render.render_world(geometry.classic_screen(), scene, game.level.sectors, game.switched, world.camera(game), trig, world.sprites(game), sprites), words[1]) }
 "weapon" => set game = world.tic(game, none with { weapon: amount - 1 }, trig)
 "give" => set game.stats = game.stats with { weapons: repeat([true], 8), ammo: game.stats.max_ammo, keys: ["blue", "yellow", "red"] }
 "place" => if length(words) >= 4 {
@@ -178,7 +178,7 @@ set game.player = game.player with { x: x, y: y, angle: geometry.degrees_to_fine
 }
 "switch" => print("switch \(amount) \(game.switched[amount])")
 "intermission" => if length(words) > 1 {
-write_frame(play.load_assets(w), play.intermission_pixels(game, scene, play.load_assets(w)), words[1])
+write_frame(play.load_assets(w, false), play.intermission_pixels(game, scene, play.load_assets(w, false)), words[1])
 }
 "save" => if length(words) > 1 {
 match write_text(words[1], save.write(game)) {
@@ -292,7 +292,7 @@ let seconds = match index_of(arguments, "--seconds") {
 .Some(at) => if at + 1 < length(arguments) { value_or(parse_int(arguments[at + 1]), 0) } else { 0 }
 .None => 0
 }
-let result = play.run(play.load_assets(w), l.name, 2, seconds, uncapped, not contains(arguments, "--no-monsters"))
+let result = play.run(play.load_assets(w, not contains(arguments, "--classic")), l.name, 2, seconds, uncapped, not contains(arguments, "--no-monsters"))
 let took = result[1]
 print("\(result[0]) frames in \(took) ms: \(if took > 0 { result[0] * 1000 / took } else { 0 }) frames per second")
 }
@@ -316,11 +316,11 @@ print("at \(game.player.x) \(game.player.y) \(game.player.angle) \(game.player.s
 let d = load_demo(w, command_argument(arguments, 1))
 let l = load_level(w, demo.map_name(d))
 let scene = render.prepare(l, art.load(w, render.wanted_textures(l)))
-let result = play.watch(play.load_assets(w), scene, d.tics, d.skill)
+let result = play.watch(play.load_assets(w, not contains(arguments, "--classic")), scene, d.tics, d.skill)
 print("\(result[0]) frames in \(result[1]) ms")
 }
 "start" => {
-let result = play.run(play.load_assets(w), "", 2, 0, false, not contains(arguments, "--no-monsters"))
+let result = play.run(play.load_assets(w, not contains(arguments, "--classic")), "", 2, 0, false, not contains(arguments, "--no-monsters"))
 print("\(result[0]) frames in \(result[1]) ms")
 }
 "game" => game_console(w, load_level(w, command_argument(arguments, 1)), not contains(arguments, "--no-monsters"))

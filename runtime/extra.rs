@@ -288,7 +288,23 @@ fn t_start_audio() -> Option<std::sync::Arc<std::sync::Mutex<TMixer>>> {
             std::thread::spawn(move || {
                 use std::io::Write;
                 let mut buffer = vec![0u8; 256 * 4];
+                // Pace by the clock: stay about 60 ms ahead of real time. Writing as fast as the
+                // pipe accepts would queue its whole 64 KB buffer (about 0.75 s) in front of every
+                // new sound. When far behind (the program was paused), skip ahead instead of
+                // catching up, which would build the same queue.
+                let started = std::time::Instant::now();
+                let lead: u64 = 22050 * 60 / 1000;
+                let mut written: u64 = 0;
                 loop {
+                    let due = started.elapsed().as_micros() as u64 * 22050 / 1_000_000 + lead;
+                    if written + 256 > due {
+                        std::thread::sleep(std::time::Duration::from_micros((written + 256 - due) * 1_000_000 / 22050));
+                        continue;
+                    }
+                    if due > written + 2 * lead {
+                        written = due - lead;
+                    }
+                    written += 256;
                     {
                         let mut m = match shared.lock() { Ok(m) => m, Err(_) => return };
                         if !m.running { return; }

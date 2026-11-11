@@ -46,11 +46,14 @@ palettes: List[List[Int]]
 shades: List[List[Int]]
 trig: geometry.Trig
 maps: List[Text]
+display: geometry.Screen
+scale: Int
 }
 
 fn menu_pictures() -> List[Text] = ["TITLEPIC", "HELP1", "M_DOOM", "M_NGAME", "M_LOADG", "M_SAVEG", "M_RDTHIS", "M_QUITG", "M_SKULL1", "M_SKULL2", "M_EPISOD", "M_EPI1", "M_EPI2", "M_EPI3", "M_EPI4", "M_NEWG", "M_SKILL", "M_JKILL", "M_ROUGH", "M_HURT", "M_ULTRA", "M_NMARE", "M_LSLEFT", "M_LSCNTR", "M_LSRGHT", "WIMAP0", "WIMAP1", "WIMAP2"]
 
-pub fn load_assets(w: wad.Wad) -> Assets {
+note "Everything for a window: `high` renders the view at 1024 x 768 (menus and the status line are drawn at 320 x 200 and enlarged over it); otherwise at the original 320 x 200, shown twice as large."
+pub fn load_assets(w: wad.Wad, high: Bool) -> Assets {
 var pictures: Map[Text, art.Graphic] = [:]
 for name in menu_pictures() {
 match art.picture(w, name) {
@@ -77,7 +80,7 @@ var palettes: List[List[Int]] = []
 for index in range(0, 14) {
 set palettes += [if length(playpal) >= (index + 1) * 768 { palette.read(playpal, index * 768) } else { palette.read(playpal, 0) }]
 }
-Assets { wad: w, sprites: art.load_sprites(w), sounds: art.load_sounds(w), font: raster.Font { glyphs: glyphs, space: 4, transparent: -1 }, pictures: pictures, palettes: palettes, shades: shades, trig: geometry.make_trig(), maps: wad.map_names(w) }
+Assets { wad: w, sprites: art.load_sprites(w), sounds: art.load_sounds(w), font: raster.Font { glyphs: glyphs, space: 4, transparent: -1 }, pictures: pictures, palettes: palettes, shades: shades, trig: geometry.make_trig(), maps: wad.map_names(w), display: if high { geometry.high_screen() } else { geometry.classic_screen() }, scale: if high { 1 } else { 2 } }
 }
 
 // ---------- sound ----------
@@ -320,8 +323,11 @@ var out = frame
 let s = g.stats
 let kind = things.ammo_kind(s.weapon)
 let ammo = if kind < 0 { "" } else { "  \(to_upper(things.ammo_name(kind))) \(s.ammo[kind])/\(s.max_ammo[kind])" }
-let held_keys = if length(s.keys) == 0 { "" } else { "  KEYS \(join(map(s.keys, initial), ""))" }
-set out = write(out, a, 4, 190, "HEALTH \(s.health)%  ARMOR \(s.armor)%\(ammo)\(held_keys)")
+set out = write(out, a, 4, 190, "HEALTH \(s.health)%  ARMOR \(s.armor)%\(ammo)")
+if length(s.keys) > 0 {
+let held_keys = "KEYS \(join(map(s.keys, initial), ""))"
+set out = write(out, a, geometry.screen_width() - 4 - raster.measure(a.font, held_keys), 180, held_keys)
+}
 if g.message_time > 0 {
 set out = write(out, a, 4, 3, g.message)
 }
@@ -346,17 +352,32 @@ set out = raster.blit(out, hand.image, 1 - hand.left, 32 - hand.top, -1)
 out
 }
 
-fn game_frame(app: App, a: Assets) -> raster.Image = view_frame(app.scene, app.game, a)
+fn game_frame(app: App, a: Assets) -> raster.Image = view_frame(app.scene, app.game, a, "")
 
-fn view_frame(scene: render.Scene, g: state.World, a: Assets) -> raster.Image {
-var frame = raster.from_pixels(geometry.screen_width(), render.render_world(scene, g.level.sectors, g.switched, world.camera(g), a.trig, world.sprites(g), a.sprites))
-set frame = weapon(frame, a, g)
-set frame = hud(frame, a, g)
-frame
+note "An empty interface layer: 320 x 200, all transparent (-1)."
+fn layer() -> raster.Image = raster.blank(geometry.screen_width(), geometry.screen_height(), -1)
+
+note "Draws a 320 x 200 interface layer enlarged over a frame of the display's size."
+fn compose(base: raster.Image, interface: raster.Image) -> raster.Image = raster.stretch(base, interface, 0, 0, base.width, base.height, -1)
+
+note "A frame of the display's size showing only an (opaque) 320 x 200 picture."
+fn full(a: Assets, picture: raster.Image) -> raster.Image = compose(raster.blank(a.display.width, a.display.height, 0), picture)
+
+note "The 3D view at the display's resolution, with the weapon, status line and `corner` text drawn over it."
+fn view_frame(scene: render.Scene, g: state.World, a: Assets, corner: Text) -> raster.Image {
+let view = raster.from_pixels(a.display.width, render.render_world(a.display, scene, g.level.sectors, g.switched, world.camera(g), a.trig, world.sprites(g), a.sprites))
+var interface = layer()
+set interface = weapon(interface, a, g)
+set interface = hud(interface, a, g)
+if corner != "" {
+set interface = write(interface, a, 250, 3, corner)
+}
+compose(view, interface)
 }
 
 fn menu_frame(app: App, a: Assets, tic: Int, descriptions: List[Text]) -> raster.Image {
-var pixels = if app.in_game { raster.remap(game_frame(app, a), a.shades[18]) } else { raster.remap(picture_at(black(a), a, "TITLEPIC", 0, 0), a.shades[if app.screen == "level" { 24 } else { 14 }]) }
+let background = if app.in_game { raster.remap(game_frame(app, a), a.shades[18]) } else { full(a, raster.remap(picture_at(black(a), a, "TITLEPIC", 0, 0), a.shades[if app.screen == "level" { 24 } else { 14 }])) }
+var pixels = layer()
 let skull = if (tic / 8) % 2 == 0 { "M_SKULL1" } else { "M_SKULL2" }
 let items = menu_items(app.screen)
 match app.screen {
@@ -410,10 +431,10 @@ set pixels = picture_at(pixels, a, skull, 40, 54 + app.item * 16)
 if app.message != "" {
 set pixels = centered(pixels, a, 170, app.message)
 }
-pixels
+compose(background, pixels)
 }
 
-fn intermission_frame(app: App, a: Assets) -> raster.Image = raster.from_pixels(geometry.screen_width(), intermission_pixels(app.game, app.scene, a))
+fn intermission_frame(app: App, a: Assets) -> raster.Image = full(a, raster.from_pixels(geometry.screen_width(), intermission_pixels(app.game, app.scene, a)))
 
 note "The screen between levels: the level's name, kills, items and secrets in percent, the time, and the next map."
 pub fn intermission_pixels(g: state.World, scene: render.Scene, a: Assets) -> List[Int] {
@@ -452,9 +473,9 @@ fn percent(part: Int, whole: Int) -> Int = if whole <= 0 { 100 } else { math.min
 
 note "Runs the game in a window until the player quits. With `start_map` empty it starts at the title screen, otherwise directly in that map. `uncapped` renders as fast as possible (to measure), `seconds` > 0 stops after that many seconds. Returns the number of frames shown and the time taken in milliseconds."
 pub fn run(a: Assets, start_map: Text, skill: Int, seconds: Int, uncapped: Bool, monsters: Bool) -> List[Int] uses ui, time, audio, fs {
-let scale = 2
-let width = geometry.screen_width()
-let height = geometry.screen_height()
+let scale = a.scale
+let width = a.display.width
+let height = a.display.height
 open_window("Tesseradoom", width * scale, height * scale)
 let first = if start_map == "" { "E1M1" } else { start_map }
 let scene = level_scene(a, first) else return [0, 0]
@@ -512,8 +533,8 @@ set tics += 1
 let frame = match app.screen {
 "game" => game_frame(app, a)
 "intermission" => intermission_frame(app, a)
-"title" => picture_at(black(a), a, "TITLEPIC", 0, 0)
-"help" => picture_at(black(a), a, "HELP1", 0, 0)
+"title" => full(a, picture_at(black(a), a, "TITLEPIC", 0, 0))
+"help" => full(a, picture_at(black(a), a, "HELP1", 0, 0))
 _ => menu_frame(app, a, tics, slots)
 }
 let palette_index = if app.screen == "game" { world.palette_index(app.game) } else { 0 }
@@ -537,9 +558,9 @@ sleep(wait)
 
 note "Plays back demo input in the window at 35 tics per second, with sound; any key or closing the window stops. Returns the frames shown and the time taken."
 pub fn watch(a: Assets, scene: render.Scene, tics: List[state.Input], skill: Int) -> List[Int] uses ui, time, audio {
-let scale = 2
-let width = geometry.screen_width()
-let height = geometry.screen_height()
+let scale = a.scale
+let width = a.display.width
+let height = a.display.height
 open_window("Tesseradoom - demo of \(scene.level.name)", width * scale, height * scale)
 var game = world.create_at_skill(scene.level, skill)
 let started = monotonic()
@@ -561,7 +582,7 @@ set game = world.tic(game, tics[done], a.trig)
 play_world_sounds(a, game)
 set done += 1
 }
-let frame = write(view_frame(scene, game, a), a, 250, 3, "DEMO \(done)")
+let frame = view_frame(scene, game, a, "DEMO \(done)")
 draw_pixels(0, 0, width, raster.remap(frame, a.palettes[world.palette_index(game)]).pixels, scale)
 present()
 set frames += 1

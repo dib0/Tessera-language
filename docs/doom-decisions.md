@@ -39,6 +39,8 @@ for the starting view; the cause was in the compiler (`set c = f(c)` copied reco
 moving them, so every drawing call copied the frame buffer), and fixing it there (draft 0.18) made
 rendering about 20 times faster without changing the program.
 
+Since 2026-11-11 the window renders the view at 1024 x 768 with the original's 4:3 proportions (menus and status line stay 320 x 200 artwork, enlarged): 63 frames per second uncapped, above the target; `--classic` keeps 320 x 200 (448 frames per second).
+
 ## D4. License: MIT engine, Freedoom game data
 
 The engine stays MIT, like the rest of the repository, and is written from public descriptions of

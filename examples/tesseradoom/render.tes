@@ -40,6 +40,7 @@ open: Int
 
 note "The parts of a frame that change while playing: sector heights (doors, lifts) and lights."
 type View {
+screen: geometry.Screen
 scene: Scene
 sectors: List[level.Sector]
 switched: List[Int]
@@ -124,14 +125,14 @@ keys(names)
 }
 
 note "Renders the level as it was loaded, without things."
-pub fn render(scene: Scene, camera: geometry.Camera, trig: geometry.Trig) -> List[Int] = render_world(scene, scene.level.sectors, repeat([0], length(scene.level.sidedefs)), camera, trig, [], art.Sprites { pictures: [], frames: [:] })
+pub fn render(scene: Scene, camera: geometry.Camera, trig: geometry.Trig) -> List[Int] = render_world(geometry.classic_screen(), scene, scene.level.sectors, repeat([0], length(scene.level.sidedefs)), camera, trig, [], art.Sprites { pictures: [], frames: [:] })
 
 note "Renders a frame with the current sector heights and the given things."
-pub fn render_world(scene: Scene, sectors: List[level.Sector], switched: List[Int], camera: geometry.Camera, trig: geometry.Trig, things: List[SpriteDraw], sprites: art.Sprites) -> List[Int] {
-let width = geometry.screen_width()
-let height = geometry.screen_height()
+pub fn render_world(screen: geometry.Screen, scene: Scene, sectors: List[level.Sector], switched: List[Int], camera: geometry.Camera, trig: geometry.Trig, things: List[SpriteDraw], sprites: art.Sprites) -> List[Int] {
+let width = screen.width
+let height = screen.height
 var canvas = Canvas { pixels: repeat([0], width * height), depth: repeat([far()], width * height), top: repeat([0], width), bottom: repeat([height - 1], width), open: width }
-let view = View { scene: scene, sectors: sectors, switched: switched, camera: camera, rays: geometry.column_rays(trig, camera.angle) }
+let view = View { screen: screen, scene: scene, sectors: sectors, switched: switched, camera: camera, rays: geometry.column_rays_for(trig, camera.angle, screen) }
 let nodes = length(scene.level.nodes)
 // Only `set canvas = f(canvas, ...)` changes the canvas in place (spec 6.2); other forms would copy it.
 if nodes == 0 {
@@ -175,11 +176,11 @@ fn screen_x(view: View, x: Int, y: Int) -> Int {
 let cam = view.camera
 let dx = fixed.from_int(x) - cam.x
 let dy = fixed.from_int(y) - cam.y
-let c = view.rays.dx[geometry.screen_width() / 2]
-let s = view.rays.dy[geometry.screen_width() / 2]
+let c = view.rays.dx[view.screen.width / 2]
+let s = view.rays.dy[view.screen.width / 2]
 let forward = fixed.mul(dx, c) + fixed.mul(dy, s)
 let side = fixed.mul(dx, s) - fixed.mul(dy, c)
-geometry.screen_width() / 2 + side * geometry.focal() / math.max(forward, 1)
+view.screen.width / 2 + side * view.screen.focal_x / math.max(forward, 1)
 }
 
 note "View-space depth (fixed) of a map point."
@@ -187,7 +188,7 @@ fn depth(view: View, x: Int, y: Int) -> Int {
 let cam = view.camera
 let dx = fixed.from_int(x) - cam.x
 let dy = fixed.from_int(y) - cam.y
-fixed.mul(dx, view.rays.dx[geometry.screen_width() / 2]) + fixed.mul(dy, view.rays.dy[geometry.screen_width() / 2])
+fixed.mul(dx, view.rays.dx[view.screen.width / 2]) + fixed.mul(dy, view.rays.dy[view.screen.width / 2])
 }
 
 note "The column range a seg can cover. Points behind the camera are replaced by the screen edge on their side, which can only widen the range; the exact intersection per column decides what is drawn."
@@ -198,12 +199,12 @@ let db = depth(view, b.x, b.y)
 if da < near and db < near {
 return [0, 0]
 }
-let left = if da < near { 0 } else { math.clamp(screen_x(view, a.x, a.y), 0, geometry.screen_width()) }
-let right = if db < near { geometry.screen_width() } else { math.clamp(screen_x(view, b.x, b.y) + 1, 0, geometry.screen_width()) }
+let left = if da < near { 0 } else { math.clamp(screen_x(view, a.x, a.y), 0, view.screen.width) }
+let right = if db < near { view.screen.width } else { math.clamp(screen_x(view, b.x, b.y) + 1, 0, view.screen.width) }
 [left, right]
 }
 
-fn row_of(height: Int, eye: Int, distance: Int) -> Int = geometry.screen_height() / 2 - (height - eye) * geometry.focal() / distance
+fn row_of(view: View, height: Int, eye: Int, distance: Int) -> Int = view.screen.height / 2 - (height - eye) * view.screen.focal_y / distance
 
 fn light_row(light: Int, distance: Int) -> Int = math.clamp((255 - light) / 8 + fixed.floor_int(distance) / 96, 0, 31)
 
@@ -253,8 +254,8 @@ if hit.hit and hit.distance > 1024 {
 let distance = hit.distance
 let u = seg.offset + side.x_offset + fixed.floor_int(hit.along * seg_length)
 let light = light_row(front.light, distance)
-let wall_top = math.max(row_of(ceiling, cam.z, distance), top)
-let wall_bottom = math.min(row_of(floor, cam.z, distance) - 1, bottom)
+let wall_top = math.max(row_of(view, ceiling, cam.z, distance), top)
+let wall_bottom = math.min(row_of(view, floor, cam.z, distance) - 1, bottom)
 // Ceiling (or sky) above the wall, floor below it.
 if front_sky {
 set c = draw_sky(view, c, x, top, math.min(wall_top - 1, bottom))
@@ -267,7 +268,7 @@ set c = draw_flat(view, c, x, math.max(wall_bottom + 1, top), bottom, floor, sce
 if not two_sided {
 let texture_top = if lower_unpegged { floor + fixed.from_int(texture_height(scene, middle_texture)) } else { ceiling }
 set c = draw_wall(view, c, x, wall_top, wall_bottom, middle_texture, u, texture_top + fixed.from_int(side.y_offset), distance, light)
-set c = mark_depth(c, x, wall_top, wall_bottom, distance)
+set c = mark_depth(view, c, x, wall_top, wall_bottom, distance)
 set c.top[x] = bottom + 1
 set c.bottom[x] = top - 1
 set c.open -= 1
@@ -275,22 +276,22 @@ set c.open -= 1
 var new_top = wall_top
 var new_bottom = wall_bottom
 if back_ceiling < ceiling and not (front_sky and back_sky) {
-let upper_end = math.min(row_of(back_ceiling, cam.z, distance) - 1, wall_bottom)
+let upper_end = math.min(row_of(view, back_ceiling, cam.z, distance) - 1, wall_bottom)
 let texture_top = if upper_unpegged { ceiling } else { back_ceiling + fixed.from_int(texture_height(scene, upper_texture)) }
 set c = draw_wall(view, c, x, wall_top, upper_end, upper_texture, u, texture_top + fixed.from_int(side.y_offset), distance, light)
-set c = mark_depth(c, x, wall_top, upper_end, distance)
+set c = mark_depth(view, c, x, wall_top, upper_end, distance)
 set new_top = math.max(new_top, upper_end + 1)
 }
 if back_floor > floor {
-let lower_start = math.max(row_of(back_floor, cam.z, distance), new_top)
+let lower_start = math.max(row_of(view, back_floor, cam.z, distance), new_top)
 let texture_top = if lower_unpegged { ceiling } else { back_floor }
 set c = draw_wall(view, c, x, lower_start, wall_bottom, lower_texture, u, texture_top + fixed.from_int(side.y_offset), distance, light)
-set c = mark_depth(c, x, lower_start, wall_bottom, distance)
+set c = mark_depth(view, c, x, lower_start, wall_bottom, distance)
 set new_bottom = math.min(new_bottom, lower_start - 1)
 }
 // A closed door or a step up to the ceiling closes the column.
 if back_ceiling <= back_floor or new_top > new_bottom {
-set c = mark_depth(c, x, new_top, new_bottom, distance)
+set c = mark_depth(view, c, x, new_top, new_bottom, distance)
 set c.top[x] = bottom + 1
 set c.bottom[x] = top - 1
 set c.open -= 1
@@ -319,11 +320,11 @@ let h = picture.height
 let column = ((u % picture.width) + picture.width) % picture.width * h
 let colormap = view.scene.art.colormap
 let shade = light * 256
-let width = geometry.screen_width()
-let focal = geometry.focal()
+let width = view.screen.width
+let focal = view.screen.focal_y
 // World height of a row's centre: eye + (centre_row - row - 0.5) * distance / focal.
 let step = distance / focal
-var v = texture_top - (view.camera.z + (2 * (geometry.screen_height() / 2 - from) - 1) * distance / (2 * focal))
+var v = texture_top - (view.camera.z + (2 * (view.screen.height / 2 - from) - 1) * distance / (2 * focal))
 var at = from * width + x
 for _ in range(from, to + 1) {
 let row = ((shift_right(v, 16) % h) + h) % h
@@ -349,9 +350,9 @@ let cam = view.camera
 let dz = cam.z - height
 let ray_x = view.rays.dx[x]
 let ray_y = view.rays.dy[x]
-let centre = geometry.screen_height() / 2
-let width = geometry.screen_width()
-let scaled_height = dz * 2 * geometry.focal()
+let centre = view.screen.height / 2
+let width = view.screen.width
+let scaled_height = dz * 2 * view.screen.focal_y
 let base_light = (255 - light) / 8
 var at = from * width + x
 for y in range(from, to + 1) {
@@ -381,29 +382,29 @@ return c
 let picture = view.scene.art.textures[sky]
 let pixels = picture.pixels
 let h = picture.height
-let u = ((x * 256 / geometry.screen_width() - view.camera.angle * 1024 / geometry.fine_angles()) % picture.width + picture.width) % picture.width
+let u = ((x * 256 / view.screen.width - view.camera.angle * 1024 / geometry.fine_angles()) % picture.width + picture.width) % picture.width
 for y in range(from, to + 1) {
-let row = math.min(y * h / (geometry.screen_height() / 2 + 20), h - 1)
+let row = math.min(y * h / (view.screen.height * 6 / 10), h - 1)
 let texel = pixels[u * h + row]
 if texel >= 0 {
-set c.pixels[y * geometry.screen_width() + x] = texel
+set c.pixels[y * view.screen.width + x] = texel
 }
 }
 c
 }
 
 note "Records the distance of the wall covering rows `from` to `to` of a column, for hiding sprites behind it."
-fn mark_depth(canvas: Canvas, x: Int, from: Int, to: Int, distance: Int) -> Canvas {
+fn mark_depth(view: View, canvas: Canvas, x: Int, from: Int, to: Int, distance: Int) -> Canvas {
 var c = canvas
 let first = math.max(from, 0)
-let last = math.min(to, geometry.screen_height() - 1)
+let last = math.min(to, view.screen.height - 1)
 if first > last {
 return c
 }
-var at = first * geometry.screen_width() + x
+var at = first * view.screen.width + x
 for _ in range(first, last + 1) {
 set c.depth[at] = distance
-set at += geometry.screen_width()
+set at += view.screen.width
 }
 c
 }
@@ -428,8 +429,8 @@ best + 1
 fn draw_sprites(view: View, canvas: Canvas, things: List[SpriteDraw], sprites: art.Sprites, trig: geometry.Trig) -> Canvas {
 var c = canvas
 let cam = view.camera
-let ahead_x = view.rays.dx[geometry.screen_width() / 2]
-let ahead_y = view.rays.dy[geometry.screen_width() / 2]
+let ahead_x = view.rays.dx[view.screen.width / 2]
+let ahead_y = view.rays.dy[view.screen.width / 2]
 var projected: List[Projected] = []
 for t in things {
 let dx = t.x - cam.x
@@ -437,8 +438,8 @@ let dy = t.y - cam.y
 let depth = fixed.mul(dx, ahead_x) + fixed.mul(dy, ahead_y)
 if depth > fixed.from_int(4) and depth < fixed.from_int(8192) {
 let side = fixed.mul(dx, ahead_y) - fixed.mul(dy, ahead_x)
-let center = geometry.screen_width() / 2 + side * geometry.focal() / depth
-if center > -200 and center < geometry.screen_width() + 200 {
+let center = view.screen.width / 2 + side * view.screen.focal_x / depth
+if center > -view.screen.width and center < 2 * view.screen.width {
 let rotated = get(sprites.frames, t.sprite + t.frame + to_text(rotation(trig, t.angle, -dx, -dy)))
 let entry: Option[Int] = match rotated {
 .Some(e) => .Some(e)
@@ -461,19 +462,21 @@ c
 
 fn draw_sprite(view: View, canvas: Canvas, picture: art.Picture, p: Projected) -> Canvas {
 var c = canvas
-let width = geometry.screen_width()
-let height = geometry.screen_height()
-// Pixels per map unit, and map units per pixel, both as fixed values.
-let per_unit = geometry.focal() * shift_left(1, 32) / p.depth
-if per_unit <= 0 {
+let width = view.screen.width
+let height = view.screen.height
+// Pixels per map unit, and map units per pixel, both as fixed values, across and down.
+let per_unit = view.screen.focal_x * shift_left(1, 32) / p.depth
+let per_unit_y = view.screen.focal_y * shift_left(1, 32) / p.depth
+if per_unit <= 0 or per_unit_y <= 0 {
 return c
 }
 let per_pixel = shift_left(1, 32) / per_unit
+let per_pixel_y = shift_left(1, 32) / per_unit_y
 let left = p.center - shift_right(picture.left * per_unit, 16)
 let right = left + shift_right(picture.width * per_unit, 16)
 let top_z = p.z + fixed.from_int(picture.top)
-let top = height / 2 - (top_z - view.camera.z) * geometry.focal() / p.depth
-let bottom = top + shift_right(picture.height * per_unit, 16)
+let top = height / 2 - (top_z - view.camera.z) * view.screen.focal_y / p.depth
+let bottom = top + shift_right(picture.height * per_unit_y, 16)
 let colormap = view.scene.art.colormap
 let shade = math.clamp((255 - p.light) / 8 + fixed.floor_int(p.depth) / 96, 0, 31) * 256
 let pixels = picture.pixels
@@ -497,7 +500,7 @@ let column = u * picture.height
 for y in range(first_y, last_y) {
 let at = y * width + x
 if p.depth < c.depth[at] {
-let v = math.min(shift_right((y - top) * per_pixel + per_pixel / 2, 16), picture.height - 1)
+let v = math.min(shift_right((y - top) * per_pixel_y + per_pixel_y / 2, 16), picture.height - 1)
 let texel = pixels[column + v]
 if texel >= 0 {
 set c.pixels[at] = colormap[shade + texel]

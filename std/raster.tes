@@ -108,6 +108,31 @@ set out.pixels[row * out.width + column] = value
 out
 }
 
+note "Copies `source` scaled to `width` x `height` pixels with its top-left corner at (x, y), each target pixel taking the nearest source pixel; pixels equal to `transparent` are left out. Enlarges (an interface drawn at low resolution over a large view) as well as shrinks."
+pub fn stretch(image: Image, source: Image, x: Int, y: Int, width: Int, height: Int, transparent: Int) -> Image {
+var out = image
+if width <= 0 or height <= 0 {
+return out
+}
+let left = math.max(x, 0)
+let right = math.min(x + width, out.width)
+let top = math.max(y, 0)
+let bottom = math.min(y + height, out.height)
+if left >= right or top >= bottom {
+return out
+}
+for row in range(top, bottom) {
+let from = (row - y) * source.height / height * source.width
+for column in range(left, right) {
+let value = source.pixels[from + (column - x) * source.width / width]
+if value != transparent {
+set out.pixels[row * out.width + column] = value
+}
+}
+}
+out
+}
+
 note "Replaces every value v by `table[v]`: palette indexes to colors, or a light table that darkens. R001 for a value outside the table."
 pub fn remap(image: Image, table: List[Int]) -> Image {
 var out = image

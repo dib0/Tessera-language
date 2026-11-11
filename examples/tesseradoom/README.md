@@ -44,7 +44,8 @@ data, and no bundled WAD files.
 
 ```sh
 ../../bin/tessera1 build main.tes -o tesseradoom --opt 3     # after ../../build.sh
-./tesseradoom                            # title screen and menus, in a window (X11), with sound
+./tesseradoom                            # title screen and menus, 1024 x 768 window (X11), with sound
+./tesseradoom start --classic            # the original 320 x 200 picture, shown at 640 x 400
 ./tesseradoom play E1M1                  # straight into a map, 35 tics per second
 ./tesseradoom play E1M1 --no-monsters
 ./tesseradoom watch DEMO1                # play back a demo lump
