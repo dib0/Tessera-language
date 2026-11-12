@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use Tessera or refer to its measurements, please cite it as below."
+title: "Tessera: a programming language designed by measurement against language models"
+abstract: >-
+  Tessera is a programming language for software that language models write and
+  people review. Its design decisions are made by measurement rather than taste:
+  a harness has models solve programming tasks from a single language reference,
+  compiles every answer, and records pass rate, attempts and token cost per
+  variant of the language. The repository holds the specification, two compilers
+  (a frozen reference in Rust and a self-hosting one written in Tessera), the
+  runtime, the standard modules, the measurement harness and the examples,
+  including a DOOM-style engine used as a proof point.
+type: software
+authors:
+  - family-names: "van den Berg"
+    given-names: "Bas"
+repository-code: "https://github.com/dib0/Tessera-language"
+url: "https://tessera-language.com"
+license: MIT
+version: "0.21"
+date-released: 2026-11-12
+keywords:
+  - programming language
+  - language model
+  - large language model
+  - compiler
+  - self-hosting
+  - effect system
+  - code generation
+  - empirical language design

@@ -46,10 +46,18 @@ harness/.venv/bin/python harness/harness.py report harness/results/<dir> ...
   this file, so keep it in step with `language-design.md`.
 - `reference/features/<name>.md` (none at the moment): extra sections appended for variants that list
   the feature, to try a language feature before it goes into the main reference.
-- `variants.json`: variant name -> indentation width and enabled feature sections. The reference
-  and the task's starter code are re-indented to the variant's width. `baseline` is the language as
-  specified, without indentation, which is also how every file in the harness is stored. Other
-  widths are derived from the nesting of `{ ( [`, so code stored at any width renders the same.
+- `variants.json`: variant name -> indentation width, enabled feature sections, and whether the
+  model is given the reference at all. The reference and the task's starter code are re-indented to
+  the variant's width. `baseline` is the language as specified, without indentation, which is also
+  how every file in the harness is stored. Other widths are derived from the nesting of `{ ( [`, so
+  code stored at any width renders the same.
+- `no-reference` is not a language variant but a measurement of the outside world: `"reference":
+  false` gives the model no reference at all, only the rules its answer must follow to be gradeable
+  (661 characters against 28,000). It answers one question: does this model already know Tessera?
+  Expect 0% until Tessera reaches training data, and run it against each new model release to find
+  out when that changes. Two caveats. The `extend-` tasks show Tessera in their starter code, so
+  they are the easiest and will move first. And `dry-run` answers with the stored solution without
+  reading the prompt, so it passes this variant too and proves nothing about it; only `run` does.
 - Web tasks (`kind` `web`, e.g. `web-router`) are programs with `handle` instead of `main`; their tests run
   `app request METHOD PATH` and compare only the status line and the body, so any correct choice of
   headers passes. A test with a `stderr` entry also compares standard error (error messages).

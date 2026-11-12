@@ -64,9 +64,9 @@ weapon (1 again for the chainsaw), Escape for the menu, F2 to save, F3 to load. 
 `idkfa` (all weapons, ammunition and keys) and `iddqd` (invulnerability) work while playing.
 
 New Game asks for an episode, a skill level and then the map to start on, so any level can be
-played directly; finishing a map continues with the next one. Saved games go to `saves/` in the current directory (six slots, plain text). Sound plays through
-`aplay` or `pw-cat` (see `play_sound` in the language specification); without either the game is
-silent.
+played directly; finishing a map continues with the next one. Saved games go to `saves/` in the current directory (six slots, plain text). Sound goes to the sound card
+on Windows, and through `aplay` or `pw-cat` on unix (see `play_sound` in the language
+specification); without a way to play, the game is silent.
 
 ## Modules
 

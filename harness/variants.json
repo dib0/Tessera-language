@@ -1,5 +1,15 @@
 {
-  "baseline": {"indent": 0},
-  "indent-2": {"indent": 2},
-  "indent-4": {"indent": 4}
+  "baseline": {
+    "indent": 0
+  },
+  "indent-2": {
+    "indent": 2
+  },
+  "indent-4": {
+    "indent": 4
+  },
+  "no-reference": {
+    "indent": 0,
+    "reference": false
+  }
 }

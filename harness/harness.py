@@ -46,6 +46,13 @@ class Variant:
     name: str
     indent: int = 4
     features: list[str] = field(default_factory=list)
+    # With `reference: false` the model gets no language reference at all, only
+    # the harness rules its answer must follow to be gradeable. That measures
+    # what a model already knows about Tessera, which is the one number that
+    # says whether Tessera has reached anyone's training data; expect 0% until
+    # it has. The two `extend-` tasks still show Tessera in their starter code,
+    # so they are the easiest and will move first.
+    reference: bool = True
 
 
 def load_variants() -> dict[str, Variant]:
@@ -136,16 +143,28 @@ def render_reference(variant: Variant) -> str:
 
 
 def system_prompt(variant: Variant) -> str:
+    rules = (
+        "Rules for every answer:\n"
+        "- Reply with the complete program in a single ```tessera code block. Text outside the block is ignored.\n"
+        "- The program is one file with a `main` function, or `handle` when the task asks for a web application. Its entry function may only use the effects `io` and `env` (a web application: none).\n"
+    )
+    last = "- Output must match the task exactly, including spacing and line breaks.\n"
+    if not variant.reference:
+        # Nothing that teaches the language, not even how it is laid out.
+        return (
+            "You write programs in Tessera, a programming language. You are given no reference for it: "
+            "write it from what you already know. You have no way to run code yourself; a test harness "
+            "compiles and runs your program and reports compiler errors or failing tests back to you.\n\n"
+            + rules + last
+        )
     return (
         "You write programs in Tessera, a programming language described in the reference below. "
         "You have no other documentation and no way to run code yourself; a test harness compiles "
         "and runs your program and reports compiler errors or failing tests back to you.\n\n"
-        "Rules for every answer:\n"
-        "- Reply with the complete program in a single ```tessera code block. Text outside the block is ignored.\n"
-        "- The program is one file with a `main` function, or `handle` when the task asks for a web application. Its entry function may only use the effects `io` and `env` (a web application: none).\n"
-        f"- {indent_rule(variant.indent)}\n"
-        "- Output must match the task exactly, including spacing and line breaks.\n\n"
-        "<tessera_reference>\n" + render_reference(variant) + "\n</tessera_reference>"
+        + rules
+        + f"- {indent_rule(variant.indent)}\n"
+        + last + "\n"
+        + "<tessera_reference>\n" + render_reference(variant) + "\n</tessera_reference>"
     )
 
 

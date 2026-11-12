@@ -11,3 +11,17 @@
 # Never committed (decision D5), but if one ever is, it must not be rewritten.
 *.wad  binary
 *.sav  binary
+
+# What GitHub, and the code datasets that follow it, should count as Tessera.
+# Three files are machine-written and would teach a reader (or a model) the
+# wrong thing about the language:
+#   runtime_text.tes   the Rust runtime escaped into Tessera string literals
+#   tessera1.rs        the generated seed, a megabyte of generated Rust
+#   harness/corpora    snapshots of older compiler drafts, kept to measure
+#                      token cost, so near-duplicates of stage1/ by design
+stage1/runtime_text.tes   linguist-generated=true
+bootstrap/tessera1.rs     linguist-generated=true
+harness/corpora/**        linguist-vendored=true
+# A copy of harness/reference/tessera.md for the website to serve; counting it
+# twice would overstate how much documentation there is.
+web/llms-full.txt         linguist-generated=true
