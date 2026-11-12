@@ -73,7 +73,7 @@ Rust is the initial implementation and code-generation path, not part of Tessera
 
 ## Getting started
 
-Requires Rust (`rustc` and `cargo`, from https://rustup.rs) and runs on Linux, macOS and Windows; on Windows in Git Bash. Graphical programs need an X11 session on Linux and nothing extra on Windows.
+Requires Rust (`rustc` and `cargo`, from https://rustup.rs). Linux and Windows are both tested, Windows in Git Bash; macOS is expected to work apart from graphics, but is not tested. Graphical programs need an X11 session on Linux and nothing extra on Windows.
 
 ```sh
 ./build.sh                                    # stage 0, stage 1, self-hosting check

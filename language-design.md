@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.21. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10). Both compilers run on Linux, macOS and Windows (draft 0.21, section 16.1).
+**Status:** Draft 0.21. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -847,7 +847,7 @@ The runtime talks to the window system of the machine it was built for, without 
 - **unix:** a local X11 display, over its socket, in safe Rust (`runtime/ui.rs`). `DISPLAY` must be set.
 - **Windows:** a window of its own, drawn with GDI (`runtime/win32.rs`). This is the one place in a `ui` program where `unsafe` is allowed; see section 16.
 
-Both draw into an off-screen buffer that `present()` shows, both report the same events with the same key names, and a program cannot tell which one it got. macOS has no window backend yet; everything else in the language works there.
+Both draw into an off-screen buffer that `present()` shows, both report the same events with the same key names, and a program cannot tell which one it got. macOS has no backend: a program that uses `ui` does not build there.
 
 ### 9.5 Modules
 
@@ -1375,15 +1375,15 @@ Since draft 0.13 stage 1 inserts stack and time checks into generated functions 
 
 ### 16.1 Systems
 
-The compiler and the programs it builds run on Linux, macOS and Windows. The only thing a system must provide is `rustc`; the compiler starts it to turn its generated Rust into an executable.
+The compiler and the programs it builds run on Linux and on Windows; the only thing a system must provide is `rustc`, which the compiler starts to turn its generated Rust into an executable. Both are tested on every change. macOS is not: it takes the unix side of every `#[cfg]` in the runtime, exactly as Linux does, so everything except `ui` is expected to work there, but that is an expectation and not a measurement.
 
-| | Linux | macOS | Windows |
+| | Linux | Windows | macOS |
 |---|---|---|---|
-| Compiler, console programs, files, modules, `std/` | yes | yes | yes |
-| Web applications (`handle`, `serve`, CGI, `--library`) | yes | yes | yes |
-| `db` (needs the `sqlite3` command) | yes | yes | yes, once `sqlite3` is on `PATH` |
-| `ui` | X11 | not yet | GDI |
-| `audio` | `aplay` or `pw-cat` | `TESSERA_AUDIO_PLAYER` | the sound card itself |
+| Compiler, console programs, files, modules, `std/` | yes | yes | expected, untested |
+| Web applications (`handle`, `serve`, CGI, `--library`) | yes | yes | expected, untested |
+| `db` (needs the `sqlite3` command) | yes | yes, once `sqlite3` is on `PATH` | expected, untested |
+| `ui` | X11 | GDI | no backend |
+| `audio` | `aplay` or `pw-cat` | the sound card itself | `TESSERA_AUDIO_PLAYER` only |
 
 On Windows:
 

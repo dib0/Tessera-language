@@ -1,6 +1,6 @@
 # Tessera language reference
 
-Tessera is a statically typed, expression-oriented language. Programs compile to safe native code. This reference describes language draft 0.21 and is complete for command-line programs, programs split into modules, web applications and graphical programs. The same programs run on Linux, macOS and Windows. The authoritative specification is `language-design.md`.
+Tessera is a statically typed, expression-oriented language. Programs compile to safe native code. This reference describes language draft 0.21 and is complete for command-line programs, programs split into modules, web applications and graphical programs. The same programs run on Linux and on Windows. The authoritative specification is `language-design.md`.
 
 ## Program structure
 

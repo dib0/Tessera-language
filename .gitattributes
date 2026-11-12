@@ -22,6 +22,3 @@
 stage1/runtime_text.tes   linguist-generated=true
 bootstrap/tessera1.rs     linguist-generated=true
 harness/corpora/**        linguist-vendored=true
-# A copy of harness/reference/tessera.md for the website to serve; counting it
-# twice would overstate how much documentation there is.
-web/llms-full.txt         linguist-generated=true

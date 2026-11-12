@@ -4,7 +4,7 @@
 #   bin/tessera-bootstrap            compiler built from the seed bootstrap/tessera1.rs
 #   bin/tessera1                     stage 1 compiler (stage1/, built by the bootstrap compiler)
 #   tools/xsend/xsend                test helper that sends clicks/keys to windows
-# and regenerates stage1/runtime_text.tes and web/llms*.txt from their sources.
+# and regenerates stage1/runtime_text.tes from runtime/ and std/.
 #
 # Runs on Linux, macOS and on Windows in Git Bash; there the programs get the
 # `.exe` extension Windows needs and the X11 test helper is skipped.
@@ -33,10 +33,6 @@ $tessera0 run tools/embed_runtime.tes -- stage1/runtime_text.tes core_runtime=ru
     win32_runtime=runtime/win32.rs audio_runtime=runtime/audio.rs winmm_runtime=runtime/winmm.rs \
     extra_runtime=runtime/extra.rs web_runtime=runtime/web.rs \
     adapter_runtime=runtime/adapter.rs $std_modules
-
-echo "== web/llms.txt and web/llms-full.txt from harness/reference/tessera.md"
-mkdir -p web
-$tessera0 run tools/make_llms.tes --opt 0 -- web/llms.txt web/llms-full.txt harness/reference/tessera.md
 
 echo "== bootstrap compiler (rustc on the generated seed bootstrap/tessera1.rs)"
 mkdir -p bin
