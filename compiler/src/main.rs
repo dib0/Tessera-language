@@ -81,13 +81,30 @@ fn rustc() -> PathBuf {
     if Command::new("rustc").arg("--version").output().is_ok() {
         return PathBuf::from("rustc");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let p = Path::new(&home).join(".cargo/bin/rustc");
-        if p.exists() {
-            return p;
+    // `HOME` on unix, `USERPROFILE` on Windows: where rustup installs the toolchain.
+    for home in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(home) {
+            for name in ["rustc", "rustc.exe"] {
+                let p = Path::new(&home).join(".cargo/bin").join(name);
+                if p.exists() {
+                    return p;
+                }
+            }
         }
     }
     PathBuf::from("rustc")
+}
+
+/// The file name rustc writes. `-o` writes exactly the name it is given, so on
+/// Windows a name without an extension gets `.exe`; without it the program
+/// cannot be started from the shell.
+fn executable_name(output: &Path) -> PathBuf {
+    if !cfg!(windows) || output.extension().is_some() {
+        return output.to_path_buf();
+    }
+    let mut name = output.as_os_str().to_os_string();
+    name.push(".exe");
+    PathBuf::from(name)
 }
 
 fn temp_dir() -> Result<PathBuf, String> {
@@ -179,13 +196,13 @@ fn run(o: Options) -> Result<i32, Failure> {
         "build" => {
             let output = o.output.clone().ok_or_else(|| Failure::Usage("`build` needs `-o <output>`".into()))?;
             let rust = compile(&o, &files)?;
-            build_binary(&o, &rust, Path::new(&output))?;
+            build_binary(&o, &rust, &executable_name(Path::new(&output)))?;
             Ok(0)
         }
         "run" => {
             let rust = compile(&o, &files)?;
             let dir = temp_dir().map_err(Failure::Usage)?;
-            let exe = dir.join("program");
+            let exe = executable_name(&dir.join("program"));
             let built = build_binary(&o, &rust, &exe);
             if let Err(e) = built {
                 let _ = std::fs::remove_dir_all(&dir);

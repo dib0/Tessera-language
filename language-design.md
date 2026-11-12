@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.20. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10).
+**Status:** Draft 0.21. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10). Both compilers run on Linux, macOS and Windows (draft 0.21, section 16.1).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -214,7 +214,7 @@ From draft 0.18 to 0.19, sound for games:
 
 | Added | Why |
 |---|---|
-| Effect `audio` with `play_sound(samples, rate, volume, pan)` (section 10) | Games and alerts need sound effects. The runtime mixes up to 16 sounds and streams them to the system's audio player (`aplay` or `pw-cat`) through a pipe, so it needs no libraries and no `unsafe`. |
+| Effect `audio` with `play_sound(samples, rate, volume, pan)` (section 10) | Games and alerts need sound effects. The runtime mixes up to 16 sounds and streams them to the system's audio player (`aplay` or `pw-cat`) through a pipe, so it needs no libraries and no `unsafe`. Since draft 0.21 it reaches the sound card directly on Windows, which has no such player. |
 | Key names `F1` to `F12`, `Delete`, `Home`, `End`, `PageUp`, `PageDown` (section 9.4) | Menus and games use function keys (save, load, quit). |
 
 Decided against, for now: music. Playing MIDI-like music needs a synthesizer in the runtime; it can be added later as a separate decision.
@@ -236,6 +236,16 @@ Changed in draft 0.20, from the Tesseradoom findings (end of section 19):
 | `range(a, b)` is empty when `a >= b`, instead of R004 for `a > b` | Three crashes in Tesseradoom came from spans clipped to the screen that were empty; every other language with ranges treats them as empty. Stage 0 shares the runtime and changes with it. |
 | The last use of a variable in a `return` or a function's final expression is moved, and `if`/`match` branches count as alternatives (section 6.2) | The forms that still copied (`return f(c)`, `set c = if a { f(c) } else { g(c) }`) cost Tesseradoom a factor of 20 until rewritten by hand. Rust checks every move in the generated code. |
 | A rejected redefinition (E0204) still declares the new name | Later uses no longer produce follow-up errors that refer to the old variable. |
+
+From draft 0.20 to 0.21, the same language on Windows as on unix (section 16.1). Nothing in the language changed; what changed is where the runtime can carry it out:
+
+| Changed | Why |
+|---|---|
+| The `ui` effect also opens a native window on Windows (section 9.4) | The X11 client only speaks to an X server over a unix socket. The Windows runtime draws the same things with GDI and reports the same `WindowEvent`s, so a program compiles and behaves the same on both. |
+| The `audio` effect plays through the sound card itself on Windows (section 10) | Windows has no `aplay`, and a language that needs an extra program installed before a game makes a sound is not usable there. |
+| Generated Rust says `#![cfg_attr(windows, deny(unsafe_code))]` instead of `forbid` when, and only when, a program uses `ui` or `audio` (section 16) | A window and a sound card have no interface other than their C functions. `forbid` cannot be lifted anywhere in a crate, so those two programs say `deny` on Windows, where exactly one module per device is `#[allow(unsafe_code)]`. On every other system, and for every program without `ui` or `audio`, the blanket `forbid` is unchanged. |
+| `build -o name` writes `name.exe` on Windows | Windows cannot start a program without the extension; `-o name.exe` is left exactly as given. The generated Rust is `name.rs` either way. |
+| `\` counts as a path separator on Windows | A path typed with backslashes must find its modules. The path is otherwise kept exactly as typed, so a diagnostic points at what the person wrote. |
 
 ## 4. Source files and lexical structure
 
@@ -832,7 +842,12 @@ match poll_event() {
 
 The window is redrawn automatically when it is uncovered. The program decides what to do on `Close`; the window disappears when the program ends. A complete example is `examples/tictactoe/tictactoe.tes`.
 
-The POC implementation talks to a local X11 display (Linux) directly over its socket, in safe Rust, without libraries. Other platforms are not supported yet.
+The runtime talks to the window system of the machine it was built for, without libraries:
+
+- **unix:** a local X11 display, over its socket, in safe Rust (`runtime/ui.rs`). `DISPLAY` must be set.
+- **Windows:** a window of its own, drawn with GDI (`runtime/win32.rs`). This is the one place in a `ui` program where `unsafe` is allowed; see section 16.
+
+Both draw into an off-screen buffer that `present()` shows, both report the same events with the same key names, and a program cannot tell which one it got. macOS has no window backend yet; everything else in the language works there.
 
 ### 9.5 Modules
 
@@ -1063,7 +1078,7 @@ Graphics (effect `ui`, section 9.4) and sound (effect `audio`):
 | `present` | `() -> Unit` | Shows everything drawn since the last `present`. |
 | `next_event` | `() -> WindowEvent` | Waits for the next click, key press, key release or close request. |
 | `poll_event` | `() -> Option[WindowEvent]` | The next event if one is waiting, otherwise `.None` at once (draft 0.18). |
-| `play_sound` | `(samples: Bytes, rate: Int, volume: Int, pan: Int) -> Unit uses audio` | Starts playing a sound and returns at once (draft 0.19): 8-bit unsigned mono samples (128 is silence) at `rate` samples per second (1,000 to 96,000), `volume` 0 to 100, `pan` from -100 (left) to 100 (right). Up to 16 sounds play at the same time; a 17th replaces the oldest. R004 for arguments out of range. Without a working audio player (`aplay` or `pw-cat` on `PATH`, or the program named in `TESSERA_AUDIO_PLAYER`, which reads 16-bit stereo samples at 22,050 per second from standard input) nothing is heard and the program continues. A sound starts within about 60 ms plus the audio system's own delay. |
+| `play_sound` | `(samples: Bytes, rate: Int, volume: Int, pan: Int) -> Unit uses audio` | Starts playing a sound and returns at once (draft 0.19): 8-bit unsigned mono samples (128 is silence) at `rate` samples per second (1,000 to 96,000), `volume` 0 to 100, `pan` from -100 (left) to 100 (right). Up to 16 sounds play at the same time; a 17th replaces the oldest. R004 for arguments out of range. The runtime sends the mixed sound to the sound card itself on Windows, and on unix to an audio player that reads 16-bit stereo samples at 22,050 per second from standard input: `aplay` or `pw-cat` on `PATH`, or the program named in `TESSERA_AUDIO_PLAYER`, which is tried first on every system. Without any of them nothing is heard and the program continues. A sound starts within about 60 ms plus the audio system's own delay. |
 | `draw_pixels` | `(x: Int, y: Int, width: Int, colors: List[Int], scale: Int) -> Unit` | Draws rows of `width` colors with their top-left corner at `(x, y)`, each pixel as a `scale` x `scale` square (draft 0.18). R004 if `width` or `scale` (1 to 16) is out of range or `length(colors)` is not a multiple of `width`; R011 for a value that is not a color (0 to 16777215). |
 
 Drawing calls without an open window, and losing the connection to the display, are runtime error R012.
@@ -1322,7 +1337,7 @@ source files (.tes)
 Guarantees the compiler keeps, each covered by a test:
 
 - No code is generated for a program with any error.
-- Generated Rust starts with `#![forbid(unsafe_code)]`, so rustc itself rejects any `unsafe`.
+- Generated Rust starts with `#![forbid(unsafe_code)]`, so rustc itself rejects any `unsafe`. A program that uses `ui` or `audio` starts with `#![cfg_attr(windows, deny(unsafe_code))]` and `#![cfg_attr(not(windows), forbid(unsafe_code))]` instead: on Windows the window and the sound card have no interface other than their C functions, and one module per device carries `#[allow(unsafe_code)]`. Everywhere else, and for every program without those two effects, `forbid` holds as before. Which modules those are is checked by a test.
 - The same source and compiler version produce byte-identical generated Rust.
 - Tessera semantics (overflow, evaluation order, runtime error format, exit codes) are implemented explicitly in the runtime, never by relying on Rust defaults.
 - Malformed input never crashes the compiler (fuzz test over mutated sources).
@@ -1352,9 +1367,29 @@ Imported modules are found automatically; only the entry file is given.
 
 Compiler exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure (always a compiler bug). Stage 1 reports an unreadable source file as runtime error R006 (exit code 70).
 
-Both compilers embed the same runtime `runtime/core.rs` (plus `runtime/ui.rs` for programs that use `ui`). Stage 1 adds `runtime/extra.rs` to every program and `runtime/web.rs` to programs that use decimals, time, randomness, crypto, the database, the network or `handle`; `runtime/adapter.rs` is the C interface of `--library` builds and the only runtime code with `unsafe`. Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
+Both compilers embed the same runtime `runtime/core.rs`. Stage 1 adds `runtime/extra.rs` to every program and, per program, `runtime/web.rs` for decimals, time, randomness, crypto, the database, the network or `handle`; `runtime/ui.rs` and `runtime/win32.rs` for `ui`; `runtime/audio.rs` and `runtime/winmm.rs` for `audio`. `runtime/adapter.rs` is the C interface of `--library` builds. Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
+
+Four runtime files contain `unsafe` code, and they are the only ones: `adapter.rs` (the C interface a web host calls), `win32.rs` (the window) and `winmm.rs` (the sound card). The last two are reached only on Windows and only by a program that asked for a window or sound; everything that can be done without the operating system's C functions is done in safe Rust.
 
 Since draft 0.13 stage 1 inserts stack and time checks into generated functions and loops, so its Rust differs from that of the frozen stage 0. The parity test therefore compares behaviour: every program shared by both compilers must give the same output, error messages and exit code.
+
+### 16.1 Systems
+
+The compiler and the programs it builds run on Linux, macOS and Windows. The only thing a system must provide is `rustc`; the compiler starts it to turn its generated Rust into an executable.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Compiler, console programs, files, modules, `std/` | yes | yes | yes |
+| Web applications (`handle`, `serve`, CGI, `--library`) | yes | yes | yes |
+| `db` (needs the `sqlite3` command) | yes | yes | yes, once `sqlite3` is on `PATH` |
+| `ui` | X11 | not yet | GDI |
+| `audio` | `aplay` or `pw-cat` | `TESSERA_AUDIO_PLAYER` | the sound card itself |
+
+On Windows:
+
+- `build -o name` writes `name.exe`; a name that already has an extension is left alone. The generated Rust is `name.rs` in both cases.
+- `/` and `\` both separate path segments. A path is otherwise passed through unchanged, so a diagnostic names the file the way the person typed it and both compilers point at the same place.
+- Source files must still use Unix line endings; a carriage return is E0101. The repository normalises every text file to LF (`.gitattributes`), so a checkout with `core.autocrlf=true` builds.
 
 ## 17. Bootstrapping plan
 

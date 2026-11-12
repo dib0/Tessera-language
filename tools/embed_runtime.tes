@@ -57,10 +57,11 @@ set seen = true
 from_code_points(out)
 }
 
+note "The last segment of a path, splitting on `/` and on the `\\` that Windows uses."
 fn file_name(path: Text) -> Text {
 var out: List[Int] = []
 for code in code_points(path) {
-if code == 47 {
+if code == 47 or code == 92 {
 set out = []
 } else {
 set out = append(out, code)

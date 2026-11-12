@@ -29,6 +29,7 @@ join([
 "`app fastcgi --port N` or `app request GET /path`.",
 "Further files given on the command line are part of the entry module.",
 "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.",
+"On Windows an output name without an extension is written with `.exe` added.",
 "Set TESSERA_RUSTC to choose the rustc binary.",
 ], "\n")
 }
@@ -120,8 +121,31 @@ let parsed = parser.parse_file(lexed.tokens)
 ParsedSource { items: parsed.items, diagnostics: parsed.diagnostics }
 }
 
-fn directory_of(path: Text) -> Text {
-let codes = code_points(path)
+note "True on Windows, where `OS` is set to `Windows_NT` by the system itself (not by a shell)."
+fn on_windows() -> Bool uses env = environment_variable("OS") == "Windows_NT"
+
+note "A path with the separator Windows also allows turned into the `/` that the rest of the compiler splits on. Only paths that are taken apart go through this; the name a file was given on the command line is kept exactly as typed, so a diagnostic points at the path the person wrote and both compilers report the same place."
+fn to_slashes(path: Text) -> Text = replace(path, "\\", "/")
+
+note "The name rustc writes. On Windows a program needs the `.exe` extension to be startable from the shell, and `-o` writes exactly the name it is given, so a name without an extension gets one."
+fn executable_name(output: Text, windows: Bool) -> Text {
+if not windows or length(source.split_on(base_name(output, windows), 46)) > 1 {
+return output
+}
+"\(output).exe"
+}
+
+note "The generated Rust kept next to a program: the output name without the `.exe` that Windows adds, plus `.rs`, so `-o game` and `-o game.exe` both leave `game.rs`."
+fn rust_name(output: Text, windows: Bool) -> Text {
+if windows and source.ends_with_text(output, ".exe") {
+let codes = code_points(output)
+return "\(from_code_points(slice(codes, 0, length(codes) - 4))).rs"
+}
+"\(output).rs"
+}
+
+fn directory_of(path: Text, windows: Bool) -> Text {
+let codes = code_points(if windows { to_slashes(path) } else { path })
 var index = length(codes) - 1
 while index >= 0 {
 if codes[index] == 47 {
@@ -132,12 +156,13 @@ set index = index - 1
 "."
 }
 
-fn base_name(path: Text) -> Text {
-let directory = directory_of(path)
-if directory == "." and not source.starts_with_text(path, "./") {
-return path
+fn base_name(path: Text, windows: Bool) -> Text {
+let name = if windows { to_slashes(path) } else { path }
+let directory = directory_of(name, windows)
+if directory == "." and not source.starts_with_text(name, "./") {
+return name
 }
-from_code_points(slice(code_points(path), length(code_points(directory)) + 1, length(code_points(path))))
+from_code_points(slice(code_points(name), length(code_points(directory)) + 1, length(code_points(name))))
 }
 
 fn join_path(directory: Text, relative: Text) -> Text = if directory == "." { relative } else { "\(directory)/\(relative)" }
@@ -199,8 +224,8 @@ return runtime_text.std_rng()
 }
 
 note "Loads the entry files and, following `import`s, every module they need. Module files are found relative to the directory of the first entry file."
-fn load_program(entry_paths: List[Text]) -> Loaded uses fs {
-let root = directory_of(entry_paths[0])
+fn load_program(entry_paths: List[Text], windows: Bool) -> Loaded uses fs {
+let root = directory_of(entry_paths[0], windows)
 var files: List[source.SourceFile] = []
 var diagnostics: List[source.Diagnostic] = []
 var entry_items: List[ast.Item] = []
@@ -209,7 +234,7 @@ for path in entry_paths {
 let file = length(files)
 let text = read_file(path)
 set files = append(files, source.SourceFile { path: path, text: text })
-set entry_files = append(entry_files, join_path(directory_of(path), base_name(path)))
+set entry_files = append(entry_files, join_path(directory_of(path, windows), base_name(path, windows)))
 let parsed = parse_source(text, file)
 set diagnostics = concat(diagnostics, parsed.diagnostics)
 set entry_items = concat(entry_items, parsed.items)
@@ -313,10 +338,10 @@ set states = append(states, 0)
 visit_module(0, modules, Visit { states: states, diagnostics: [] }, []).diagnostics
 }
 
-fn run_frontend(entry_paths: List[Text], tests: Bool) -> Frontend uses fs {
-let loaded = load_program(entry_paths)
+fn run_frontend(entry_paths: List[Text], tests: Bool, windows: Bool) -> Frontend uses fs {
+let loaded = load_program(entry_paths, windows)
 var diagnostics = loaded.diagnostics
-var program = checker.CheckedProgram { items: [], type_defs: [], diagnostics: [], uses_ui: false, entry: "" }
+var program = checker.CheckedProgram { items: [], type_defs: [], diagnostics: [], uses_ui: false, uses_audio: false, entry: "" }
 if length(diagnostics) == 0 {
 set program = checker.check_program(loaded.modules, tests)
 set diagnostics = program.diagnostics
@@ -460,10 +485,12 @@ let status = run_process("rustc", arguments)
 if status != -1 {
 return status
 }
-run_process("\(environment_variable("HOME"))/.cargo/bin/rustc", arguments)
+let home = if environment_variable("HOME") != "" { environment_variable("HOME") } else { environment_variable("USERPROFILE") }
+run_process("\(to_slashes(home))/.cargo/bin/rustc", arguments)
 }
 
 fn main() -> Unit uses io, fs, env, process {
+let windows = on_windows()
 let options = match parse_options(args()) {
 .Ok(parsed) => parsed
 .Error(problem) => {
@@ -493,7 +520,7 @@ exit(2)
 if command == "format" {
 exit(format_files(options.files, options.check))
 }
-let frontend = run_frontend(options.files, command == "test")
+let frontend = run_frontend(options.files, command == "test", windows)
 let files = frontend.files
 if command == "check" {
 report_diagnostics(frontend.diagnostics, files, options.json, "")
@@ -507,17 +534,18 @@ if command == "notes" {
 print(without_final_newline(notes_json(frontend.program.items, files)))
 exit(0)
 }
-let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() }
+let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), win32: runtime_text.win32_runtime(), audio: runtime_text.audio_runtime(), winmm: runtime_text.winmm_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() }
 if command == "test" {
 let base = without_extension(options.files[0])
 let test_binary = if options.output == "" { "\(base).tests" } else { options.output }
+let test_program = executable_name(test_binary, windows)
 write_file("\(test_binary).rs", codegen.generate(frontend.program, paths_of(files), runtime, "tests"))
-let built = run_rustc(options with { opt: "0" }, [], test_binary, "\(test_binary).rs")
+let built = run_rustc(options with { opt: "0" }, [], test_program, "\(test_binary).rs")
 if built != 0 {
 print_error("error: the test program could not be built (status \(built))")
 exit(3)
 }
-let runnable = if source.contains_text(source.split_on(test_binary, 47), test_binary) { "./\(test_binary)" } else { test_binary }
+let runnable = if base_name(test_program, windows) == test_program { "./\(test_program)" } else { test_program }
 let status = run_process(runnable, [])
 exit(if status < 0 or status > 255 { 70 } else { status })
 }
@@ -541,7 +569,7 @@ exit(2)
 }
 if options.library {
 let directory = "\(options.output).build"
-let _ = run_process("mkdir", ["-p", directory])
+let _ = create_directory(directory)
 write_file("\(directory)/app.rs", rust)
 write_file("\(directory)/adapter.rs", runtime_text.adapter_runtime())
 let library_status = run_rustc(options, ["--crate-type", "cdylib", "-C", "panic=unwind"], options.output, "\(directory)/adapter.rs")
@@ -551,9 +579,9 @@ exit(3)
 }
 exit(0)
 }
-let rust_path = "\(options.output).rs"
+let rust_path = rust_name(options.output, windows)
 write_file(rust_path, rust)
-let status = run_rustc(options, [], options.output, rust_path)
+let status = run_rustc(options, [], executable_name(options.output, windows), rust_path)
 if status == -1 {
 print_error("error: cannot run rustc (install Rust from https://rustup.rs or set TESSERA_RUSTC)")
 exit(3)

@@ -1,0 +1,15 @@
+// A program with the `audio` effect. It carries the mixer (runtime/audio.rs)
+// and, on Windows, the one module that may speak to the sound card
+// (runtime/winmm.rs). A machine without a sound device, which is the normal
+// case while tests run, hears nothing and the program continues; that is what
+// this checks, so it plays everything at volume 0 and stays silent either way.
+import std/sound
+
+fn main() -> Unit uses io, audio {
+let beep = sound.tone(440, 20, 60)
+print("rate \(beep.rate) samples \(length(byte_values(beep.samples)))")
+sound.play(beep, 0, 0)
+play_sound(beep.samples, beep.rate, 0, -100)
+play_sound(bytes([]), 22050, 0, 0)
+print("played")
+}

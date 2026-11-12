@@ -1,0 +1,13 @@
+# Tessera source must use Unix line endings: the lexer reports E0101 for a
+# carriage return. The shell scripts, the Rust runtime and the generated
+# stage1/runtime_text.tes are LF for the same reason, so the repository is
+# normalised to LF everywhere. A Windows checkout with core.autocrlf=true then
+# still builds and the `.out` files still match byte for byte.
+* text=auto eol=lf
+
+*.gif  binary
+*.webm binary
+*.bin  binary
+# Never committed (decision D5), but if one ever is, it must not be rewritten.
+*.wad  binary
+*.sav  binary

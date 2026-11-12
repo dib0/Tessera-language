@@ -19,7 +19,7 @@ print("Hello, \(name)")
 - Comments start with `//`. There are no block comments.
 - Statements end at the end of a line. No semicolons. A line continues only if it ends with an operator, `=`, `,`, `(`, `[` or `{`, or inside open `(` or `[`.
 - Blocks use braces. `else` must be on the same line as the `}` before it: `} else {`.
-- Indentation has no meaning. Tabs are not allowed.
+- Indentation has no meaning. Tabs are not allowed, and neither are carriage returns: files use Unix line endings (LF).
 
 ## Names
 
@@ -384,9 +384,9 @@ Error messages belong on standard error: `exit_with(1, "error: \(reason)")` repo
 
 Tests: `test "name" { assert(condition) }` at the top level of a file, run with `tessera1 test file.tes` (each test on its own thread; every effect except `ui`). `build` ignores tests.
 
-Windows (`uses ui`, one window, X11): `open_window(title, width, height)`, `fill_rectangle(x, y, w, h, color)`, `draw_line(x1, y1, x2, y2, thickness, color)`, `draw_circle(x, y, radius, thickness, color)`, `fill_circle(x, y, radius, color)`, `draw_text(x, y, text, color)`, `text_width(text)`, `draw_pixels(x, y, width, colors, scale)` (a whole image of `rgb` colors), `present()`; `next_event()` waits, `poll_event()` returns `Option[WindowEvent]` at once. `WindowEvent` is `.Click(x, y, button)`, `.Key(name)`, `.KeyUp(name)` or `.Close`. Key names: `"a"`, `"A"`, `"7"`, `" "`, `"Escape"`, `"Enter"`, `"Backspace"`, `"Tab"`, `"Left"`, `"Up"`, `"Right"`, `"Down"`, `"Shift"`, `"Control"`, `"Alt"`, `"F1"` to `"F12"`, `"Delete"`, `"Home"`, `"End"`, `"PageUp"`, `"PageDown"`; `KeyUp` uses the lowercase letter. Drawing is off-screen until `present()`.
+Windows (`uses ui`, one window; X11 on unix, GDI on Windows, same functions and same key names): `open_window(title, width, height)`, `fill_rectangle(x, y, w, h, color)`, `draw_line(x1, y1, x2, y2, thickness, color)`, `draw_circle(x, y, radius, thickness, color)`, `fill_circle(x, y, radius, color)`, `draw_text(x, y, text, color)`, `text_width(text)`, `draw_pixels(x, y, width, colors, scale)` (a whole image of `rgb` colors), `present()`; `next_event()` waits, `poll_event()` returns `Option[WindowEvent]` at once. `WindowEvent` is `.Click(x, y, button)`, `.Key(name)`, `.KeyUp(name)` or `.Close`. Key names: `"a"`, `"A"`, `"7"`, `" "`, `"Escape"`, `"Enter"`, `"Backspace"`, `"Tab"`, `"Left"`, `"Up"`, `"Right"`, `"Down"`, `"Shift"`, `"Control"`, `"Alt"`, `"F1"` to `"F12"`, `"Delete"`, `"Home"`, `"End"`, `"PageUp"`, `"PageDown"`; `KeyUp` uses the lowercase letter. Drawing is off-screen until `present()`.
 
-Sound (`uses audio`): `play_sound(samples: Bytes, rate: Int, volume: Int, pan: Int)` starts a sound and returns at once: 8-bit unsigned mono samples (128 is silence), rate 1,000 to 96,000, volume 0 to 100, pan -100 (left) to 100 (right); up to 16 at once. Without an audio player (`aplay` or `pw-cat`) nothing is heard and the program continues.
+Sound (`uses audio`): `play_sound(samples: Bytes, rate: Int, volume: Int, pan: Int)` starts a sound and returns at once: 8-bit unsigned mono samples (128 is silence), rate 1,000 to 96,000, volume 0 to 100, pan -100 (left) to 100 (right); up to 16 at once. The sound goes to the sound card on Windows and to an audio player (`aplay` or `pw-cat`) on unix; without either, nothing is heard and the program continues.
 
 ## Tools
 

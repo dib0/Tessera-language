@@ -123,7 +123,7 @@ width * height
 }
 print(to_text(area_value))
 // files
-write_file("/tmp/tessera-semantics-test.txt", "written\n")
-print(read_file("/tmp/tessera-semantics-test.txt") + "read back")
+write_file("tessera-semantics-test.txt", "written\n")
+print(read_file("tessera-semantics-test.txt") + "read back")
 let _ = area(Shape.Empty)
 }

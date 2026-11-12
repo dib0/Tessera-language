@@ -1,6 +1,14 @@
 compiler/target/
 bin/
 tools/xsend/xsend
+tools/xsend/xsend.exe
+tools/xsend/*.pdb
 examples/tesseradoom/tesseradoom
+examples/tesseradoom/tesseradoom.exe
 examples/tesseradoom/tesseradoom.rs
+examples/tesseradoom/*.pdb
 examples/tesseradoom/saves/
+hosts/iis/TesseraModule.dll
+hosts/iis/TesseraModule.exp
+hosts/iis/TesseraModule.lib
+hosts/iis/TesseraModule.obj

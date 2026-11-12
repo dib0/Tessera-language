@@ -1539,12 +1539,35 @@ fn tw_cgi_main(app: fn(RawRequest) -> RawResponse) {
 // ---- HTTP/1.1 server ----------------------------------------------------------
 
 const TW_MAX_CONNECTIONS: usize = 256;
+/// At most this many connections are being turned away with a 503 at once.
+const TW_MAX_REFUSALS: usize = 64;
 const TW_HEAD_LIMIT: usize = 64 * 1024;
 const TW_MAX_HEADERS: usize = 100;
 
 struct TwConnGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for TwConnGuard {
     fn drop(&mut self) { self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
+}
+
+/// Ends a connection after a response that closes it. A client that is still
+/// sending leaves bytes in the receive buffer, and closing a socket with unread
+/// bytes resets the connection on Windows, which throws away the response the
+/// client has not read yet. Saying there is nothing more to send and then
+/// reading the rest away makes the close orderly on every system. Bounded in
+/// bytes and in time, so a client that keeps talking cannot hold the thread.
+fn tw_close_after_response(stream: &std::net::TcpStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(100)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    let mut left: i64 = 1 << 20;
+    let mut sink = [0u8; 8192];
+    let mut source = stream;
+    while left > 0 && std::time::Instant::now() < deadline {
+        match source.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => left -= n as i64,
+        }
+    }
 }
 
 /// HTTP/1.1 response bytes with Content-Length, Date and Connection headers.
@@ -1683,7 +1706,7 @@ fn tw_http_connection(app: fn(RawRequest) -> RawResponse, stream: std::net::TcpS
             Err(TwReqErr::Status(code)) => {
                 let _ = writer.write_all(&tw_http_response_bytes(&tw_status_response(code), false, false));
                 let _ = writer.flush();
-                let _ = writer.shutdown(std::net::Shutdown::Write);
+                tw_close_after_response(&writer);
                 return;
             }
             Ok((req, keep_alive)) => {
@@ -1698,14 +1721,25 @@ fn tw_http_connection(app: fn(RawRequest) -> RawResponse, stream: std::net::TcpS
 
 fn tw_accept_loop(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpListener, fastcgi: bool) -> ! {
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Turning a connection away also takes a moment (the 503 has to be written
+    // and the connection closed in an orderly way), and the accept loop must
+    // not wait for that, so it happens on short-lived threads of its own. They
+    // are counted too: an overload may not turn into unlimited threads.
+    let refusing = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let max_body = tw_max_body();
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 if active.load(std::sync::atomic::Ordering::SeqCst) >= TW_MAX_CONNECTIONS {
-                    if !fastcgi {
-                        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
-                        let _ = stream.write_all(&tw_http_response_bytes(&tw_status_response(503), false, false));
+                    if !fastcgi && refusing.load(std::sync::atomic::Ordering::SeqCst) < TW_MAX_REFUSALS {
+                        refusing.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let guard = TwConnGuard(refusing.clone());
+                        let _ = std::thread::Builder::new().name("tessera-overload".to_string()).spawn(move || {
+                            let _guard = guard;
+                            let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                            let _ = stream.write_all(&tw_http_response_bytes(&tw_status_response(503), false, false));
+                            tw_close_after_response(&stream);
+                        });
                     }
                     continue;
                 }

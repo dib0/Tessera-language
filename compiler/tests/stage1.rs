@@ -26,6 +26,12 @@ fn work_dir() -> PathBuf {
     dir
 }
 
+/// The file name of a program in `dir`: `name` plus `.exe` on Windows, which is
+/// what the compiler writes for an output name without an extension.
+fn binary(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX))
+}
+
 fn stage1_entry() -> PathBuf {
     root().join("stage1/main.tes")
 }
@@ -37,7 +43,8 @@ fn rustc() -> PathBuf {
     if Command::new("rustc").arg("--version").output().is_ok() {
         return PathBuf::from("rustc");
     }
-    Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".cargo/bin/rustc")
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
+    Path::new(&home).join(".cargo/bin/rustc")
 }
 
 fn check_build(output: std::process::Output, what: &str) {
@@ -48,7 +55,7 @@ fn check_build(output: std::process::Output, what: &str) {
 fn stage1() -> &'static PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY.get_or_init(|| {
-        let bootstrap = work_dir().join("tessera-bootstrap");
+        let bootstrap = binary(&work_dir(), "tessera-bootstrap");
         check_build(
             Command::new(rustc())
                 .args(["--edition", "2021", "-C", "opt-level=1", "--crate-name", "tessera_program", "-o"])
@@ -58,7 +65,7 @@ fn stage1() -> &'static PathBuf {
                 .unwrap(),
             "rustc building the bootstrap seed",
         );
-        let out = work_dir().join("tessera1");
+        let out = binary(&work_dir(), "tessera1");
         check_build(
             Command::new(&bootstrap).arg("build").arg(stage1_entry()).arg("-o").arg(&out).arg("--opt").arg("1").output().unwrap(),
             "bootstrap building stage1/",
@@ -104,10 +111,11 @@ fn stage0_and_stage1_programs_behave_identically() {
     for files in programs {
         let mut results = Vec::new();
         for (name, compiler) in [("stage0", &stage0_binary), ("stage1", stage1())] {
-            let exe = dir.join(format!("parity_{}", name));
+            let exe = binary(&dir, &format!("parity_{}", name));
             let build = Command::new(compiler).arg("build").args(&files).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap();
             check_build(build, &format!("{} build of {:?}", name, files));
-            let run = Command::new(&exe).output().unwrap();
+            // In the work directory: a test program may keep a file next to itself.
+            let run = Command::new(&exe).current_dir(&dir).output().unwrap();
             results.push((run.status.code(), run.stdout, run.stderr));
         }
         assert!(results[0] == results[1], "{:?}: stage 0 and stage 1 programs behave differently", files);
@@ -130,7 +138,7 @@ fn stage1_reports_the_same_error_codes() {
 #[test]
 fn stage1_is_self_hosting() {
     let dir = work_dir();
-    let stage2 = dir.join("tessera2");
+    let stage2 = binary(&dir, "tessera2");
     check_build(Command::new(stage1()).arg("build").arg(stage1_entry()).arg("-o").arg(&stage2).arg("--opt").arg("1").output().unwrap(), "stage 1 building itself");
     let by_stage1 = dir.join("stage1_by_stage1.rs");
     let by_stage2 = dir.join("stage1_by_stage2.rs");
@@ -142,7 +150,7 @@ fn stage1_is_self_hosting() {
 #[test]
 fn modules_compile_and_run() {
     let entry = root().join("tests/modules/run/main.tes");
-    let exe = work_dir().join("modules_run");
+    let exe = binary(&work_dir(), "modules_run");
     check_build(Command::new(stage1()).arg("build").arg(&entry).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building tests/modules/run");
     let out = Command::new(&exe).output().unwrap();
     let expected = std::fs::read_to_string(root().join("tests/modules/run/expected.out")).unwrap();
@@ -182,6 +190,9 @@ fn embedded_runtime_is_up_to_date() {
         .arg(&generated)
         .arg(format!("core_runtime={}", root().join("runtime/core.rs").display()))
         .arg(format!("ui_runtime={}", root().join("runtime/ui.rs").display()))
+        .arg(format!("win32_runtime={}", root().join("runtime/win32.rs").display()))
+        .arg(format!("audio_runtime={}", root().join("runtime/audio.rs").display()))
+        .arg(format!("winmm_runtime={}", root().join("runtime/winmm.rs").display()))
         .arg(format!("extra_runtime={}", root().join("runtime/extra.rs").display()))
         .arg(format!("web_runtime={}", root().join("runtime/web.rs").display()))
         .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
@@ -197,16 +208,49 @@ fn embedded_runtime_is_up_to_date() {
 #[test]
 fn stage1_builds_the_graphical_tic_tac_toe() {
     let game = root().join("examples/tictactoe/tictactoe.tes");
-    let exe = work_dir().join("tictactoe");
+    let exe = binary(&work_dir(), "tictactoe");
     check_build(Command::new(stage1()).arg("build").arg(&game).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building tic-tac-toe");
     let rust = std::fs::read_to_string(exe.with_extension("rs")).unwrap();
-    assert!(rust.contains("#![forbid(unsafe_code)]") && rust.contains("fn t_open_window(") && rust.contains("fn f_rules__play("));
+    assert!(rust.contains("pub fn t_open_window(") && rust.contains("fn f_rules__play("), "the ui runtime or the program is missing");
+    // A program with a window carries both backends: X11 for unix, GDI for
+    // Windows. `forbid` still holds everywhere except on Windows, where exactly
+    // one module -- the one that calls the window system -- may use `unsafe`.
+    assert!(rust.contains("#![cfg_attr(not(windows), forbid(unsafe_code))]") && rust.contains("#![cfg_attr(windows, deny(unsafe_code))]"), "the unsafe rule is wrong");
+    assert_eq!(rust.matches("#[allow(unsafe_code)]\nmod t_ui_backend {").count(), 1, "exactly one module may allow unsafe code");
+    let before_windows = rust.split("#[cfg(windows)]").next().unwrap();
+    assert!(!before_windows.contains("unsafe {") && !before_windows.contains("extern \"system\""), "everything up to the Windows backend must be safe code");
+}
+
+/// A program that plays sound carries the mixer, and on Windows the one module
+/// that may reach the sound card. A program that does not, carries neither and
+/// keeps the blanket `forbid(unsafe_code)`.
+#[test]
+fn audio_programs_carry_the_sound_runtime() {
+    let with_sound = root().join("tests/stage1_run/audio_effect.tes");
+    let exe = binary(&work_dir(), "audio_effect_rust");
+    check_build(Command::new(stage1()).arg("build").arg(&with_sound).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building a program with sound");
+    let rust = std::fs::read_to_string(exe.with_extension("rs")).unwrap();
+    assert!(rust.contains("fn t_play_sound(") && rust.contains("fn waveOutOpen("), "the sound runtime is missing");
+    assert!(rust.contains("#![cfg_attr(not(windows), forbid(unsafe_code))]"), "the unsafe rule is wrong");
+    assert_eq!(rust.matches("#[allow(unsafe_code)]
+mod t_sound_backend {").count(), 1, "exactly one module may allow unsafe code");
+    let before_windows = rust.split("#[cfg(windows)]").next().unwrap();
+    assert!(!before_windows.contains("unsafe {") && !before_windows.contains("extern \"system\""), "everything up to the Windows backend must be safe code");
+
+    // A program without the effect pays for none of it.
+    let without = root().join("tests/stage1_run/floats.tes");
+    let plain_exe = binary(&work_dir(), "no_audio_rust");
+    check_build(Command::new(stage1()).arg("build").arg(&without).arg("-o").arg(&plain_exe).arg("--opt").arg("0").output().unwrap(), "building a program without sound");
+    let plain = std::fs::read_to_string(plain_exe.with_extension("rs")).unwrap();
+    assert!(plain.starts_with("// Generated by the Tessera compiler. Do not edit.
+#![forbid(unsafe_code)]"), "a program without ui or audio keeps forbid");
+    assert!(!plain.contains("fn t_play_sound(") && !plain.contains("t_sound_backend"), "the sound runtime leaked into a program that does not use it");
 }
 
 #[test]
 fn stage1_only_programs_run_with_expected_output() {
     for path in tes_files("tests/stage1_run") {
-        let exe = work_dir().join(path.file_stem().unwrap());
+        let exe = binary(&work_dir(), &path.file_stem().unwrap().to_string_lossy());
         check_build(Command::new(stage1()).arg("build").arg(&path).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building a stage 1 test program");
         let out = Command::new(&exe).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", path.display());
@@ -221,7 +265,7 @@ fn stage1_only_runtime_errors_stop_the_program_predictably() {
     assert!(files.len() >= 5);
     for path in files {
         let code = path.file_name().unwrap().to_string_lossy().split('-').next().unwrap().to_string();
-        let exe = work_dir().join(format!("runtime_fail_{}", path.file_stem().unwrap().to_string_lossy()));
+        let exe = binary(&work_dir(), &format!("runtime_fail_{}", path.file_stem().unwrap().to_string_lossy()));
         check_build(Command::new(stage1()).arg("build").arg(&path).arg("-o").arg(&exe).arg("--opt").arg("0").output().unwrap(), "building a stage 1 runtime-error program");
         let out = Command::new(&exe).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -233,7 +277,7 @@ fn stage1_only_runtime_errors_stop_the_program_predictably() {
 }
 
 fn build_host_program(name: &str) -> PathBuf {
-    let exe = work_dir().join(format!("host_{}", name));
+    let exe = binary(&work_dir(), &format!("host_{}", name));
     let source = root().join(format!("tests/stage1_host/{}.tes", name));
     check_build(Command::new(stage1()).arg("build").arg(&source).arg("-o").arg(&exe).arg("--opt").arg("1").output().unwrap(), "building a host access program");
     exe
@@ -304,7 +348,7 @@ fn standard_module_tests_pass() {
     let files = tes_files("tests/std");
     assert!(files.len() >= 5);
     for path in files {
-        let exe = work_dir().join(format!("std_{}", path.file_stem().unwrap().to_string_lossy()));
+        let exe = binary(&work_dir(), &format!("std_{}", path.file_stem().unwrap().to_string_lossy()));
         let out = Command::new(stage1()).arg("test").arg(&path).arg("-o").arg(&exe).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.code(), Some(0), "{}:\n{}{}", path.display(), stdout, String::from_utf8_lossy(&out.stderr));
@@ -317,13 +361,23 @@ fn stage1_builds_tesseradoom() {
     // The largest example program must keep compiling. With game data in examples/tesseradoom/WAD
     // (never committed, see its README) its milestone checks run as well.
     let dir = root().join("examples/tesseradoom");
-    let exe = work_dir().join("tesseradoom");
+    let exe = binary(&work_dir(), "tesseradoom");
     check_build(Command::new(stage1()).arg("build").arg(dir.join("main.tes")).arg("-o").arg(&exe).arg("--opt").arg("1").output().unwrap(), "building examples/tesseradoom");
     // Without arguments it opens the game's window, so the test asks for an unknown command.
     let usage = Command::new(&exe).arg("no-such-command").output().unwrap();
     assert_eq!(usage.status.code(), Some(64), "tesseradoom with an unknown command should print its usage");
-    if dir.join("WAD/freedoom1.wad").exists() && Command::new("python3").arg("--version").output().is_ok() {
-        let checks = Command::new(dir.join("checks/run_checks.sh")).output().unwrap();
+    // run_checks.sh skips itself without the WAD or without Python 3. On Windows
+    // it needs a POSIX shell (Git Bash); without one the checks are skipped.
+    let script = dir.join("checks/run_checks.sh");
+    let checks = if cfg!(windows) {
+        match Command::new("sh").arg("--version").output() {
+            Ok(out) if out.status.success() => Some(Command::new("sh").arg(&script).output().unwrap()),
+            _ => None,
+        }
+    } else {
+        Some(Command::new(&script).output().unwrap())
+    };
+    if let Some(checks) = checks {
         assert!(checks.status.success(), "tesseradoom milestone checks failed:\n{}", String::from_utf8_lossy(&checks.stdout));
     }
 }
@@ -344,7 +398,7 @@ fn stage1_only_errors_are_reported() {
 #[test]
 fn web_application_runs_in_every_host() {
     let dir = work_dir();
-    let exe = dir.join("web_app");
+    let exe = binary(&dir, "web_app");
     let db = dir.join("web_app.db");
     let _ = std::fs::remove_file(&db);
     let app = root().join("tests/web/app.tes");
@@ -366,18 +420,19 @@ fn web_application_runs_in_every_host() {
     assert!(text(&cgi).starts_with("Status: 404"), "{}", text(&cgi));
 
     // `tessera1 test` runs the test declarations and reports failures with exit code 1.
-    let passing = Command::new(stage1()).arg("test").arg(&app).arg("-o").arg(dir.join("web_tests")).output().unwrap();
+    let passing = Command::new(stage1()).arg("test").arg(&app).arg("-o").arg(binary(&dir, "web_tests")).output().unwrap();
     assert_eq!(passing.status.code(), Some(0), "{}", text(&passing));
     assert!(text(&passing).contains("2 passed, 0 failed"), "{}", text(&passing));
-    let failing = Command::new(stage1()).arg("test").arg(root().join("tests/web/failing_test.tes")).arg("-o").arg(dir.join("failing_tests")).output().unwrap();
+    let failing = Command::new(stage1()).arg("test").arg(root().join("tests/web/failing_test.tes")).arg("-o").arg(binary(&dir, "failing_tests")).output().unwrap();
     assert_eq!(failing.status.code(), Some(1), "{}", text(&failing));
     assert!(text(&failing).contains("1 passed, 1 failed") && text(&failing).contains("R019"), "{}", text(&failing));
 
     // The shared library for the nginx, Apache and IIS modules.
-    let library = dir.join("libweb_app.so");
+    let library = dir.join(format!("{}web_app{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));
     check_build(Command::new(stage1()).arg("build").arg(&app).arg("--library").arg("-o").arg(&library).arg("--opt").arg("0").output().unwrap(), "building the web application as a library");
     assert!(library.exists());
-    let adapter = std::fs::read_to_string(dir.join("libweb_app.so.build/adapter.rs")).unwrap();
-    let generated = std::fs::read_to_string(dir.join("libweb_app.so.build/app.rs")).unwrap();
+    let build = dir.join(format!("{}.build", library.file_name().unwrap().to_string_lossy()));
+    let adapter = std::fs::read_to_string(build.join("adapter.rs")).unwrap();
+    let generated = std::fs::read_to_string(build.join("app.rs")).unwrap();
     assert!(adapter.contains("tessera_handle") && generated.starts_with("// Generated") && generated.contains("#![forbid(unsafe_code)]") && !generated.contains("unsafe {"));
 }

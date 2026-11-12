@@ -109,3 +109,34 @@ The pacing test measures wall-clock time, so a heavily loaded machine could push
 `./build.sh` (fixpoint reached) and `cargo test --release`: **25 passed, 0 failed**, including `stage1::stage1_builds_tesseradoom`, which also runs `examples/tesseradoom/checks/run_checks.sh` when `WAD/freedoom1.wad` is present.
 
 Language changes made for the port (spec draft 0.18): `draw_pixels`, `poll_event` and `WindowEvent.KeyUp` (decision D1); `set x = f(x)` moves records and enums; `var copy = parameter` takes a parameter used only there. The milestone status is in `examples/tesseradoom/README.md`: M1 to M8 done and checked (M5 by eye), M9 playback only.
+
+## Draft 0.21: Windows
+
+`./build.sh` and `cd compiler && cargo test --release` on Windows 10 (19045), rustc 1.99.1 x86_64-pc-windows-msvc, in Git Bash. Everything below was measured on that machine; Linux is unaffected (the `ui` and `audio` backends are chosen with `#[cfg]`, and nothing outside them changed).
+
+| | Result |
+|---|---|
+| `./build.sh` | stage 0, runtime embedding, the bootstrap compiler from the seed, stage 1, the self-hosting fixpoint and `tools/xsend` all succeed |
+| `cargo test --release --no-fail-fast` | **8 + 18 passed, 0 failed** (`suite` and `stage1`; the new test is `audio_programs_carry_the_sound_runtime`) |
+| `examples/tesseradoom/checks/run_checks.sh` | 16 of 16 checks pass against `freedoom1.wad`, including M1 and M2 against Python and saving/loading |
+| `runtime/tests/run_web_tests.sh` | 26 of 27 unit tests and all 7 end-to-end checks pass. The one failure is not Windows: sqlite 3.54 writes the REAL value `3.0` as `3` in `.mode json`, where the test expects `3.0`. The same happens on Linux with that sqlite; `runtime/web.rs` only passes on what sqlite says a value is |
+| `harness/harness.py dry-run --variants baseline` | 21 of 21 reference solutions compile and pass |
+| Linux is unaffected | The generated Rust for a console program, a program with `audio`, the compiler itself, Tesseradoom (`ui` and `audio`) and a web application all type-check for `x86_64-unknown-linux-gnu` (`rustc --target ... --emit=metadata`), with `forbid(unsafe_code)` in force on that target |
+
+What had to change, and why:
+
+| Area | Change |
+|---|---|
+| Line endings | `.gitattributes` normalises every text file to LF. The lexer rejects a carriage return (E0101), so a checkout with `core.autocrlf=true` did not even build the compiler. |
+| `ui` | New `runtime/win32.rs`: a native window drawn with GDI, with the same functions, the same off-screen buffer and the same event and key names as the X11 client. `runtime/ui.rs` is unchanged apart from `pub` on the functions the generated module re-exports. |
+| `audio` | The mixer moved from `runtime/extra.rs` to `runtime/audio.rs`, which is only embedded in a program that uses `audio`, and its sink is now pluggable: a player process on unix, `runtime/winmm.rs` (waveOut) on Windows, which has no such player. |
+| Unsafe rule | A program that uses `ui` or `audio` emits `#![cfg_attr(windows, deny(unsafe_code))]` with `#![cfg_attr(not(windows), forbid(unsafe_code))]`; one module per device is `#[allow(unsafe_code)]`. Every other program, and every program on unix, keeps the blanket `forbid`. |
+| Executables | `build -o name` writes `name.exe` on Windows (`name.rs` either way); stage 0 does the same. The test harness asks for the name the system uses. |
+| Paths | `\` separates path segments on Windows, so `import` finds its modules. The path is otherwise passed through untouched, which keeps stage 0 and stage 1 diagnostics identical. |
+| rustc | Looked up through `USERPROFILE` as well as `HOME`. |
+| `tools/xsend` | A Windows version (`tools/xsend/windows.rs`) that posts the same clicks and keys to a window handle, plus `list` and `size`; `tools/screenshot.ps1` replaces `import -window`. |
+| Test harness | Programs run in a scratch directory (`tests/run/semantics.tes` no longer writes to `/tmp`), `run_checks.sh` finds a real Python 3, strips the CRLF Python writes, and hands the game a path Windows understands. |
+| Measurement harness | `harness.py` reads and writes UTF-8 and keeps LF when it writes a `.tes` file. |
+| HTTP server | A connection closed while the client is still sending is reset on Windows, which throws away the response the client has not read yet, so the 413 and 503 answers never arrived. Both now shut the sending side down and read the rest away before closing. Turning an overload away happens on a short-lived thread of its own (at most `TW_MAX_REFUSALS`), so the accept loop never waits for it. |
+
+Not available on Windows: nothing in the language. The `db` effect needs the `sqlite3` command, as it does everywhere. Tesseradoom runs at 17 frames per second at 1024 x 768 and 123 at 512 x 384 (`--classic`) on this machine; the display path costs 4 ms of that, the rest is the engine composing the frame in Tessera.

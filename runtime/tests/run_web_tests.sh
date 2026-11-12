@@ -2,21 +2,38 @@
 # Builds and runs the runtime/web.rs tests: core_stub.rs + web.rs + web_test.rs
 # concatenated into one file that starts with #![forbid(unsafe_code)].
 # Usage: runtime/tests/run_web_tests.sh [opt-level] [extra test-harness args...]
+#
+# Runs on Linux, macOS and on Windows in Git Bash, where the programs need the
+# `.exe` extension and a path the shell's tools and a native program both read.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 opt="${1:-0}"
 shift || true
-work="$(mktemp -d /tmp/tessera-web-tests.XXXXXX)"
+
+exe=
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) exe=.exe ;;
+esac
+
+work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+if [[ -n $exe ]]; then
+    work="$(cygpath -m "$work")"
+    # Git Bash rewrites an argument that looks like a unix path before a native
+    # program sees it, so a request for `/fail` would arrive as
+    # `C:/Program Files/Git/fail`. These two names turn that off.
+    export MSYS2_ARG_CONV_EXCL='*'
+    export MSYS_NO_PATHCONV=1
+fi
 cat "$here/core_stub.rs" "$here/../web.rs" "$here/web_test.rs" > "$work/web_tests.rs"
 head -n1 "$work/web_tests.rs" | grep -qx '#!\[forbid(unsafe_code)\]'
-rustc --edition 2021 --test -C opt-level="$opt" -o "$work/web_tests" "$work/web_tests.rs"
-"$work/web_tests" "$@"
+rustc --edition 2021 --test -C opt-level="$opt" -o "$work/web_tests$exe" "$work/web_tests.rs"
+"$work/web_tests$exe" "$@"
 
 # End-to-end checks of tw_web_main through a real executable.
 cat "$here/core_stub.rs" "$here/../web.rs" "$here/web_app_main.rs" > "$work/web_app.rs"
-rustc --edition 2021 -C opt-level="$opt" -o "$work/web_app" "$work/web_app.rs"
-app="$work/web_app"
+rustc --edition 2021 -C opt-level="$opt" -o "$work/web_app$exe" "$work/web_app.rs"
+app="$work/web_app$exe"
 fail() { echo "e2e FAILED: $*" >&2; exit 1; }
 passed=0
 ok() { passed=$((passed + 1)); }

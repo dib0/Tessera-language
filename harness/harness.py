@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 
 HARNESS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HARNESS)
-TESSERA = os.path.join(REPO, "bin", "tessera1")
+# The compiler carries the system's own extension: tessera1.exe on Windows.
+TESSERA = os.path.join(REPO, "bin", "tessera1.exe" if os.name == "nt" else "tessera1")
 DEFAULT_MODEL = "claude-opus-5-5"
 MAX_ATTEMPTS = 4  # first answer + 3 fix rounds
 COMPILE_TIMEOUT = 180
@@ -48,7 +49,7 @@ class Variant:
 
 
 def load_variants() -> dict[str, Variant]:
-    with open(os.path.join(HARNESS, "variants.json")) as f:
+    with open(os.path.join(HARNESS, "variants.json"), encoding="utf-8") as f:
         raw = json.load(f)
     return {name: Variant(name=name, **spec) for name, spec in raw.items()}
 
@@ -126,10 +127,10 @@ def indent_rule(width: int) -> str:
 
 
 def render_reference(variant: Variant) -> str:
-    with open(os.path.join(HARNESS, "reference", "tessera.md")) as f:
+    with open(os.path.join(HARNESS, "reference", "tessera.md"), encoding="utf-8") as f:
         text = f.read()
     for feature in variant.features:
-        with open(os.path.join(HARNESS, "reference", "features", feature + ".md")) as f:
+        with open(os.path.join(HARNESS, "reference", "features", feature + ".md"), encoding="utf-8") as f:
             text += "\n" + f.read()
     return reindent_markdown(text, variant.indent)
 
@@ -171,17 +172,17 @@ def load_tasks(selected: list[str] | None = None) -> list[Task]:
         task_id = os.path.basename(directory)
         if selected and task_id not in selected:
             continue
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             meta = json.load(f)
         starter_path = os.path.join(directory, "starter.tes")
         tasks.append(Task(
             id=task_id,
             kind=meta["kind"],
-            prompt=open(os.path.join(directory, "task.md")).read(),
+            prompt=open(os.path.join(directory, "task.md"), encoding="utf-8").read(),
             tests=meta["tests"],
             effects=meta["effects"],
-            solution=open(os.path.join(directory, "solution.tes")).read(),
-            starter=open(starter_path).read() if os.path.exists(starter_path) else None,
+            solution=open(os.path.join(directory, "solution.tes"), encoding="utf-8").read(),
+            starter=open(starter_path, encoding="utf-8").read() if os.path.exists(starter_path) else None,
         ))
     return tasks
 
@@ -242,8 +243,10 @@ def check_answer(code: str | None, task: Task, workdir: str) -> Check:
         return Check("effects", f"`main` declares effects that are not allowed in this task: {', '.join(disallowed)}. "
                      f"Only {', '.join(task.effects)} may be used.", {"effects": disallowed})
     source = os.path.join(workdir, "main.tes")
-    binary = os.path.join(workdir, "program")
-    with open(source, "w") as f:
+    # The compiler adds the system's extension; Tessera source is LF, and
+    # `newline=""` keeps Windows from turning it into CRLF (which is E0101).
+    binary = os.path.join(workdir, "program.exe" if os.name == "nt" else "program")
+    with open(source, "w", encoding="utf-8", newline="") as f:
         f.write(code)
     build = subprocess.run([TESSERA, "build", "main.tes", "-o", "program", "--opt", "0"], cwd=workdir,
                            capture_output=True, text=True, timeout=COMPILE_TIMEOUT)
@@ -383,7 +386,7 @@ def solve(task: Task, variant: Variant, model, out_dir: str, repetition: int) ->
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     path = os.path.join(out_dir, f"{variant.name}--{task.id}--{repetition}.json")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
     return record
 
@@ -400,7 +403,7 @@ def run(args: argparse.Namespace, dry: bool) -> str:
     config = {"variants": args.variants, "tasks": [t.id for t in tasks], "repetitions": args.repeat,
               "model": "reference-solution" if dry else args.model, "effort": None if dry else args.effort,
               "max_attempts": MAX_ATTEMPTS}
-    with open(os.path.join(out_dir, "config.json"), "w") as f:
+    with open(os.path.join(out_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
     lock = threading.Lock()
     jobs = []
@@ -421,7 +424,7 @@ def run(args: argparse.Namespace, dry: bool) -> str:
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         records = list(pool.map(work, jobs))
     summary = summarise(records)
-    with open(os.path.join(out_dir, "summary.md"), "w") as f:
+    with open(os.path.join(out_dir, "summary.md"), "w", encoding="utf-8") as f:
         f.write(summary)
     print("\n" + summary)
     print(f"results: {os.path.relpath(out_dir, REPO)}")
@@ -474,7 +477,7 @@ def report(args: argparse.Namespace) -> None:
     records = []
     for directory in args.directories:
         for path in glob.glob(os.path.join(directory, "*--*--*.json")):
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 records.append(json.load(f))
     print(summarise(records))
 
@@ -502,7 +505,7 @@ def tokens(args: argparse.Namespace) -> None:
     print("|---|---|---|" + "---|" * len(widths))
     for name in args.corpora:
         files = corpus(name)
-        texts = [open(p).read() for p in files]
+        texts = [open(p, encoding="utf-8").read() for p in files]
         counts = [sum(model.count_tokens(reindent(t, w)) for t in texts) for w in widths]
         base = counts[0]
         cells = [f"{c:,} ({(c - base) / base * 100:+.1f}%)" if w != 0 else f"{c:,}" for c, w in zip(counts, widths)]
@@ -512,7 +515,7 @@ def tokens(args: argparse.Namespace) -> None:
         first = None
         for directory in args.compare:
             paths = [p for p in sorted(glob.glob(os.path.join(REPO, directory, "*.tes"))) if not p.endswith("runtime_text.tes")]
-            texts = [open(p).read() for p in paths]
+            texts = [open(p, encoding="utf-8").read() for p in paths]
             count = sum(model.count_tokens(t) for t in texts)
             first = first or count
             print(f"| {directory} | {sum(len(t) for t in texts):,} | {count:,} | {(count - first) / first * 100:+.1f}% |")

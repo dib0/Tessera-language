@@ -1,27 +1,58 @@
 #!/bin/sh
 # Runs the independent milestone checks (M1 to M9) against WAD/freedoom1.wad.
-# Needs python3 and Pillow (for the M3 picture). Skips everything when the WAD is missing.
+# Needs Python 3 (and Pillow only for the optional M3 picture, which this script
+# does not draw). Skips everything when the WAD or Python is missing.
+#
+# Runs on Linux, macOS and on Windows in Git Bash, where the programs carry the
+# `.exe` extension.
 set -u
 cd "$(dirname "$0")/.."
+
+exe=
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) exe=.exe ;;
+esac
+
 if [ ! -f WAD/freedoom1.wad ]; then
     echo "skipped: WAD/freedoom1.wad is missing (see README.md)"
     exit 0
 fi
+# On Windows `python3` is usually the Microsoft Store placeholder, which fails;
+# take whichever name really starts a Python 3.
+python3=
+for candidate in python3 python; do
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' >/dev/null 2>&1; then
+        python3=$candidate
+        break
+    fi
+done
+if [ -z "$python3" ]; then
+    echo "skipped: no Python 3 to compare against"
+    exit 0
+fi
+
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
-td="$build/tesseradoom"
-../../bin/tessera1 build main.tes -o "$td" --opt 3 >/dev/null || { echo "FAIL build"; exit 1; }
+# The game itself is a native program, so a path handed to it (`save`, `load`)
+# must be one Windows understands. `cygpath -m` gives C:/... , which the shell
+# and its tools accept just as well.
+if [ -n "$exe" ]; then
+    build=$(cygpath -m "$build")
+fi
+td="$build/tesseradoom$exe"
+"../../bin/tessera1$exe" build main.tes -o "$td" --opt 3 >/dev/null || { echo "FAIL build"; exit 1; }
 failed=0
 check() {
     if [ "$2" -eq 0 ]; then echo "ok   $1"; else echo "FAIL $1"; failed=1; fi
 }
 
-"$td" info > "$build/m1" && python3 -I checks/wadinfo.py > "$build/m1ref" && cmp -s "$build/m1" "$build/m1ref"
+# Python writes CRLF on Windows; the comparison below is byte for byte.
+"$td" info > "$build/m1" && "$python3" -I checks/wadinfo.py | tr -d '\r' > "$build/m1ref" && cmp -s "$build/m1" "$build/m1ref"
 check "M1 WAD type, lump count and map names match Python" $?
 
 ok=0
 for map in E1M1 E2M5 E3M7 E4M9; do
-    "$td" map $map > "$build/m2" && python3 -I checks/mapdump.py $map > "$build/m2ref" && cmp -s "$build/m2" "$build/m2ref" || ok=1
+    "$td" map $map > "$build/m2" && "$python3" -I checks/mapdump.py $map | tr -d '\r' > "$build/m2ref" && cmp -s "$build/m2" "$build/m2ref" || ok=1
 done
 check "M2 map counts and player start match Python (E1M1, E2M5, E3M7, E4M9)" $ok
 
@@ -30,7 +61,7 @@ check "M3 ASCII map drawn (compare with: python3 checks/mapimage.py E1M1 map.png
 
 ok=0
 for map in E1M1 E1M2 E2M3 E3M1; do
-    "$td" columns $map | python3 -I checks/raycast.py $map --compare > "$build/m4" || ok=1
+    "$td" columns $map | "$python3" -I checks/raycast.py $map --compare > "$build/m4" || ok=1
     grep -q "different line 0, worst row difference [01], columns off by more than 1 row 0" "$build/m4" || ok=1
 done
 check "M4 raycast columns match a floating-point raycaster within one row" $ok
@@ -40,7 +71,7 @@ check "M5 BSP frame written as PPM (visual check; no reference engine available)
 
 ok=0
 for seed in 1 2; do
-    python3 -I checks/walkcheck.py --commands 5000 $seed | "$td" walk E1M1 | python3 -I checks/walkcheck.py E1M1 > /dev/null || ok=1
+    "$python3" -I checks/walkcheck.py --commands 5000 $seed | "$td" walk E1M1 | "$python3" -I checks/walkcheck.py E1M1 > /dev/null || ok=1
 done
 check "M6 10000 random steps never closer than 16 units to a wall or through one" $ok
 
@@ -48,13 +79,13 @@ fps=$("$td" bench E1M1 200 --still | sed 's/.*: \([0-9]*\) frames per second.*/\
 [ "$fps" -ge 35 ]
 check "M7/D3 rendering at least 35 frames per second (measured $fps)" $?
 
-"$td" game E1M1 --no-monsters < checks/m8_route.txt | python3 -I checks/m8check.py > "$build/m8"
+"$td" game E1M1 --no-monsters < checks/m8_route.txt | "$python3" -I checks/m8check.py > "$build/m8"
 check "M8 items, lift and two doors on a route through E1M1" $?
 
 ok=0
 for demo in DEMO1 DEMO4; do
     map=$("$td" demo $demo 0 | head -1 | awk '{print $4}')
-    "$td" demo $demo --no-monsters | python3 -I checks/walkcheck.py $map > /dev/null || ok=1
+    "$td" demo $demo --no-monsters | "$python3" -I checks/walkcheck.py $map > /dev/null || ok=1
 done
 check "M9 demo playback (without monsters) stays clear of walls; parity not checked (no reference)" $ok
 

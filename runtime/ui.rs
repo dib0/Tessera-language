@@ -1,6 +1,6 @@
 
 // ---------------------------------------------------------------------------
-// Tessera `ui` runtime: a minimal X11 client in safe Rust (Linux, local display).
+// Tessera `ui` runtime for unix: a minimal X11 client in safe Rust (local display).
 // Speaks the X11 core protocol directly over the X server's Unix socket, so
 // generated programs need no libraries. One window per program; drawing goes
 // to an off-screen pixmap and becomes visible on `present()`.
@@ -418,7 +418,7 @@ fn t_ui_connect(width: i64, height: i64, loc: &str) -> (T_Ui, u32, u8, u8, u8) {
     (ui, root, root_depth, min_keycode, max_keycode)
 }
 
-fn t_open_window(title: Rc<String>, width: i64, height: i64, loc: &str) {
+pub fn t_open_window(title: Rc<String>, width: i64, height: i64, loc: &str) {
     if !(1..=4096).contains(&width) || !(1..=4096).contains(&height) {
         t_ui_fail(format!("window size {}x{} is outside 1..4096", width, height), loc)
     }
@@ -533,7 +533,7 @@ fn t_open_window(title: Rc<String>, width: i64, height: i64, loc: &str) {
     T_UI.with(|cell| *cell.borrow_mut() = Some(ui));
 }
 
-fn t_fill_rectangle(x: i64, y: i64, width: i64, height: i64, color: i64, loc: &str) {
+pub fn t_fill_rectangle(x: i64, y: i64, width: i64, height: i64, color: i64, loc: &str) {
     if width <= 0 || height <= 0 { return; }
     t_with_ui(loc, |ui| {
         ui.set_gc(color, ui.line_width);
@@ -546,7 +546,7 @@ fn t_fill_rectangle(x: i64, y: i64, width: i64, height: i64, color: i64, loc: &s
     })
 }
 
-fn t_draw_line(x1: i64, y1: i64, x2: i64, y2: i64, thickness: i64, color: i64, loc: &str) {
+pub fn t_draw_line(x1: i64, y1: i64, x2: i64, y2: i64, thickness: i64, color: i64, loc: &str) {
     if thickness <= 0 { return; }
     t_with_ui(loc, |ui| {
         ui.set_gc(color, thickness);
@@ -571,15 +571,15 @@ fn t_arc(opcode: u8, center_x: i64, center_y: i64, radius: i64, thickness: i64, 
     })
 }
 
-fn t_draw_circle(center_x: i64, center_y: i64, radius: i64, thickness: i64, color: i64, loc: &str) {
+pub fn t_draw_circle(center_x: i64, center_y: i64, radius: i64, thickness: i64, color: i64, loc: &str) {
     t_arc(68, center_x, center_y, radius, thickness, color, loc)
 }
 
-fn t_fill_circle(center_x: i64, center_y: i64, radius: i64, color: i64, loc: &str) {
+pub fn t_fill_circle(center_x: i64, center_y: i64, radius: i64, color: i64, loc: &str) {
     t_arc(71, center_x, center_y, radius, 1, color, loc)
 }
 
-fn t_draw_text(x: i64, y: i64, text: Rc<String>, color: i64, loc: &str) {
+pub fn t_draw_text(x: i64, y: i64, text: Rc<String>, color: i64, loc: &str) {
     let bytes: Vec<u8> = text.chars().map(|c| if (c as u32) >= 32 && (c as u32) < 256 { c as u32 as u8 } else { b'?' }).collect();
     if bytes.is_empty() { return; }
     t_with_ui(loc, |ui| {
@@ -596,15 +596,15 @@ fn t_draw_text(x: i64, y: i64, text: Rc<String>, color: i64, loc: &str) {
     })
 }
 
-fn t_text_width(text: Rc<String>, loc: &str) -> i64 {
+pub fn t_text_width(text: Rc<String>, loc: &str) -> i64 {
     t_with_ui(loc, |ui| ui.char_width * text.chars().count() as i64)
 }
 
-fn t_present(loc: &str) {
+pub fn t_present(loc: &str) {
     t_with_ui(loc, |ui| ui.present(loc))
 }
 
-fn t_next_event(loc: &str) -> Rc<T_WindowEvent> {
+pub fn t_next_event(loc: &str) -> Rc<T_WindowEvent> {
     t_with_ui(loc, |ui| {
         ui.flush(loc);
         loop {
@@ -617,7 +617,7 @@ fn t_next_event(loc: &str) -> Rc<T_WindowEvent> {
     })
 }
 
-fn t_poll_event(loc: &str) -> Option<Rc<T_WindowEvent>> {
+pub fn t_poll_event(loc: &str) -> Option<Rc<T_WindowEvent>> {
     t_with_ui(loc, |ui| {
         ui.flush(loc);
         loop {
@@ -633,7 +633,7 @@ fn t_poll_event(loc: &str) -> Option<Rc<T_WindowEvent>> {
 /// Draws rows of `width` colors at (x, y), each pixel as a scale x scale square, with PutImage
 /// (ZPixmap, 32 bits per pixel). The image is sent in bands of rows, as one request may carry at
 /// most 262,140 bytes without the BIG-REQUESTS extension.
-fn t_draw_pixels(x: i64, y: i64, width: i64, colors: &Rc<Vec<i64>>, scale: i64, loc: &str) {
+pub fn t_draw_pixels(x: i64, y: i64, width: i64, colors: &Rc<Vec<i64>>, scale: i64, loc: &str) {
     if width < 1 || width > 4096 || !(1..=16).contains(&scale) || colors.len() as i64 % width != 0 {
         t_fail("R004", format!("draw_pixels: width {} and scale {} do not fit {} colors (scale 1..16, width 1..4096, colors a multiple of width)", width, scale, colors.len()), loc)
     }

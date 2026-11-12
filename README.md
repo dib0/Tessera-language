@@ -73,7 +73,7 @@ Rust is the initial implementation and code-generation path, not part of Tessera
 
 ## Getting started
 
-Requires Linux and Rust (`rustc` and `cargo`, from https://rustup.rs). Graphical programs need an X11 session.
+Requires Rust (`rustc` and `cargo`, from https://rustup.rs) and runs on Linux, macOS and Windows; on Windows in Git Bash. Graphical programs need an X11 session on Linux and nothing extra on Windows.
 
 ```sh
 ./build.sh                                    # stage 0, stage 1, self-hosting check
@@ -82,6 +82,8 @@ bin/tictactoe
 bin/tessera1 check examples/invalid/E0301-undeclared-effect.tes
 (cd compiler && cargo test --release)         # tests for all compilers
 ```
+
+On Windows the programs are written with `.exe` (`bin/tessera1.exe`, and `-o bin/tictactoe` gives `bin/tictactoe.exe`). Windows needs nothing besides Rust for console, graphical and web programs; the `db` effect additionally needs the `sqlite3` command on `PATH` (`winget install SQLite.SQLite`).
 
 ## Web applications
 

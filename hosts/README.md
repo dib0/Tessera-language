@@ -27,7 +27,7 @@ hosts/
   nginx/config                     nginx --add-module configuration
   iis/web.config                   IIS + HttpPlatformHandler (recommended on IIS)
   iis/web.cgi.config               IIS + CGI module
-  iis/TesseraModule.cpp/.def       native IIS module (UNTESTED)
+  iis/TesseraModule.cpp/.def       native IIS module (compiles; not run under IIS)
   iis/build.cmd                    MSVC build of the IIS module
   test/                            stub application, ABI test, server tests
 runtime/adapter.rs                 C ABI of the library (the only unsafe Rust code)
@@ -144,19 +144,21 @@ rustc --edition 2021 --crate-type cdylib -C opt-level=2 -C panic=unwind -o libap
 and become a 500; with `panic=abort` any runtime error would kill the server
 worker.
 
-**Windows (for the IIS module)**: the library must be built for a Windows
-target, producing a `.dll`, e.g. on a Windows machine with the MSVC Rust
-toolchain:
+**Windows (for the IIS module)**: the compiler runs on Windows too, so build
+the `.dll` there with the same command, giving it the name the module expects
+(`tessera_app.dll` by default; a name with an extension is used exactly as
+given):
 
-```bat
-rustc --edition 2021 --crate-type cdylib -C opt-level=2 -C panic=unwind --target x86_64-pc-windows-msvc -o tessera_app.dll adapter.rs
+```sh
+tessera1 build app.tes --library -o tessera_app.dll
 ```
 
-The compiler currently runs on Linux, so this is a manual step: copy the build
-directory (`app.rs` + `adapter.rs`) to Windows and run the command there, or
-cross-compile from Linux (`rustup target add x86_64-pc-windows-msvc` plus an
-MSVC-compatible linker and the Windows SDK libraries, e.g. lld-link with
-xwin). Not tested here.
+rustc also writes `tessera_app.dll.lib` and `tessera_app.dll.exp` next to it;
+IIS needs neither. To build the library on Linux for Windows instead, copy the
+build directory (`app.rs` + `adapter.rs`) over and run rustc there, or
+cross-compile (`rustup target add x86_64-pc-windows-msvc` plus an
+MSVC-compatible linker and the Windows SDK libraries, e.g. lld-link with xwin);
+the cross-compiled route is not tested here.
 
 ### 4.2 Apache: `mod_tessera`
 
@@ -245,15 +247,15 @@ http {
 - The response is sent without copying: the library's buffer is returned with
   `tessera_free` from a request pool cleanup.
 
-### 4.4 IIS: native module (UNTESTED)
+### 4.4 IIS: native module (compiles; not run under IIS)
 
 `iis/TesseraModule.cpp` is a small IIS 7+ native module (`CHttpModule`,
 `OnExecuteRequestHandler`) written against the documented `httpserv.h` API.
-**It has not been compiled with MSVC or run under IIS** (no Windows here). It
-was only syntax-checked on Linux with mingw-w64 g++ against a hand-written
-mock of the subset of `httpserv.h` it uses, which proves nothing about the
-real header. Prefer HttpPlatformHandler (section 3) unless you need
-in-process hosting, and test it before use.
+`iis/build.cmd` compiles it cleanly with MSVC and the real `httpserv.h`
+(Visual Studio 2022, Windows SDK 10.0.26100, `/W4`, no warnings), and the
+resulting DLL exports `RegisterModule`. **It has still not been loaded into
+IIS and served a request.** Prefer HttpPlatformHandler (section 3) unless you
+need in-process hosting, and test it before use.
 
 Behaviour: loads the application DLL once per worker process in
 `RegisterModule` (path from the app pool environment variable

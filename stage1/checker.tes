@@ -100,6 +100,7 @@ items: List[ast.Item]
 type_defs: List[TypeDef]
 diagnostics: List[source.Diagnostic]
 uses_ui: Bool
+uses_audio: Bool
 entry: Text
 }
 
@@ -1119,6 +1120,7 @@ set c = report(c, source.error_help("E0212", nowhere, "the program has no `main`
 // 5. Bodies.
 var typed: List[ast.Item] = []
 var uses_ui = false
+var uses_audio = false
 for m in modules {
 set c = enter_module(c, m)
 for item in m.items {
@@ -1129,6 +1131,9 @@ let signature = value_or(find_signature(c, canonical), placeholder_signature())
 if signature.span == f.name_span {
 if source.contains_text(signature.effects, "ui") {
 set uses_ui = true
+}
+if source.contains_text(signature.effects, "audio") {
+set uses_audio = true
 }
 let result = check_function(c, f, signature)
 set c = result.checker
@@ -1166,7 +1171,7 @@ set c = report(c, source.error_help("E0610", i.span, "module `\(i.path)` is impo
 }
 }
 }
-CheckedProgram { items: typed, type_defs: c.type_defs, diagnostics: c.diagnostics, uses_ui: uses_ui or c.uses_window_event, entry: entry }
+CheckedProgram { items: typed, type_defs: c.type_defs, diagnostics: c.diagnostics, uses_ui: uses_ui or c.uses_window_event, uses_audio: uses_audio, entry: entry }
 }
 
 fn slice_name(canonical: Text, prefix: Text) -> Text {

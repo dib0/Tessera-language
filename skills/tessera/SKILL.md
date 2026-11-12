@@ -16,7 +16,7 @@ Tessera is not in your training data. Do not guess syntax from Rust, Swift or Py
 
 ## Toolchain
 
-The compiler is `tessera1`. Find it with `command -v tessera1`, otherwise use `bin/tessera1` in a Tessera-language checkout (build it there with `./build.sh`; it needs a Rust toolchain, often in `~/.cargo/bin`, which non-login shells may not have on `PATH`).
+The compiler is `tessera1`. Find it with `command -v tessera1`, otherwise use `bin/tessera1` in a Tessera-language checkout (build it there with `./build.sh`; it needs a Rust toolchain, often in `~/.cargo/bin`, which non-login shells may not have on `PATH`). On Windows the compiler and the programs it builds are `.exe` (`bin/tessera1.exe`, and `-o prog` writes `prog.exe`); `./build.sh` runs in Git Bash.
 
 ```
 tessera1 check main.tes            # type and effect check; fast, use after every edit
@@ -53,6 +53,7 @@ Loop: write, `check`, read every diagnostic (each has a code and usually a `help
 - Nested patterns such as `.Error(.NotFound)`: match `.Error(e)`, then `if e == .NotFound`.
 - `*=`, `/=`, `_x` names, closures, methods (`xs.length()`), default arguments, overloading, string indexing (`text[0]`), chained comparisons, `and` mixed with `or` without parentheses: none exist.
 - A record literal in an `if`/`while`/`for`/`match` header needs parentheses.
+- Windows line endings (E0101): a `.tes` file must use LF. Write files with LF, and in a git repository set `* text=auto eol=lf` in `.gitattributes` so a Windows checkout stays LF.
 
 ## Performance traps (compile fine, run slowly)
 

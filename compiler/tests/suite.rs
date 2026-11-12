@@ -33,8 +33,18 @@ fn expected_code(path: &Path) -> String {
     path.file_name().unwrap().to_string_lossy().split('-').next().unwrap().to_string()
 }
 
+/// A directory the test programs may write in: `tests/run/semantics.tes` keeps a
+/// file next to itself, and the compiler is given absolute paths anyway.
+fn scratch() -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("scratch");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tessera"));
+    command.current_dir(scratch());
+    command
 }
 
 fn run_program(path: &Path) -> std::process::Output {
