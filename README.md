@@ -6,7 +6,7 @@
 
 The Tessera language aims to make it easy for language models to create, review, and maintain software without sacrificing clear behavior or safety. Its source is text, its syntax is intended to be compact and regular, and design rationale is preserved alongside code. **This is for humans that care about functionality of software, not about the code.**
 
-> **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.4).
+> **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.20).
 
 ## Design goals
 
@@ -27,13 +27,13 @@ fn is_adult(age: Int) -> Bool = age >= 18
 
 fn label(name: Text, age: Int) -> Text {
 let category = if is_adult(age) { "adult" } else { "minor" }
-category + ": " + name
+"\(category): \(name)"
 }
 
 fn main() -> Unit uses io = print(label("Ada", 20))
 ```
 
-The `note` form records design intent and is preserved by the compiler. `uses io` declares that a function performs I/O; a function without `uses` cannot act on the outside world, and the compiler checks this. Mutation is explicit (`var` and `set`), there are no implicit conversions, and `match` must handle every case.
+The `note` form records design intent and is preserved by the compiler. `uses io` declares that a function performs I/O; a function without `uses` cannot act on the outside world, and the compiler checks this. Mutation is explicit (`var` and `set`), there are no implicit conversions, and `match` must handle every case. Code has no indentation: Tessera is written and read mainly by models, and braces carry the structure (leaving indentation out saves about 12% of tokens).
 
 The original compact sketch (`fn adult(age:i64)->bool`, `!{io}`) was replaced by this more readable form; the reasons are in section 3 of the specification.
 
@@ -94,6 +94,17 @@ bin/tessera1 test tests/web/app.tes                                      # run t
 ```
 
 What applications needed beyond command-line programs, and what draft 0.13 implemented, is in [`application-roadmap.md`](application-roadmap.md).
+
+## Using Tessera with Claude Code
+
+Tessera is not in any model's training data, so a model needs the language reference before it writes code. [`skills/tessera/`](skills/) is a [Claude Code](https://claude.com/claude-code) skill that provides it: the compiler workflow, the house style, the mistakes the compiler rejects, and the full reference ([`harness/reference/tessera.md`](harness/reference/tessera.md), the same text the measurement harness gives to models). Install it for all your projects with:
+
+```sh
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/tessera" ~/.claude/skills/tessera
+```
+
+or copy it with `cp -rL skills/tessera ~/.claude/skills/tessera`; see [`skills/README.md`](skills/README.md). Working on the language itself (compiler, runtime, standard modules) follows the rules in [`CLAUDE.md`](CLAUDE.md).
 
 ## Measuring language changes
 

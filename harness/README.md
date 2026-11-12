@@ -41,7 +41,9 @@ harness/.venv/bin/python harness/harness.py report harness/results/<dir> ...
 ## Pieces
 
 - `reference/tessera.md`: the language reference the model gets (the complete basis for writing
-  single-file programs). Every code example in it compiles.
+  programs, modules, web applications and graphical programs). Every complete program in it
+  compiles; the other examples are fragments. The Claude Code skill in `skills/tessera/` points to
+  this file, so keep it in step with `language-design.md`.
 - `reference/features/<name>.md` (none at the moment): extra sections appended for variants that list
   the feature, to try a language feature before it goes into the main reference.
 - `variants.json`: variant name -> indentation width and enabled feature sections. The reference
@@ -68,7 +70,7 @@ middle of a measurement. A refusal is recorded as the outcome `refusal`.
 
 ## Cost
 
-The reference is about 3,000 tokens and is cached across requests. With Claude Opus 5.5 at effort
+The reference is about 7,000 tokens (draft 0.20; it was about 3,000 at draft 0.12) and is cached across requests. With Claude Opus 5.5 at effort
 `medium`, a task run averages about 700 to 1,100 output tokens (thinking included) and about 7,000 input tokens,
 and almost always passes on the first attempt: roughly $0.02 to $0.04 per task run. 18 tasks x 3
 variants x 2 repetitions is 108 task runs, roughly $2 to $4 (measured 2026-11-08). Failing attempts
