@@ -1,0 +1,78 @@
+{
+  "tests": [
+    {
+      "args": [
+        "5",
+        "hello",
+        "world"
+      ],
+      "stdout": "hello\nworld\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "11",
+        "hello",
+        "world"
+      ],
+      "stdout": "hello world\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "a",
+        "b"
+      ],
+      "stdout": "a\nb\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "4",
+        "abcdefg"
+      ],
+      "stdout": "abcdefg\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "6",
+        "ab",
+        "cd",
+        "efghijk",
+        "l"
+      ],
+      "stdout": "ab cd\nefghijk\nl\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "7",
+        "abc",
+        "abc",
+        "a"
+      ],
+      "stdout": "abc abc\na\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "10",
+        "aaaaa",
+        "bbbbb"
+      ],
+      "stdout": "aaaaa\nbbbbb\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "4",
+        "ab",
+        "cd"
+      ],
+      "stdout": "ab\ncd\n",
+      "exit": 0
+    }
+  ]
+}

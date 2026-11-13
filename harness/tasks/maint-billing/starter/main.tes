@@ -1,0 +1,25 @@
+import billing/money uses nothing
+import billing/tax uses nothing
+import billing/invoice uses nothing
+
+fn main() -> Unit uses io, env {
+var lines: List[invoice.Line] = []
+var position = 0
+for argument in args() {
+set position += 1
+let line = invoice.parse_line(argument) else exit_with(1, "error: invalid argument \(position)")
+set lines += [line]
+}
+var total_net = 0.0
+var total_tax = 0.0
+for line in lines {
+let net_amount = invoice.net(line)
+let tax_amount = tax.line_tax(net_amount, line.category)
+set total_net = total_net + net_amount
+set total_tax = total_tax + tax_amount
+print(invoice.describe(line, net_amount, tax_amount))
+}
+print("net: \(money.show(total_net))")
+print("tax: \(money.show(total_tax))")
+print("total: \(money.show(total_net + total_tax))")
+}

@@ -1,0 +1,76 @@
+{
+  "tests": [
+    {
+      "args": [
+        "request",
+        "POST",
+        "/hello"
+      ],
+      "stdout": "HTTP/1.1 405 Method Not Allowed\n\nmethod not allowed",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "DELETE",
+        "/items/1"
+      ],
+      "stdout": "HTTP/1.1 405 Method Not Allowed\n\nmethod not allowed",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/items/12/extra"
+      ],
+      "stdout": "HTTP/1.1 404 Not Found\n\nnot found",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/hello?other=1"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nhello world",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/hello?name=Bob&x=1"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nhello Bob",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/helloo"
+      ],
+      "stdout": "HTTP/1.1 404 Not Found\n\nnot found",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/items/123"
+      ],
+      "stdout": "HTTP/1.1 200 OK\n\nitem 123",
+      "exit": 0
+    },
+    {
+      "args": [
+        "request",
+        "GET",
+        "/items/1a"
+      ],
+      "stdout": "HTTP/1.1 400 Bad Request\n\nbad id",
+      "exit": 0
+    }
+  ]
+}

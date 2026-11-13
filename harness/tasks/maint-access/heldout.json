@@ -1,0 +1,131 @@
+{
+  "tests": [
+    {
+      "args": [
+        "allow:ann:write:/docs",
+        "member:ann:@interns",
+        "deny:@interns:write:/docs/legal",
+        "check:ann:write:/docs/legal/a",
+        "check:ann:write:/docs/other"
+      ],
+      "stdout": "ann write /docs/legal/a: denied\nann write /docs/other: allowed\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "deny:@contractors:*:/finance",
+        "member:@temps:@contractors",
+        "member:joe:@temps",
+        "allow:@temps:read:/",
+        "check:joe:read:/finance/q1",
+        "check:joe:read:/finances"
+      ],
+      "stdout": "joe read /finance/q1: denied\njoe read /finances: allowed\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "member:ann:@staff",
+        "allow:staff:read:/x",
+        "allow:@ann:read:/y",
+        "check:ann:read:/x",
+        "check:ann:read:/y",
+        "check:staff:read:/x"
+      ],
+      "stdout": "ann read /x: denied\nann read /y: denied\nstaff read /x: allowed\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "member:@a:@b",
+        "member:@b:@c",
+        "member:@c:@a",
+        "member:eve:@c",
+        "allow:@a:read:/",
+        "deny:@b:read:/private",
+        "check:eve:read:/public",
+        "check:eve:read:/private/k"
+      ],
+      "stdout": "eve read /public: allowed\neve read /private/k: denied\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "allow:*:read:/",
+        "check:@staff:read:/"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "member:ann:@"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "member:ann:@ops",
+        "allow:*:read:/",
+        "deny:@ops:*:/",
+        "check:ann:read:/a",
+        "check:bob:read:/a"
+      ],
+      "stdout": "ann read /a: denied\nbob read /a: allowed\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "member:u:@g1",
+        "member:@g1:@g2",
+        "member:@g2:@g3",
+        "member:@g3:@g4",
+        "allow:@g4:deploy:/prod",
+        "check:u:deploy:/prod",
+        "check:u:deploy:/prod/eu"
+      ],
+      "stdout": "u deploy /prod: allowed\nu deploy /prod/eu: allowed\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "member:kim:@dev",
+        "member:kim:@audit",
+        "allow:@dev:write:/src",
+        "deny:@audit:write:/src/main",
+        "check:kim:write:/src/lib",
+        "check:kim:write:/src/main"
+      ],
+      "stdout": "kim write /src/lib: allowed\nkim write /src/main: denied\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "check:ann:read:docs"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "allow:*:read:/",
+        "check::read:/"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "member::@s"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    }
+  ]
+}

@@ -1,16 +1,8 @@
-fn lowercase(word: Text) -> Text {
-var out: List[Int] = []
-for code in code_points(word) {
-set out = append(out, if code >= 65 and code <= 90 { code + 32 } else { code })
-}
-from_code_points(out)
-}
-
 fn main() -> Unit uses io, env {
 var words: List[Text] = []
 var counts: List[Int] = []
 for argument in args() {
-let word = lowercase(argument)
+let word = to_lower(argument)
 var found = false
 for index in range(0, length(words)) {
 if words[index] == word {

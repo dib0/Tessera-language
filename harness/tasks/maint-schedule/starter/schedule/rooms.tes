@@ -1,0 +1,50 @@
+import schedule/clock uses nothing
+
+pub type Booking {
+id: Text
+room: Text
+span: clock.Span
+}
+
+fn start_of(booking: Booking) -> Int = booking.span.start
+
+fn position(bookings: List[Booking], id: Text) -> Option[Int] {
+for index in range(0, length(bookings)) {
+if bookings[index].id == id {
+return .Some(index)
+}
+}
+.None
+}
+
+note "The booking in the room that overlaps the span and starts earliest, if any."
+fn first_conflict(bookings: List[Booking], room: Text, span: clock.Span) -> Option[Booking] {
+for booking in sort_by(bookings, start_of) {
+if booking.room == room and clock.overlaps(booking.span, span) {
+return .Some(booking)
+}
+}
+.None
+}
+
+note "A rejected command changes nothing: on .Error the caller keeps the schedule it had. Every command returns either the complete new schedule or the reason."
+pub fn book(bookings: List[Booking], booking: Booking) -> Result[List[Booking], Text] {
+if position(bookings, booking.id) != .None {
+return .Error("duplicate booking \(booking.id)")
+}
+match first_conflict(bookings, booking.room, booking.span) {
+.Some(other) => .Error("conflict with \(other.id)")
+.None => .Ok(bookings + [booking])
+}
+}
+
+pub fn cancel(bookings: List[Booking], id: Text) -> Result[List[Booking], Text] {
+let index = position(bookings, id) else return .Error("unknown booking \(id)")
+.Ok(slice(bookings, 0, index) + slice(bookings, index + 1, length(bookings)))
+}
+
+fn order_key(booking: Booking) -> Text = booking.room + " " + pad_left(to_text(booking.span.start), 4, "0")
+
+pub fn listing(bookings: List[Booking]) -> List[Text] = map(sort_by(bookings, order_key), describe)
+
+fn describe(booking: Booking) -> Text = "\(booking.room) \(clock.show_span(booking.span)) \(booking.id)"

@@ -1,0 +1,62 @@
+pub enum Effect {
+Allow
+Deny
+}
+
+pub type Rule {
+effect: Effect
+subject: Text
+action: Text
+path: Text
+}
+
+note "A rule path covers the path itself and everything below it on a segment boundary: /docs covers /docs and /docs/a, never /docsx. The rule path / covers every path."
+fn covers(rule_path: Text, path: Text) -> Bool {
+if rule_path == "/" or rule_path == path {
+return true
+}
+starts_with(path, rule_path + "/")
+}
+
+fn action_matches(rule_action: Text, action: Text) -> Bool = rule_action == "*" or rule_action == action
+
+pub type Membership {
+member: Text
+group: Text
+}
+
+note "Every group the user belongs to, directly or through other groups. Membership may contain cycles, so each group is visited once."
+pub fn groups_of(memberships: List[Membership], user: Text) -> List[Text] {
+var found: List[Text] = []
+var pending = [user]
+while length(pending) > 0 {
+let current = pending[0]
+set pending = slice(pending, 1, length(pending))
+for membership in memberships {
+if membership.member == current and not contains(found, membership.group) {
+set found += [membership.group]
+set pending += [membership.group]
+}
+}
+}
+found
+}
+
+fn subject_matches(subject: Text, user: Text, groups: List[Text]) -> Bool = subject == "*" or subject == user or contains(groups, subject)
+
+fn applies(rule: Rule, user: Text, groups: List[Text], action: Text, path: Text) -> Bool = subject_matches(rule.subject, user, groups) and action_matches(rule.action, action) and covers(rule.path, path)
+
+note "Deny overrides allow, whatever the order of the rules; when no rule applies the answer is deny. Security reviews rely on this: do not change it."
+pub fn decide(rules: List[Rule], memberships: List[Membership], user: Text, action: Text, path: Text) -> Bool {
+let groups = groups_of(memberships, user)
+var allowed = false
+for rule in rules {
+if applies(rule, user, groups, action, path) {
+match rule.effect {
+.Deny => return false
+.Allow => set allowed = true
+}
+}
+}
+allowed
+}

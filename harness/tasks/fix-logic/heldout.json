@@ -1,0 +1,32 @@
+{
+  "tests": [
+    {
+      "args": [
+        "xyz"
+      ],
+      "stdout": "xyz: 0\ntotal: 0\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "Queue",
+        "IOU",
+        "rhythm"
+      ],
+      "stdout": "Queue: 4\nIOU: 3\nrhythm: 0\ntotal: 7\n",
+      "exit": 0
+    },
+    {
+      "args": [],
+      "stdout": "total: 0\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "aAaA"
+      ],
+      "stdout": "aAaA: 4\ntotal: 4\n",
+      "exit": 0
+    }
+  ]
+}

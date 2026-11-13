@@ -1,0 +1,76 @@
+{
+  "tests": [
+    {
+      "args": [
+        "encode",
+        "a"
+      ],
+      "stdout": "1a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "encode",
+        "aaaaaaaaaaaa"
+      ],
+      "stdout": "12a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "decode",
+        "1a"
+      ],
+      "stdout": "a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "decode",
+        ""
+      ],
+      "stdout": "\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "decode",
+        "3a10b"
+      ],
+      "stdout": "aaabbbbbbbbbb\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "encode",
+        "aabba"
+      ],
+      "stdout": "2a2b1a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "encode",
+        "  x"
+      ],
+      "stdout": "2 1x\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "encode",
+        "ééa"
+      ],
+      "stdout": "2é1a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "decode",
+        "9a"
+      ],
+      "stdout": "aaaaaaaaa\n",
+      "exit": 0
+    }
+  ]
+}

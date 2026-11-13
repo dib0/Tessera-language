@@ -1,0 +1,33 @@
+import schedule/clock uses nothing
+import schedule/rooms uses nothing
+
+fn valid_name(name: Text) -> Bool = length(name) > 0 and not contains(name, " ")
+
+fn apply(bookings: List[rooms.Booking], argument: Text) -> Result[List[rooms.Booking], Text] {
+let parts = split(argument, ":")
+let kind = parts[0]
+if kind == "book" and length(parts) == 4 and valid_name(parts[1]) and valid_name(parts[2]) {
+let span = clock.parse_span(parts[3]) else return .Error("invalid")
+return rooms.book(bookings, rooms.Booking { id: parts[1], room: parts[2], span: span })
+}
+if kind == "cancel" and length(parts) == 2 and valid_name(parts[1]) {
+return rooms.cancel(bookings, parts[1])
+}
+.Error("invalid")
+}
+
+note "Commands run in argument order; a rejected command is reported and the next one runs on the unchanged schedule."
+fn main() -> Unit uses io, env {
+var bookings: List[rooms.Booking] = []
+var number = 0
+for argument in args() {
+set number += 1
+match apply(bookings, argument) {
+.Ok(updated) => set bookings = updated
+.Error(reason) => print("rejected \(number): \(reason)")
+}
+}
+for line in rooms.listing(bookings) {
+print(line)
+}
+}

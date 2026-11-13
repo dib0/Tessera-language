@@ -1,0 +1,38 @@
+{
+  "tests": [
+    {
+      "args": [],
+      "stdout": "",
+      "exit": 0
+    },
+    {
+      "args": [
+        "Apple",
+        "APPLE",
+        "banana",
+        "apple",
+        "Banana"
+      ],
+      "stdout": "apple: 3\nbanana: 2\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "ÉCOLE",
+        "école"
+      ],
+      "stdout": "école: 2\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "a",
+        "b",
+        "c",
+        "b"
+      ],
+      "stdout": "a: 1\nb: 2\nc: 1\n",
+      "exit": 0
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "tests": [
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "move:a:0930-1030"
+      ],
+      "stdout": "red 0930-1030 a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:blue:0930-1030",
+        "swap:a:b"
+      ],
+      "stdout": "blue 0900-1000 a\nred 0930-1030 b\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:red:1100-1200",
+        "move:b:1000-1100",
+        "move:a:1100-1130"
+      ],
+      "stdout": "red 1000-1100 b\nred 1100-1130 a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:z:red:1000-1100",
+        "book:y:red:0800-0900",
+        "book:w:red:1200-1300",
+        "move:w:0830-1030"
+      ],
+      "stdout": "rejected 4: conflict with y\nred 0800-0900 y\nred 1000-1100 z\nred 1200-1300 w\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:blue:1300-1400",
+        "book:c:blue:0930-0945",
+        "book:d:red:1330-1430",
+        "swap:a:b"
+      ],
+      "stdout": "rejected 5: conflict with c\nblue 0930-0945 c\nblue 1300-1400 b\nred 0900-1000 a\nred 1330-1430 d\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "swap:p:q",
+        "book:p:r:0100-0200",
+        "swap:p:q",
+        "move:q:0100-0200"
+      ],
+      "stdout": "rejected 1: unknown booking p\nrejected 3: unknown booking q\nrejected 4: unknown booking q\nr 0100-0200 p\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "move:a:1000-1100",
+        "book:b:red:0900-1000",
+        "cancel:a",
+        "move:b:0930-1100"
+      ],
+      "stdout": "red 0930-1100 b\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "move:a:1000-0900",
+        "move:a:0900-1000:x",
+        "swap:a"
+      ],
+      "stdout": "rejected 2: invalid\nrejected 3: invalid\nrejected 4: invalid\nred 0900-1000 a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:red:1000-1100",
+        "swap:a:b"
+      ],
+      "stdout": "red 0900-1000 a\nred 1000-1100 b\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:b:red:1640-1700",
+        "book:a:red:0900-1000",
+        "book:c:red:2300-2359"
+      ],
+      "stdout": "red 0900-1000 a\nred 1640-1700 b\nred 2300-2359 c\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0000-0001",
+        "book:b:red:2400-2401",
+        "book:c:red:0960-1000",
+        "book:d::0100-0200",
+        "cancel:",
+        "book:e:red:1000-1000",
+        "move:a:0001-0001",
+        "book::red:0500-0600"
+      ],
+      "stdout": "rejected 2: invalid\nrejected 3: invalid\nrejected 4: invalid\nrejected 5: invalid\nrejected 6: invalid\nrejected 7: invalid\nrejected 8: invalid\nred 0000-0001 a\n",
+      "exit": 0
+    }
+  ]
+}

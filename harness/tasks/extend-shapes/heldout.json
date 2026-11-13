@@ -1,0 +1,29 @@
+{
+  "tests": [
+    {
+      "args": [
+        "square:1",
+        "circle:1",
+        "rect:3x4",
+        "rect:1x1"
+      ],
+      "stdout": "1\n3\n12\n1\ntotal: 17\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "rect:12x10",
+        "rect:1x100"
+      ],
+      "stdout": "120\n100\ntotal: 220\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "circle:10"
+      ],
+      "stdout": "300\ntotal: 300\n",
+      "exit": 0
+    }
+  ]
+}

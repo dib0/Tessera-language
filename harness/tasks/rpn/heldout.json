@@ -1,0 +1,97 @@
+{
+  "tests": [
+    {
+      "args": [
+        "5"
+      ],
+      "stdout": "5\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "7",
+        "2",
+        "/"
+      ],
+      "stdout": "3\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "2",
+        "7",
+        "-"
+      ],
+      "stdout": "-5\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "0",
+        "7",
+        "-",
+        "2",
+        "/"
+      ],
+      "stdout": "-3\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "-7",
+        "2",
+        "/"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid token -7\n",
+      "exit": 1
+    },
+    {
+      "args": [],
+      "stdout": "",
+      "stderr": "error: expected one result\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "1",
+        "2",
+        "+",
+        "+"
+      ],
+      "stdout": "",
+      "stderr": "error: stack underflow\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "1",
+        "0",
+        "0",
+        "/",
+        "+"
+      ],
+      "stdout": "",
+      "stderr": "error: division by zero\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "12",
+        "30",
+        "+"
+      ],
+      "stdout": "42\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "99",
+        "9",
+        "/"
+      ],
+      "stdout": "11\n",
+      "exit": 0
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+note "Money is a Decimal; every amount the program shows or adds up is first rounded to cents, half away from zero."
+pub fn cents(amount: Decimal) -> Decimal = round(amount, 2)
+
+pub fn show(amount: Decimal) -> Text {
+let total_cents = to_int(cents(amount) * 100.0)
+let sign = if total_cents < 0 { "-" } else { "" }
+let magnitude = if total_cents < 0 { 0 - total_cents } else { total_cents }
+"\(sign)\(magnitude / 100).\(pad_left(to_text(magnitude % 100), 2, "0"))"
+}

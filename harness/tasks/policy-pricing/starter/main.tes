@@ -1,0 +1,26 @@
+// Policy: pricing is imported with `uses nothing` on purpose; the audit relies on it being pure. Do not widen this import.
+import pricing uses nothing
+
+fn money(cents: Int) -> Text {
+let sign = if cents < 0 { "-" } else { "" }
+let magnitude = if cents < 0 { 0 - cents } else { cents }
+"\(sign)\(magnitude / 100).\(pad_left(to_text(magnitude % 100), 2, "0"))"
+}
+
+note "An argument is SKU:QUANTITY:CUSTOMER with a quantity of at least 1 and a customer of retail or member. All price logic lives in pricing, which must stay pure (see the import)."
+fn main() -> Unit uses io, env {
+var position = 0
+for argument in args() {
+set position += 1
+let parts = split(argument, ":")
+if length(parts) != 3 or not (parts[2] == "retail" or parts[2] == "member") {
+exit_with(1, "error: invalid argument \(position)")
+}
+let quantity = parse_int(parts[1]) else exit_with(1, "error: invalid argument \(position)")
+if quantity < 1 {
+exit_with(1, "error: invalid argument \(position)")
+}
+let quote = pricing.quote(parts[0], quantity, parts[2]) else exit_with(1, "error: unknown product \(parts[0])")
+print("\(quote.sku) \(quote.quantity) \(quote.customer): \(money(quote.total))")
+}
+}

@@ -1,0 +1,63 @@
+{
+  "tests": [
+    {
+      "args": [
+        "0",
+        "Abc-Z"
+      ],
+      "stdout": "Abc-Z\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "26",
+        "Hello"
+      ],
+      "stdout": "Hello\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "-27",
+        "aA"
+      ],
+      "stdout": "zZ\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "13",
+        "Uryyb",
+        "Jbeyq"
+      ],
+      "stdout": "Hello World\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "-100",
+        "a"
+      ],
+      "stdout": "e\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "é",
+        "z"
+      ],
+      "stdout": "é a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "`{@[",
+        "aZ"
+      ],
+      "stdout": "`{@[ bA\n",
+      "exit": 0
+    }
+  ]
+}

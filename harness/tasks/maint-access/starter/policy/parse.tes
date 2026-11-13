@@ -1,0 +1,31 @@
+import policy/rules uses nothing
+
+pub enum Command {
+Define(rule: rules.Rule)
+Check(user: Text, action: Text, path: Text)
+}
+
+fn valid_path(path: Text) -> Bool = starts_with(path, "/") and (path == "/" or not ends_with(path, "/"))
+
+fn valid_name(name: Text) -> Bool = length(name) > 0 and not contains(name, " ")
+
+note "Every argument has four parts separated by colons; paths start with / and do not end with / (except / itself)."
+pub fn command(argument: Text) -> Option[Command] {
+let parts = split(argument, ":")
+if length(parts) != 4 {
+return .None
+}
+let kind = parts[0]
+let name = parts[1]
+let action = parts[2]
+let path = parts[3]
+if not (valid_name(name) and valid_name(action) and valid_path(path)) {
+return .None
+}
+match kind {
+"allow" => .Some(.Define(rules.Rule { effect: .Allow, subject: name, action: action, path: path }))
+"deny" => .Some(.Define(rules.Rule { effect: .Deny, subject: name, action: action, path: path }))
+"check" => .Some(.Check(name, action, path))
+_ => .None
+}
+}

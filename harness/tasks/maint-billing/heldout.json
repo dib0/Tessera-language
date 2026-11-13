@@ -1,0 +1,114 @@
+{
+  "tests": [
+    {
+      "args": [
+        "a:0.07:1:food",
+        "b:0.07:1:food",
+        "c:0.07:1:food"
+      ],
+      "stdout": "a 1 x 0.07 = 0.07 tax 0.01\nb 1 x 0.07 = 0.07 tax 0.01\nc 1 x 0.07 = 0.07 tax 0.01\nnet: 0.21\ntax: 0.03\ntotal: 0.24\ntax 9%: 0.03\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "discount:50",
+        "x:0.05:1:exempt",
+        "y:0.25:1:general"
+      ],
+      "stdout": "x 1 x 0.05 = 0.03 tax 0.00\ny 1 x 0.25 = 0.13 tax 0.03\nnet: 0.16\ntax: 0.03\ntotal: 0.19\ntax 0%: 0.00\ntax 21%: 0.03\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "z:0.05:3:food",
+        "discount:50"
+      ],
+      "stdout": "z 3 x 0.05 = 0.08 tax 0.01\nnet: 0.08\ntax: 0.01\ntotal: 0.09\ntax 9%: 0.01\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "g:10:1:general",
+        "b:10:1:books",
+        "f:10:1:food",
+        "e:1:1:exempt"
+      ],
+      "stdout": "g 1 x 10.00 = 10.00 tax 2.10\nb 1 x 10.00 = 10.00 tax 0.90\nf 1 x 10.00 = 10.00 tax 0.90\ne 1 x 1.00 = 1.00 tax 0.00\nnet: 31.00\ntax: 3.90\ntotal: 34.90\ntax 0%: 0.00\ntax 9%: 1.80\ntax 21%: 2.10\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "discount:100",
+        "a:3:2:general"
+      ],
+      "stdout": "a 2 x 3.00 = 0.00 tax 0.00\nnet: 0.00\ntax: 0.00\ntotal: 0.00\ntax 21%: 0.00\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "a:1:1:food",
+        "discount:0"
+      ],
+      "stdout": "a 1 x 1.00 = 1.00 tax 0.09\nnet: 1.00\ntax: 0.09\ntotal: 1.09\ntax 9%: 0.09\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "discount:x"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "a:1:1:food",
+        "discount:-1"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "a:0.07:1:books",
+        "b:0.07:1:food",
+        "discount:0"
+      ],
+      "stdout": "a 1 x 0.07 = 0.07 tax 0.01\nb 1 x 0.07 = 0.07 tax 0.01\nnet: 0.14\ntax: 0.02\ntotal: 0.16\ntax 9%: 0.02\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "a:1:0:food"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "b:1:1:food",
+        ":1:1:food"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "a:-1:1:food"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "a:0:1:food"
+      ],
+      "stdout": "a 1 x 0.00 = 0.00 tax 0.00\nnet: 0.00\ntax: 0.00\ntotal: 0.00\ntax 9%: 0.00\n",
+      "exit": 0
+    }
+  ]
+}

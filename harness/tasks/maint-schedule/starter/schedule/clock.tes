@@ -1,0 +1,37 @@
+note "A span is a start and an end in minutes since midnight, written HHMM-HHMM; the start is before the end."
+pub type Span {
+start: Int
+end: Int
+}
+
+fn minutes(text: Text) -> Option[Int] {
+if length(text) != 4 {
+return .None
+}
+let hours = parse_int(slice_text(text, 0, 2)) else return .None
+let mins = parse_int(slice_text(text, 2, 4)) else return .None
+if hours < 0 or hours > 23 or mins < 0 or mins > 59 {
+return .None
+}
+.Some(hours * 60 + mins)
+}
+
+pub fn parse_span(text: Text) -> Option[Span] {
+let parts = split(text, "-")
+if length(parts) != 2 {
+return .None
+}
+let start = minutes(parts[0]) else return .None
+let end = minutes(parts[1]) else return .None
+if start >= end {
+return .None
+}
+.Some(Span { start: start, end: end })
+}
+
+fn show_time(value: Int) -> Text = pad_left(to_text(value / 60), 2, "0") + pad_left(to_text(value % 60), 2, "0")
+
+pub fn show_span(span: Span) -> Text = "\(show_time(span.start))-\(show_time(span.end))"
+
+note "Spans are half-open, [start, end): a span ending at 1000 does not overlap one starting at 1000."
+pub fn overlaps(a: Span, b: Span) -> Bool = a.start < b.end and b.start < a.end

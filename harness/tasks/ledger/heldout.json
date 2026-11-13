@@ -1,0 +1,81 @@
+{
+  "tests": [
+    {
+      "args": [
+        "deposit:5",
+        "withdraw:5"
+      ],
+      "stdout": "balance: 0\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "withdraw:1"
+      ],
+      "stdout": "",
+      "stderr": "error: insufficient funds at transaction 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:0"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid transaction at 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:10",
+        "deposit"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid transaction at 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:-5"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid transaction at 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:10",
+        "withdraw:20",
+        "steal"
+      ],
+      "stdout": "",
+      "stderr": "error: insufficient funds at transaction 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:7",
+        "withdraw:2",
+        "withdraw:5",
+        "deposit:1"
+      ],
+      "stdout": "balance: 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "deposit:/"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid transaction at 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "deposit:9",
+        "deposit:19"
+      ],
+      "stdout": "balance: 28\n",
+      "exit": 0
+    }
+  ]
+}

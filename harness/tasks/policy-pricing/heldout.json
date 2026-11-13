@@ -1,0 +1,90 @@
+{
+  "tests": [
+    {
+      "args": [
+        "--explain",
+        "clip:1:member"
+      ],
+      "stdout": "clip 1 member: 0.05\n  base: 1 x 0.05 = 0.05\n  member discount: -0.00\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "clip:10:retail"
+      ],
+      "stdout": "clip 10 retail: 0.48\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "--explain",
+        "pen:9:member"
+      ],
+      "stdout": "pen 9 member: 20.25\n  base: 9 x 2.50 = 22.50\n  member discount: -2.25\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "--explain",
+        "ink:11:member"
+      ],
+      "stdout": "ink 11 member: 122.18\n  base: 11 x 12.99 = 142.89\n  member discount: -14.28\n  bulk discount: -6.43\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "pen:1:retail",
+        "--explain"
+      ],
+      "stdout": "pen 1 retail: 2.50\n",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "--explain"
+      ],
+      "stdout": "",
+      "exit": 0
+    },
+    {
+      "args": [
+        "clip:20:member"
+      ],
+      "stdout": "clip 20 member: 0.86\n",
+      "exit": 0
+    },
+    {
+      "args": [],
+      "stdout": "",
+      "exit": 0
+    },
+    {
+      "args": [
+        "pen:x:retail"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "pen:1:retail",
+        "zz:1:retail"
+      ],
+      "stdout": "pen 1 retail: 2.50\n",
+      "stderr": "error: unknown product zz\n",
+      "exit": 1
+    }
+  ],
+  "policy": [
+    {
+      "file": "main.tes",
+      "contains": "import pricing uses nothing"
+    },
+    {
+      "file": "pricing.tes",
+      "absent": " uses "
+    }
+  ]
+}

@@ -175,13 +175,56 @@ def system_prompt(variant: Variant) -> str:
 
 @dataclass
 class Task:
+    """A task has three test sets, kept apart (see README, "Test sets"):
+    `tests[:examples]` are shown in the prompt; all of `tests` (examples and feedback tests) drive the
+    repair loop; `heldout` (heldout.json, frozen by heldout.lock) is never shown and never fed back,
+    and is scored once on the final program."""
     id: str
     kind: str
     prompt: str
     tests: list[dict]
     effects: list[str]
-    solution: str
+    solution: str            # single-file tasks; for multi-file tasks the entry file
     starter: str | None
+    suite: str = "core"
+    examples: int = 2
+    heldout: list[dict] | None = None
+    policy: list[dict] = field(default_factory=list)       # frozen source checks, scored with the held-out set
+    starter_files: dict[str, str] | None = None             # multi-file tasks: path -> source
+    solution_files: dict[str, str] | None = None
+
+    @property
+    def multi_file(self) -> bool:
+        return self.starter_files is not None
+
+
+def read_tree(directory: str) -> dict[str, str]:
+    files = {}
+    for path in sorted(glob.glob(os.path.join(directory, "**", "*.tes"), recursive=True)):
+        with open(path, encoding="utf-8") as f:
+            files[os.path.relpath(path, directory).replace(os.sep, "/")] = f.read()
+    return files
+
+
+HELDOUT_LOCK = os.path.join(HARNESS, "heldout.lock")
+
+
+def file_hash(path: str) -> str:
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def heldout_hashes() -> dict[str, str]:
+    return {os.path.basename(os.path.dirname(p)): file_hash(p)
+            for p in sorted(glob.glob(os.path.join(HARNESS, "tasks", "*", "heldout.json")))}
+
+
+def check_frozen(tasks: list["Task"]) -> list[str]:
+    """Task ids whose held-out set differs from heldout.lock (changed, added or never frozen)."""
+    locked = json.load(open(HELDOUT_LOCK, encoding="utf-8")) if os.path.exists(HELDOUT_LOCK) else {}
+    current = heldout_hashes()
+    return [t.id for t in tasks if t.heldout is not None and locked.get(t.id) != current.get(t.id)]
 
 
 def load_tasks(selected: list[str] | None = None) -> list[Task]:
@@ -194,14 +237,28 @@ def load_tasks(selected: list[str] | None = None) -> list[Task]:
         with open(path, encoding="utf-8") as f:
             meta = json.load(f)
         starter_path = os.path.join(directory, "starter.tes")
+        heldout_path = os.path.join(directory, "heldout.json")
+        heldout, policy = None, []
+        if os.path.exists(heldout_path):
+            with open(heldout_path, encoding="utf-8") as f:
+                frozen = json.load(f)
+            heldout, policy = frozen["tests"], frozen.get("policy", [])
+        multi = os.path.isdir(os.path.join(directory, "starter"))
+        solution_files = read_tree(os.path.join(directory, "solution")) if multi else None
         tasks.append(Task(
             id=task_id,
             kind=meta["kind"],
             prompt=open(os.path.join(directory, "task.md"), encoding="utf-8").read(),
             tests=meta["tests"],
             effects=meta["effects"],
-            solution=open(os.path.join(directory, "solution.tes"), encoding="utf-8").read(),
-            starter=open(starter_path, encoding="utf-8").read() if os.path.exists(starter_path) else None,
+            solution=solution_files["main.tes"] if multi else open(os.path.join(directory, "solution.tes"), encoding="utf-8").read(),
+            starter=None if multi else (open(starter_path, encoding="utf-8").read() if os.path.exists(starter_path) else None),
+            suite=meta.get("suite", "core"),
+            examples=meta.get("examples", 2),
+            heldout=heldout,
+            policy=policy,
+            starter_files=read_tree(os.path.join(directory, "starter")) if multi else None,
+            solution_files=solution_files,
         ))
     return tasks
 
@@ -210,7 +267,14 @@ def task_message(task: Task, variant: Variant) -> str:
     text = "Task:\n\n" + task.prompt
     if task.starter is not None:
         text += "\nThe current program:\n\n```tessera\n" + reindent(task.starter, variant.indent) + "```\n"
-    examples = task.tests[:2]
+    if task.multi_file:
+        text += ("\nThe current program has several files; `main.tes` is the entry file and the other files are its modules. "
+                 "Unlike the general rule, reply with one ```tessera code block per file you add or change, each starting with "
+                 "the line `// file: PATH` (for example `// file: main.tes`) followed by the complete new content of that file. "
+                 "Files you do not include stay as they are.\n")
+        for path, source in task.starter_files.items():
+            text += f"\n```tessera\n// file: {path}\n" + reindent(source, variant.indent) + "```\n"
+    examples = task.tests[:task.examples]
     text += "\nExamples (arguments, expected output, expected exit code):\n"
     for test in examples:
         text += f"\n- arguments: {json.dumps(test['args'])}\n  exit code: {test['exit']}\n  output:\n```\n{test['stdout']}```\n"
@@ -227,6 +291,22 @@ def task_message(task: Task, variant: Variant) -> str:
 def extract_code(answer: str) -> str | None:
     match = re.search(r"```tessera[^\n]*\n(.*?)```", answer, re.S) or re.search(r"```[^\n]*\n(.*?)```", answer, re.S)
     return match.group(1) if match else None
+
+
+FILE_LINE = re.compile(r"\A\s*//\s*file:\s*(\S+)\s*\n")
+
+
+def extract_files(answer: str) -> dict[str, str] | None:
+    """Multi-file answers: every ```tessera block that starts with `// file: PATH`."""
+    files = {}
+    for block in re.findall(r"```[^\n]*\n(.*?)```", answer, re.S):
+        match = FILE_LINE.match(block)
+        if match:
+            path = match.group(1).strip("`")
+            if path.startswith("/") or ".." in path.split("/") or not path.endswith(".tes"):
+                continue
+            files[path] = block[match.end():]
+    return files or None
 
 
 def main_effects(code: str) -> list[str]:
@@ -254,38 +334,75 @@ class Check:
     detail: dict = field(default_factory=dict)
 
 
-def check_answer(code: str | None, task: Task, workdir: str) -> Check:
-    if code is None:
+def run_test(binary: str, test: dict, task: Task, workdir: str) -> tuple[bool, dict]:
+    try:
+        run = subprocess.run([binary] + test["args"], cwd=workdir, capture_output=True, text=True, timeout=RUN_TIMEOUT)
+        stdout, exit_code, stderr = run.stdout, run.returncode, run.stderr
+    except subprocess.TimeoutExpired:
+        stdout, exit_code, stderr = "", None, f"(no result: the program ran longer than {RUN_TIMEOUT} seconds)"
+    if task.kind == "web":
+        stdout = web_view(stdout)
+    # Standard error is only compared for tests that specify it (error cases).
+    stderr_wrong = "stderr" in test and stderr != test["stderr"]
+    ok = stdout == test["stdout"] and exit_code == test["exit"] and not stderr_wrong
+    return ok, {"stdout": stdout, "stderr": stderr, "exit": exit_code}
+
+
+def write_program(files: dict[str, str], workdir: str) -> None:
+    for path, source in files.items():
+        target = os.path.join(workdir, *path.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        # Tessera source is LF, and `newline=""` keeps Windows from turning it into CRLF (which is E0101).
+        with open(target, "w", encoding="utf-8", newline="") as f:
+            f.write(source)
+
+
+def build_program(workdir: str) -> subprocess.CompletedProcess:
+    return subprocess.run([TESSERA, "build", "main.tes", "-o", "program", "--opt", "0"], cwd=workdir,
+                          capture_output=True, text=True, timeout=COMPILE_TIMEOUT)
+
+
+def binary_path(workdir: str) -> str:
+    # The compiler adds the system's extension.
+    return os.path.join(workdir, "program.exe" if os.name == "nt" else "program")
+
+
+def program_files(answer_files: dict[str, str] | None, code: str | None, task: Task, previous: dict[str, str] | None) -> dict[str, str] | None:
+    """The complete program an answer stands for. Multi-file answers overlay the files of the
+    previous attempt (the starter files at first)."""
+    if not task.multi_file:
+        return {"main.tes": code} if code is not None else None
+    if not answer_files:
+        return None
+    files = dict(previous or task.starter_files)
+    files.update(answer_files)
+    return files
+
+
+def check_answer(files: dict[str, str] | None, task: Task, workdir: str) -> Check:
+    if files is None:
+        if task.multi_file:
+            return Check("no_code", "Your answer contained no ```tessera code block starting with `// file: PATH`. "
+                         "Reply with one such block per file you change.")
         return Check("no_code", "Your answer did not contain a ```tessera code block. Reply with the complete program in one ```tessera code block.")
-    disallowed = [e for e in main_effects(code) if e not in task.effects]
+    disallowed = [e for e in main_effects(files.get("main.tes", "")) if e not in task.effects]
     if disallowed:
         return Check("effects", f"`main` declares effects that are not allowed in this task: {', '.join(disallowed)}. "
                      f"Only {', '.join(task.effects)} may be used.", {"effects": disallowed})
-    source = os.path.join(workdir, "main.tes")
-    # The compiler adds the system's extension; Tessera source is LF, and
-    # `newline=""` keeps Windows from turning it into CRLF (which is E0101).
-    binary = os.path.join(workdir, "program.exe" if os.name == "nt" else "program")
-    with open(source, "w", encoding="utf-8", newline="") as f:
-        f.write(code)
-    build = subprocess.run([TESSERA, "build", "main.tes", "-o", "program", "--opt", "0"], cwd=workdir,
-                           capture_output=True, text=True, timeout=COMPILE_TIMEOUT)
+    if "main.tes" not in files:
+        return Check("no_code", "The program has no `main.tes`.")
+    write_program(files, workdir)
+    build = build_program(workdir)
     if build.returncode == 1:
         return Check("compile", "The compiler reported:\n\n```\n" + build.stderr.strip() + "\n```",
                      {"diagnostics": build.stderr})
     if build.returncode != 0:
         return Check("backend", "", {"stderr": build.stderr, "exit": build.returncode})
+    # Only the example and feedback tests: the held-out set is never run here.
     for number, test in enumerate(task.tests, 1):
-        try:
-            run = subprocess.run([binary] + test["args"], cwd=workdir, capture_output=True, text=True, timeout=RUN_TIMEOUT)
-            stdout, exit_code = run.stdout, run.returncode
-            stderr = run.stderr
-        except subprocess.TimeoutExpired:
-            stdout, exit_code, stderr = "", None, f"(no result: the program ran longer than {RUN_TIMEOUT} seconds)"
-        if task.kind == "web":
-            stdout = web_view(stdout)
-        # Standard error is only compared for tests that specify it (error cases).
-        stderr_wrong = "stderr" in test and stderr != test["stderr"]
-        if stdout != test["stdout"] or exit_code != test["exit"] or stderr_wrong:
+        ok, got = run_test(binary_path(workdir), test, task, workdir)
+        if not ok:
+            stdout, stderr, exit_code = got["stdout"], got["stderr"], got["exit"]
             message = (f"The program compiled, but test {number} of {len(task.tests)} failed.\n\n"
                        f"Arguments: {json.dumps(test['args'])}\n\nExpected output:\n```\n{test['stdout']}```\n"
                        f"Actual output:\n```\n{stdout}```\nExpected exit code {test['exit']}, got {exit_code}.")
@@ -295,6 +412,43 @@ def check_answer(code: str | None, task: Task, workdir: str) -> Check:
                 message += "\n\nStandard error:\n```\n" + stderr.strip()[:2000] + "\n```"
             return Check("test", message, {"test": number, "stdout": stdout, "stderr": stderr, "exit": exit_code})
     return Check("pass")
+
+
+def check_policy(files: dict[str, str], rules: list[dict]) -> list[str]:
+    """Frozen source checks: `{"file": F, "contains": S}` or `{"file": F, "absent": S}`."""
+    broken = []
+    for rule in rules:
+        source = files.get(rule["file"], "")
+        if "contains" in rule and rule["contains"] not in source:
+            broken.append(f"{rule['file']} must contain {rule['contains']!r}")
+        if "absent" in rule and rule["absent"] in source:
+            broken.append(f"{rule['file']} must not contain {rule['absent']!r}")
+    return broken
+
+
+def score_heldout(files: dict[str, str] | None, task: Task, workdir: str) -> dict:
+    """Run the frozen held-out set once on the final program. Nothing of it reaches the model."""
+    total = len(task.heldout) + len(task.policy)
+    result = {"total": total, "passed": 0, "failed": [], "policy_broken": []}
+    if files is None:
+        result["failed"] = list(range(1, len(task.heldout) + 1))
+        result["policy_broken"] = ["no program"]
+        return result
+    write_program(files, workdir)
+    if build_program(workdir).returncode != 0:
+        result["failed"] = list(range(1, len(task.heldout) + 1))
+        result["policy_broken"] = check_policy(files, task.policy)
+        return result
+    for number, test in enumerate(task.heldout, 1):
+        ok, _ = run_test(binary_path(workdir), test, task, workdir)
+        if ok:
+            result["passed"] += 1
+        else:
+            result["failed"].append(number)
+    broken = check_policy(files, task.policy)
+    result["policy_broken"] = broken
+    result["passed"] += len(task.policy) - len(broken)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -353,8 +507,12 @@ class ReferenceModel:
 
     def answer(self, system: str, messages: list[dict]) -> tuple[str, dict]:
         task = self.tasks[self.current]
-        code = reindent(task.solution, self.variant.indent)
-        return "```tessera\n" + code + "```", {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0,
+        if task.multi_file:
+            text = "".join(f"```tessera\n// file: {path}\n" + reindent(source, self.variant.indent) + "```\n"
+                           for path, source in task.solution_files.items())
+        else:
+            text = "```tessera\n" + reindent(task.solution, self.variant.indent) + "```"
+        return text, {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0,
                                                 "cache_read_input_tokens": 0, "stop_reason": "end_turn", "model": self.name}
 
     def count_tokens(self, text: str) -> int:
@@ -366,12 +524,19 @@ class ReferenceModel:
 # ---------------------------------------------------------------------------
 
 
+def files_text(files: dict[str, str] | None) -> str | None:
+    if not files:
+        return None
+    return "".join(f"// file: {path}\n{source}" for path, source in sorted(files.items()))
+
+
 def solve(task: Task, variant: Variant, model, out_dir: str, repetition: int) -> dict:
     system = system_prompt(variant)
     messages: list[dict] = [{"role": "user", "content": task_message(task, variant)}]
     attempts = []
-    record = {"task": task.id, "kind": task.kind, "variant": variant.name, "repetition": repetition,
+    record = {"task": task.id, "kind": task.kind, "suite": task.suite, "variant": variant.name, "repetition": repetition,
               "model": model.name, "effort": model.effort, "attempts": attempts}
+    files: dict[str, str] | None = None
     workdir = tempfile.mkdtemp(prefix=f"tessera-{task.id}-")
     try:
         if isinstance(model, ReferenceModel):
@@ -381,9 +546,14 @@ def solve(task: Task, variant: Variant, model, out_dir: str, repetition: int) ->
             if usage["stop_reason"] == "refusal":
                 attempts.append({"attempt": number, "usage": usage, "stage": "refusal"})
                 break
-            code = extract_code(text)
-            check = check_answer(code, task, workdir)
-            attempts.append({"attempt": number, "usage": usage, "stage": check.stage, "code": code,
+            code = None if task.multi_file else extract_code(text)
+            answer_files = extract_files(text) if task.multi_file else None
+            candidate = program_files(answer_files, code, task, files)
+            if candidate is not None:
+                files = candidate
+            check = check_answer(candidate, task, workdir)
+            attempts.append({"attempt": number, "usage": usage, "stage": check.stage,
+                             "code": code if not task.multi_file else answer_files,
                              "answer": text, "detail": check.detail})
             if check.stage in ("pass", "backend"):
                 break
@@ -399,9 +569,18 @@ def solve(task: Task, variant: Variant, model, out_dir: str, repetition: int) ->
         record["input_tokens"] = sum(a["usage"]["input_tokens"] + a["usage"]["cache_creation_input_tokens"]
                                      + a["usage"]["cache_read_input_tokens"] for a in attempts)
         record["uncached_input_tokens"] = sum(a["usage"]["input_tokens"] for a in attempts)
-        final_code = final.get("code")
+        final_code = files_text(files) if task.multi_file and final["stage"] != "refusal" else final.get("code")
         record["program_tokens"] = model.count_tokens(final_code) if final_code and record["passed"] else None
         record["program_chars"] = len(final_code) if final_code else None
+        if task.multi_file and files is not None:
+            record["final_files"] = files
+        if task.heldout is not None:
+            # Scored on the last program the model gave, whether or not it passed the feedback tests.
+            final_files = files if task.multi_file else ({"main.tes": final["code"]} if final.get("code") else None)
+            held = score_heldout(final_files if final["stage"] != "refusal" else None, task, workdir)
+            record["heldout"] = held
+            record["heldout_passed"] = held["passed"] == held["total"]
+            record["heldout_fraction"] = held["passed"] / held["total"] if held["total"] else None
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     path = os.path.join(out_dir, f"{variant.name}--{task.id}--{repetition}.json")
@@ -416,12 +595,18 @@ def run(args: argparse.Namespace, dry: bool) -> str:
     variants = load_variants()
     chosen = [variants[name] for name in args.variants]
     tasks = load_tasks(args.tasks)
+    unfrozen = check_frozen(tasks)
+    if unfrozen and not dry:
+        sys.exit("error: the held-out tests of " + ", ".join(unfrozen) + " differ from harness/heldout.lock; "
+                 "a held-out set may only change before it is used: run `harness.py freeze` deliberately")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = os.path.join(HARNESS, "results", ("dry-" if dry else "") + stamp)
     os.makedirs(out_dir)
     config = {"variants": args.variants, "tasks": [t.id for t in tasks], "repetitions": args.repeat,
               "model": "reference-solution" if dry else args.model, "effort": None if dry else args.effort,
-              "max_attempts": MAX_ATTEMPTS}
+              "max_attempts": MAX_ATTEMPTS,
+              "heldout_lock": file_hash(HELDOUT_LOCK) if os.path.exists(HELDOUT_LOCK) else None,
+              "unfrozen": unfrozen}
     with open(os.path.join(out_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
     lock = threading.Lock()
@@ -437,7 +622,9 @@ def run(args: argparse.Namespace, dry: bool) -> str:
         record = solve(task, variant, model, out_dir, repetition)
         with lock:
             status = "pass" if record["passed"] else record["final_stage"]
-            print(f"{variant.name:24} {task.id:20} rep {repetition}: {status} after {record['attempts_used']} attempt(s)", flush=True)
+            held = record.get("heldout")
+            held_text = f", held-out {held['passed']}/{held['total']}" if held else ""
+            print(f"{variant.name:24} {task.id:24} rep {repetition}: {status} after {record['attempts_used']} attempt(s){held_text}", flush=True)
         return record
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -469,15 +656,18 @@ def fmt(value: float | None, digits: int = 0, percent: bool = False) -> str:
 
 
 def summarise(records: list[dict]) -> str:
-    by_variant: dict[str, list[dict]] = {}
+    groups: dict[tuple[str, str], list[dict]] = {}
     for r in records:
-        by_variant.setdefault(r["variant"], []).append(r)
-    lines = ["| Variant | Runs | Passed | Passed first try | Compiled first try | Attempts | Output tokens | Input tokens | Program tokens |",
-             "|---|---|---|---|---|---|---|---|---|"]
-    for name, rs in by_variant.items():
+        groups.setdefault((r["variant"], r.get("suite", "core")), []).append(r)
+    lines = ["| Variant | Suite | Runs | Passed (feedback tests) | Passed held-out | Held-out tests passed | Passed first try | Compiled first try | Attempts | Output tokens | Input tokens | Program tokens |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for (name, suite), rs in sorted(groups.items()):
+        scored = [r for r in rs if r.get("heldout") is not None]
         lines.append("| " + " | ".join([
-            name, str(len(rs)),
+            name, suite, str(len(rs)),
             fmt(mean([1.0 if r["passed"] else 0.0 for r in rs]), percent=True),
+            fmt(mean([1.0 if r["heldout_passed"] else 0.0 for r in scored]), percent=True) if scored else "-",
+            fmt(mean([r["heldout_fraction"] for r in scored]), percent=True) if scored else "-",
             fmt(mean([1.0 if r["first_passed"] else 0.0 for r in rs]), percent=True),
             fmt(mean([1.0 if r["first_compiled"] else 0.0 for r in rs]), percent=True),
             fmt(mean([r["attempts_used"] for r in rs]), 2),
@@ -487,8 +677,16 @@ def summarise(records: list[dict]) -> str:
         ]) + " |")
     failures = [r for r in records if not r["passed"]]
     if failures:
-        lines.append("\nNot passed: " + ", ".join(f"{r['variant']}/{r['task']}#{r['repetition']} ({r['final_stage']})" for r in failures))
-    lines.append("\nAverages are per task run. Output tokens include thinking. Program tokens: the final passing program, counted with the API.")
+        lines.append("\nNot passed (feedback tests): " + ", ".join(f"{r['variant']}/{r['task']}#{r['repetition']} ({r['final_stage']})" for r in sorted(failures, key=lambda r: (r["task"], r["repetition"]))))
+    held_failures = [r for r in records if r.get("heldout") is not None and not r["heldout_passed"]]
+    if held_failures:
+        lines.append("\nNot passed (held-out): " + ", ".join(
+            f"{r['variant']}/{r['task']}#{r['repetition']} ({r['heldout']['passed']}/{r['heldout']['total']}"
+            + ("; policy" if r["heldout"]["policy_broken"] else "") + ")"
+            for r in sorted(held_failures, key=lambda r: (r["task"], r["repetition"]))))
+    lines.append("\nAverages are per task run. \"Passed\" uses the example and feedback tests the model sees on failure; "
+                 "\"Passed held-out\" is the share of runs whose final program passes every frozen held-out test and policy check, "
+                 "which the model never sees. Output tokens include thinking. Program tokens: the final passing program, counted with the API.")
     return "\n".join(lines) + "\n"
 
 
@@ -558,6 +756,11 @@ def main() -> None:
     p.add_argument("--corpora", nargs="+", default=["examples", "tests", "compiler", "solutions"])
     p.add_argument("--compare", nargs="+", metavar="DIR", help="also count directories of .tes files (relative to the repository), first one is the base")
     p.add_argument("--model", default=DEFAULT_MODEL)
+    sub.add_parser("freeze", help="record the current held-out sets in heldout.lock")
+    p = sub.add_parser("mutate", help="mutation testing of the reference solutions against the test sets")
+    p.add_argument("--tasks", nargs="+")
+    p.add_argument("--jobs", type=int, default=8)
+    p.add_argument("--limit", type=int, default=0, help="at most this many mutants per task (seeded sample; 0 = all)")
     p = sub.add_parser("report")
     p.add_argument("directories", nargs="+")
     args = parser.parse_args()
@@ -567,6 +770,15 @@ def main() -> None:
         run(args, dry=True)
     elif args.command == "tokens":
         tokens(args)
+    elif args.command == "freeze":
+        hashes = heldout_hashes()
+        with open(HELDOUT_LOCK, "w", encoding="utf-8") as f:
+            json.dump(hashes, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"froze the held-out sets of {len(hashes)} tasks in {os.path.relpath(HELDOUT_LOCK, REPO)}")
+    elif args.command == "mutate":
+        import mutation
+        mutation.main(args, sys.modules[__name__])
     else:
         report(args)
 

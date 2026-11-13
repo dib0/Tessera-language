@@ -1,0 +1,30 @@
+{
+  "tests": [
+    {
+      "args": [
+        "([)]",
+        "{[()()]}",
+        "((()))",
+        "]",
+        "[",
+        "a{b[c]d}e"
+      ],
+      "stdout": "unbalanced\nbalanced\nbalanced\nunbalanced\nunbalanced\nbalanced\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "(((((((((())))))))))",
+        "())(",
+        "{]"
+      ],
+      "stdout": "balanced\nunbalanced\nunbalanced\n",
+      "exit": 0
+    },
+    {
+      "args": [],
+      "stdout": "",
+      "exit": 0
+    }
+  ]
+}

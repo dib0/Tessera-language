@@ -1,0 +1,30 @@
+import billing/money uses nothing
+
+pub enum Category {
+Food
+General
+Books
+Exempt
+}
+
+pub fn category(name: Text) -> Option[Category] {
+match name {
+"food" => .Some(.Food)
+"general" => .Some(.General)
+"books" => .Some(.Books)
+"exempt" => .Some(.Exempt)
+_ => .None
+}
+}
+
+pub fn rate(category: Category) -> Int {
+match category {
+.Food => 9
+.General => 21
+.Books => 9
+.Exempt => 0
+}
+}
+
+note "Tax is computed and rounded to cents per line, half away from zero. The invoice tax is the sum of the rounded line taxes, never the tax on the summed net amounts: the tax office audits per line."
+pub fn line_tax(net: Decimal, category: Category) -> Decimal = money.cents(net * decimal(rate(category)) / 100.0)

@@ -1,0 +1,49 @@
+{
+  "tests": [
+    {
+      "args": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "stdout": "a 1\nb 1\nc 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "B",
+        "a",
+        "b",
+        "A"
+      ],
+      "stdout": "A 1\nB 1\na 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "z",
+        "z",
+        "y",
+        "y",
+        "x",
+        "x",
+        "w",
+        "w",
+        "w"
+      ],
+      "stdout": "w 3\nx 2\ny 2\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "aa",
+        "a",
+        "aa",
+        "a"
+      ],
+      "stdout": "a 2\naa 2\n",
+      "exit": 0
+    }
+  ]
+}

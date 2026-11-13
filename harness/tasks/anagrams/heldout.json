@@ -1,0 +1,45 @@
+{
+  "tests": [
+    {
+      "args": [
+        "ab",
+        "ba",
+        "ab"
+      ],
+      "stdout": "ab ba ab\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "abc",
+        "abd",
+        "cab",
+        "bad"
+      ],
+      "stdout": "abc cab\nabd bad\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "aab",
+        "abb",
+        "bab",
+        "aba"
+      ],
+      "stdout": "aab aba\nabb bab\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "x"
+      ],
+      "stdout": "x\n",
+      "exit": 0
+    },
+    {
+      "args": [],
+      "stdout": "",
+      "exit": 0
+    }
+  ]
+}

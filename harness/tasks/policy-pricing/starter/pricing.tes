@@ -1,0 +1,30 @@
+note "Pricing stays pure: a quote depends only on its inputs, so finance can reproduce and audit every quote from the arguments alone. Amounts are whole cents."
+pub type Quote {
+sku: Text
+quantity: Int
+customer: Text
+total: Int
+}
+
+fn unit_price(sku: Text) -> Option[Int] {
+match sku {
+"pen" => .Some(250)
+"pad" => .Some(480)
+"ink" => .Some(1299)
+"clip" => .Some(5)
+_ => .None
+}
+}
+
+pub fn known_product(sku: Text) -> Bool = unit_price(sku) != .None
+
+note "Percentages of an amount in cents are truncated toward zero."
+fn percent_of(amount: Int, percent: Int) -> Int = amount * percent / 100
+
+note "Members get 10% off the base price."
+pub fn quote(sku: Text, quantity: Int, customer: Text) -> Option[Quote] {
+let unit = unit_price(sku) else return .None
+let base = unit * quantity
+let total = if customer == "member" { base - percent_of(base, 10) } else { base }
+.Some(Quote { sku: sku, quantity: quantity, customer: customer, total: total })
+}

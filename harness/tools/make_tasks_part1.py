@@ -265,19 +265,11 @@ fn main() -> Unit uses io, env {
 task("word-count", "write", """
 Write a program that counts words. Every command-line argument is one word. Words are compared case-insensitively and reported in lowercase. Print one line per distinct word, in order of first appearance, formatted as `word: count`.
 """, [t(["the", "cat", "The", "hat", "THE", "cat"], "the: 3\ncat: 2\nhat: 1\n"), t(["One"], "one: 1\n")], """
-fn lowercase(word: Text) -> Text {
-    var out: List[Int] = []
-    for code in code_points(word) {
-        set out = append(out, if code >= 65 and code <= 90 { code + 32 } else { code })
-    }
-    from_code_points(out)
-}
-
 fn main() -> Unit uses io, env {
     var words: List[Text] = []
     var counts: List[Int] = []
     for argument in args() {
-        let word = lowercase(argument)
+        let word = to_lower(argument)
         var found = false
         for index in range(0, length(words)) {
             if words[index] == word {

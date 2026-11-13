@@ -1,0 +1,54 @@
+{
+  "tests": [
+    {
+      "args": [
+        "3888",
+        "2024",
+        "444",
+        "999"
+      ],
+      "stdout": "MMMDCCCLXXXVIII\nMMXXIV\nCDXLIV\nCMXCIX\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "-5",
+        "1"
+      ],
+      "stdout": "invalid\nI\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "1",
+        "3999",
+        "4"
+      ],
+      "stdout": "I\nMMMCMXCIX\nIV\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "40",
+        "49",
+        "90",
+        "99"
+      ],
+      "stdout": "XL\nXLIX\nXC\nXCIX\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1/",
+        "9"
+      ],
+      "stdout": "invalid\nIX\n",
+      "exit": 1
+    },
+    {
+      "args": [],
+      "stdout": "",
+      "exit": 0
+    }
+  ]
+}

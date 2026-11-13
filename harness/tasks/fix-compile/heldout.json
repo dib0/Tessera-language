@@ -1,0 +1,38 @@
+{
+  "tests": [
+    {
+      "args": [
+        "0",
+        "0"
+      ],
+      "stdout": "average: 0\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "2"
+      ],
+      "stdout": "average: 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "7",
+        "8",
+        "9",
+        "10"
+      ],
+      "stdout": "average: 8\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "100",
+        "1"
+      ],
+      "stdout": "average: 50\n",
+      "exit": 0
+    }
+  ]
+}

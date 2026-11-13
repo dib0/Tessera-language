@@ -1,0 +1,52 @@
+{
+  "kind": "maintain",
+  "suite": "hard",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "examples": 2,
+  "tests": [
+    {
+      "args": [
+        "bread:1.95:2:food",
+        "discount:10",
+        "novel:12.50:1:books"
+      ],
+      "stdout": "bread 2 x 1.95 = 3.51 tax 0.32\nnovel 1 x 12.50 = 11.25 tax 1.01\nnet: 14.76\ntax: 1.33\ntotal: 16.09\ntax 9%: 1.33\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "gift:5:1:exempt",
+        "pen:2:1:general"
+      ],
+      "stdout": "gift 1 x 5.00 = 5.00 tax 0.00\npen 1 x 2.00 = 2.00 tax 0.42\nnet: 7.00\ntax: 0.42\ntotal: 7.42\ntax 0%: 0.00\ntax 21%: 0.42\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "discount:5",
+        "discount:5",
+        "a:1:1:food"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "a:1:1:food",
+        "discount:101"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    },
+    {
+      "args": [],
+      "stdout": "net: 0.00\ntax: 0.00\ntotal: 0.00\n",
+      "exit": 0
+    }
+  ]
+}

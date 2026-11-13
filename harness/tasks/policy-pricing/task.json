@@ -1,0 +1,44 @@
+{
+  "kind": "maintain",
+  "suite": "hard",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "examples": 2,
+  "tests": [
+    {
+      "args": [
+        "--explain",
+        "pen:10:member"
+      ],
+      "stdout": "pen 10 member: 21.38\n  base: 10 x 2.50 = 25.00\n  member discount: -2.50\n  bulk discount: -1.12\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "ink:12:retail",
+        "pad:1:member"
+      ],
+      "stdout": "ink 12 retail: 148.09\npad 1 member: 4.32\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "--explain",
+        "pad:2:retail"
+      ],
+      "stdout": "pad 2 retail: 9.60\n  base: 2 x 4.80 = 9.60\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "--explain",
+        "pen:0:retail"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 2\n",
+      "exit": 1
+    }
+  ]
+}

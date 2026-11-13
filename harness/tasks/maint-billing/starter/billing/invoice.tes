@@ -1,0 +1,28 @@
+import billing/money uses nothing
+import billing/tax uses nothing
+
+pub type Line {
+name: Text
+price: Decimal
+quantity: Int
+category: tax.Category
+}
+
+note "An item argument is NAME:PRICE:QUANTITY:CATEGORY with a price of at least 0 and a quantity of at least 1."
+pub fn parse_line(argument: Text) -> Option[Line] {
+let parts = split(argument, ":")
+if length(parts) != 4 or length(parts[0]) == 0 {
+return .None
+}
+let price = parse_decimal(parts[1]) else return .None
+let quantity = parse_int(parts[2]) else return .None
+let category = tax.category(parts[3]) else return .None
+if price < 0.0 or quantity < 1 {
+return .None
+}
+.Some(Line { name: parts[0], price: price, quantity: quantity, category: category })
+}
+
+pub fn net(line: Line) -> Decimal = money.cents(line.price * decimal(line.quantity))
+
+pub fn describe(line: Line, net_amount: Decimal, tax_amount: Decimal) -> Text = "\(line.name) \(line.quantity) x \(money.show(line.price)) = \(money.show(net_amount)) tax \(money.show(tax_amount))"

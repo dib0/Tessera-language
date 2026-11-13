@@ -1,0 +1,5 @@
+The program below prints an invoice. Each command-line argument is an item `NAME:PRICE:QUANTITY:CATEGORY`; the categories are `food` (9% tax) and `general` (21% tax). Read the notes in the code: they state rules the program must keep. Extend it:
+1. Add the categories `books` (9% tax) and `exempt` (0% tax).
+2. An argument `discount:P`, where P is a whole number from 0 to 100, gives a discount of P percent on every item line. It may appear anywhere among the arguments, at most once. Each line's net amount (price times quantity, rounded to cents as now) is reduced by P percent and rounded to cents, half away from zero; the line's tax is computed from that discounted amount, and the line shows the discounted amount. A `discount` argument that is malformed, out of range or given a second time is invalid: print `error: invalid argument N` to standard error and exit with code 1, like other invalid arguments.
+3. After the `total:` line, print one line `tax R%: T` for every tax rate R that at least one item line uses (including 0%), in ascending order of R, where T is the sum of the line taxes at that rate.
+The output is otherwise unchanged.

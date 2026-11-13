@@ -1,0 +1,75 @@
+{
+  "tests": [
+    {
+      "args": [
+        "-1",
+        "-2",
+        "-10"
+      ],
+      "stdout": "-10 -2 -1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "2",
+        "--1"
+      ],
+      "stdout": "",
+      "stderr": "error: not a number: --1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "10",
+        "9",
+        "100"
+      ],
+      "stdout": "9 10 100\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "1",
+        "",
+        "2"
+      ],
+      "stdout": "",
+      "stderr": "error: not a number: \n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "1",
+        "2.5"
+      ],
+      "stdout": "",
+      "stderr": "error: not a number: 2.5\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "1:"
+      ],
+      "stdout": "",
+      "stderr": "error: not a number: 1:\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "-"
+      ],
+      "stdout": "",
+      "stderr": "error: not a number: -\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "9",
+        "-9",
+        "19"
+      ],
+      "stdout": "-9 9 19\n",
+      "exit": 0
+    }
+  ]
+}

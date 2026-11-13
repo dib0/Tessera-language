@@ -1,0 +1,69 @@
+{
+  "tests": [
+    {
+      "args": [
+        "add:a:1",
+        "add:b:2",
+        "remove:b:2",
+        "add:c:3"
+      ],
+      "stdout": "a 1\nc 3\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "add:a:1",
+        "add:b:1",
+        "remove:a:1",
+        "add:a:1"
+      ],
+      "stdout": "a 1\nb 1\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "add:a:2",
+        "clear:zz",
+        "add:a:4"
+      ],
+      "stdout": "a 6\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "add:x:1",
+        "clear:x",
+        "remove:x:1"
+      ],
+      "stdout": "",
+      "stderr": "error: cannot remove 1 x\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "add:a:3",
+        "bogus"
+      ],
+      "stdout": "",
+      "stderr": "error: unknown command bogus\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "add:a:3",
+        "remove:a:3"
+      ],
+      "stdout": "",
+      "exit": 0
+    },
+    {
+      "args": [
+        "add:a:1",
+        "remove:a"
+      ],
+      "stdout": "",
+      "stderr": "error: unknown command remove:a\n",
+      "exit": 1
+    }
+  ]
+}

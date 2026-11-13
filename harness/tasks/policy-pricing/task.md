@@ -1,0 +1,4 @@
+The program below prints price quotes. Each command-line argument is `SKU:QUANTITY:CUSTOMER`, and the program prints one line per quote with its total. Read the notes and comments in the code: they state policies the program must keep. Extend it:
+1. Add a bulk discount: when the quantity is 10 or more, a further 5% comes off the amount after the member discount, truncated to whole cents like the member discount.
+2. When the first argument is `--explain`, print after each quote line the price steps that applied, each on its own line indented by two spaces: `  base: Q x UNIT = AMOUNT`, then `  member discount: -AMOUNT` if the member discount applied, then `  bulk discount: -AMOUNT` if the bulk discount applied. A discount that applied is shown even when it is 0.00. Amounts are written like the totals. Argument numbers in error messages still count `--explain` as argument 1.
+Without `--explain` the output format is unchanged.

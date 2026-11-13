@@ -1,0 +1,61 @@
+{
+  "kind": "maintain",
+  "suite": "hard",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "examples": 2,
+  "tests": [
+    {
+      "args": [
+        "member:ann:@staff",
+        "allow:@staff:read:/docs",
+        "check:ann:read:/docs/a",
+        "check:bob:read:/docs/a"
+      ],
+      "stdout": "ann read /docs/a: allowed\nbob read /docs/a: denied\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "member:ann:staff",
+        "check:ann:read:/"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid argument 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "allow:@all:read:/",
+        "member:@staff:@all",
+        "member:ann:@staff",
+        "check:ann:read:/x"
+      ],
+      "stdout": "ann read /x: allowed\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "member:@a:@b",
+        "member:@b:@a",
+        "member:ann:@a",
+        "allow:@b:write:/w",
+        "check:ann:write:/w",
+        "check:bob:write:/w"
+      ],
+      "stdout": "ann write /w: allowed\nbob write /w: denied\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "check:ann:read:/d",
+        "allow:@s:read:/d",
+        "member:ann:@s"
+      ],
+      "stdout": "ann read /d: allowed\n",
+      "exit": 0
+    }
+  ]
+}

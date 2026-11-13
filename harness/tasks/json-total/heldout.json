@@ -1,0 +1,73 @@
+{
+  "tests": [
+    {
+      "args": [
+        "[{\"name\": \"a\", \"price\": 0.005, \"quantity\": 1}]"
+      ],
+      "stdout": "items: 1\ntotal: 0.01\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "[{\"name\": \"a\", \"price\": 2, \"quantity\": 3}]"
+      ],
+      "stdout": "items: 1\ntotal: 6.00\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "[{\"name\": \"a\", \"price\": 1.5, \"quantity\": 2}, {\"name\": \"b\", \"price\": 1}]"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid item 2\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "[5]"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid item 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "[{\"name\": 3, \"price\": 1, \"quantity\": 1}]"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid item 1\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "not json"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid JSON\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "\"text\""
+      ],
+      "stdout": "",
+      "stderr": "error: invalid JSON\n",
+      "exit": 1
+    },
+    {
+      "args": [
+        "[{\"name\": \"a\", \"price\": 0.1, \"quantity\": 3}, {\"name\": \"b\", \"price\": 0.2, \"quantity\": 1}]"
+      ],
+      "stdout": "items: 2\ntotal: 0.50\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "[{\"name\": \"a\", \"quantity\": 1}]"
+      ],
+      "stdout": "",
+      "stderr": "error: invalid item 1\n",
+      "exit": 1
+    }
+  ]
+}

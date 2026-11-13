@@ -1,0 +1,51 @@
+{
+  "kind": "maintain",
+  "suite": "hard",
+  "effects": [
+    "io",
+    "env"
+  ],
+  "examples": 2,
+  "tests": [
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:red:1000-1100",
+        "move:a:0800-0900",
+        "move:b:0830-0930"
+      ],
+      "stdout": "rejected 4: conflict with a\nred 0800-0900 a\nred 1000-1100 b\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:blue:0900-1000",
+        "swap:a:b",
+        "swap:a:c"
+      ],
+      "stdout": "rejected 4: unknown booking c\nblue 0900-1000 a\nred 0900-1000 b\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "move:a:2400-2500",
+        "swap:a:a",
+        "move:a"
+      ],
+      "stdout": "rejected 2: invalid\nrejected 3: invalid\nrejected 4: invalid\nred 0900-1000 a\n",
+      "exit": 0
+    },
+    {
+      "args": [
+        "book:a:red:0900-1000",
+        "book:b:red:1100-1200",
+        "book:c:blue:1130-1230",
+        "swap:a:c"
+      ],
+      "stdout": "rejected 4: conflict with b\nblue 1130-1230 c\nred 0900-1000 a\nred 1100-1200 b\n",
+      "exit": 0
+    }
+  ]
+}

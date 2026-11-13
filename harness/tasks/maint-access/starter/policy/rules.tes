@@ -1,0 +1,39 @@
+pub enum Effect {
+Allow
+Deny
+}
+
+pub type Rule {
+effect: Effect
+subject: Text
+action: Text
+path: Text
+}
+
+note "A rule path covers the path itself and everything below it on a segment boundary: /docs covers /docs and /docs/a, never /docsx. The rule path / covers every path."
+fn covers(rule_path: Text, path: Text) -> Bool {
+if rule_path == "/" or rule_path == path {
+return true
+}
+starts_with(path, rule_path + "/")
+}
+
+fn action_matches(rule_action: Text, action: Text) -> Bool = rule_action == "*" or rule_action == action
+
+fn subject_matches(subject: Text, user: Text) -> Bool = subject == "*" or subject == user
+
+fn applies(rule: Rule, user: Text, action: Text, path: Text) -> Bool = subject_matches(rule.subject, user) and action_matches(rule.action, action) and covers(rule.path, path)
+
+note "Deny overrides allow, whatever the order of the rules; when no rule applies the answer is deny. Security reviews rely on this: do not change it."
+pub fn decide(rules: List[Rule], user: Text, action: Text, path: Text) -> Bool {
+var allowed = false
+for rule in rules {
+if applies(rule, user, action, path) {
+match rule.effect {
+.Deny => return false
+.Allow => set allowed = true
+}
+}
+}
+allowed
+}

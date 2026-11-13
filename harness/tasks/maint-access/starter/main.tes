@@ -1,0 +1,26 @@
+import policy/rules uses nothing
+import policy/parse uses nothing
+
+note "All rules are collected first, so a check sees every rule given anywhere in the arguments; checks are answered in argument order."
+fn main() -> Unit uses io, env {
+var all_rules: List[rules.Rule] = []
+var checks: List[parse.Command] = []
+var position = 0
+for argument in args() {
+set position += 1
+let command = parse.command(argument) else exit_with(1, "error: invalid argument \(position)")
+match command {
+.Define(rule) => set all_rules += [rule]
+.Check(_, _, _) => set checks += [command]
+}
+}
+for check in checks {
+match check {
+.Check(user, action, path) => {
+let verdict = if rules.decide(all_rules, user, action, path) { "allowed" } else { "denied" }
+print("\(user) \(action) \(path): \(verdict)")
+}
+.Define(_) => fail("only checks are kept")
+}
+}
+}

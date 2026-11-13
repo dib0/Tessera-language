@@ -1,0 +1,69 @@
+import billing/money uses nothing
+import billing/tax uses nothing
+import billing/invoice uses nothing
+
+fn discount_percent(argument: Text) -> Option[Int] {
+if not starts_with(argument, "discount:") {
+return .None
+}
+let percent = parse_int(slice_text(argument, 9, length(argument))) else return .None
+if percent < 0 or percent > 100 {
+return .None
+}
+.Some(percent)
+}
+
+type RateTotal {
+rate: Int
+amount: Decimal
+}
+
+fn rate_of(entry: RateTotal) -> Int = entry.rate
+
+fn add_tax(totals: List[RateTotal], rate: Int, amount: Decimal) -> List[RateTotal] {
+var out = totals
+for index in range(0, length(out)) {
+if out[index].rate == rate {
+set out[index].amount = out[index].amount + amount
+return out
+}
+}
+set out += [RateTotal { rate: rate, amount: amount }]
+out
+}
+
+fn main() -> Unit uses io, env {
+var lines: List[invoice.Line] = []
+var discount: Option[Int] = .None
+var position = 0
+for argument in args() {
+set position += 1
+if starts_with(argument, "discount:") {
+let percent = discount_percent(argument) else exit_with(1, "error: invalid argument \(position)")
+if discount != .None {
+exit_with(1, "error: invalid argument \(position)")
+}
+set discount = .Some(percent)
+continue
+}
+let line = invoice.parse_line(argument) else exit_with(1, "error: invalid argument \(position)")
+set lines += [line]
+}
+var total_net = 0.0
+var total_tax = 0.0
+var by_rate: List[RateTotal] = []
+for line in lines {
+let net_amount = invoice.discounted(invoice.net(line), value_or(discount, 0))
+let tax_amount = tax.line_tax(net_amount, line.category)
+set total_net = total_net + net_amount
+set total_tax = total_tax + tax_amount
+set by_rate = add_tax(by_rate, tax.rate(line.category), tax_amount)
+print(invoice.describe(line, net_amount, tax_amount))
+}
+print("net: \(money.show(total_net))")
+print("tax: \(money.show(total_tax))")
+print("total: \(money.show(total_net + total_tax))")
+for entry in sort_by(by_rate, rate_of) {
+print("tax \(entry.rate)%: \(money.show(entry.amount))")
+}
+}
