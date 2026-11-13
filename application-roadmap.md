@@ -157,7 +157,7 @@ These must not be written in Tessera by a model. They belong in the runtime, imp
 |---|---|---|
 | Tests in the language | Model-written code needs tests next to it, and the harness tasks show models test by running programs | `test "name" { ... }` declarations with `assert`, run by `tessera1 test`. A test may only use effects the test runner provides (none, or a fake `db`) |
 | Handler tests | Web code must be testable without a server | The test host from section 1: build an `http.Request`, call `handle`, inspect the `http.Response` |
-| Formatter | Planned (section 14) | `tessera1 format`, mostly relevant for humans reviewing diffs |
+| Formatter | Planned (section 14) | `tessera1 format`: one canonical layout, so diffs stay small for the model that reviews them |
 | Harness tasks for applications | The 18 tasks are small command-line programs; every run now passes. They cannot show whether maps, JSON or handlers are easy for a model | Add tasks for maps, JSON, a handler with routing, form parsing and HTML escaping, and measure each feature as it is added |
 
 ## 4. Proposed order

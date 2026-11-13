@@ -3,7 +3,9 @@ message: "If you use Tessera or refer to its measurements, please cite it as bel
 title: "Tessera: a programming language designed by measurement against language models"
 abstract: >-
   Tessera is a programming language for software that language models write and
-  people review. Its design decisions are made by measurement rather than taste:
+  language models review, designed to cost as few tokens as possible on both
+  sides, for people who care about what software does rather than about its
+  code. Its design decisions are made by measurement rather than taste:
   a harness has models solve programming tasks from a single language reference,
   compiles every answer, and records pass rate, attempts and token cost per
   variant of the language. The repository holds the specification, two compilers

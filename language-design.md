@@ -12,7 +12,7 @@ This document is the authoritative description of Tessera. When the compiler and
 These principles decide trade-offs. When two choices are otherwise equal, pick the one higher on this list.
 
 1. **Safe by construction.** Unsafe behavior must be impossible to write, not merely discouraged.
-2. **Readable at review time.** A reviewer, human or LLM, should understand what a function can do from its signature and what a line does without context from elsewhere.
+2. **Readable at review time.** A reviewer, normally a model, should understand what a function can do from its signature and what a line does without context from elsewhere.
 3. **One way to write it.** Each concept has one syntax and one canonical formatting. Fewer choices means fewer mistakes and smaller, more predictable diffs.
 4. **Explicit over implicit.** No implicit conversions, no hidden effects, no hidden mutation.
 5. **Familiar over novel.** Where a widely known syntax exists (Rust, Kotlin, Python, Go), reuse it unless it conflicts with 1 to 4.
@@ -276,7 +276,7 @@ There are no block comments (`/* */`). Nesting rules and unterminated comments a
 | Types, enum variants | `PascalCase` | `Token`, `TokenKind`, `LeftParen` |
 | Effects | lowercase single word | `io` |
 
-Naming style is **enforced by the compiler** (E0207, an error, not a warning). Consistent names make code easier for an LLM to predict and for a human to scan. The case of the first letter is also how the parser tells types (`Token { ... }`, `TokenKind.Plus`) from values.
+Naming style is **enforced by the compiler** (E0207, an error, not a warning). Consistent names make code easier for a model to predict when it writes and to check when it reviews. The case of the first letter is also how the parser tells types (`Token { ... }`, `TokenKind.Plus`) from values.
 
 Identifiers are ASCII letters, digits, and `_`, starting with a letter. `_` alone is not a name but marks a binding that is not used (`let _`, `for _`, `Type.Variant(_)`); it cannot be read (E0110), and `_x` is rejected (E0103) so there is one way to say "unused". Non-ASCII identifiers are rejected (E0103) to avoid homoglyph attacks (`а` Cyrillic vs `a` Latin). Text literals may contain any Unicode.
 

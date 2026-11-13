@@ -4,7 +4,7 @@
 
 <p align="center"><strong>A compact, safety-first programming language designed for LLM-assisted software development.</strong></p>
 
-The Tessera language aims to make it easy for language models to create, review, and maintain software without sacrificing clear behavior or safety. Its source is text, its syntax is intended to be compact and regular, and design rationale is preserved alongside code. **This is for humans that care about functionality of software, not about the code.**
+The Tessera language aims to make it easy for language models to create, review, and maintain software without sacrificing clear behavior or safety. Models write the code and models review it, so the syntax is designed to be as token-friendly as possible: compact, regular, and without layout that only a human reader would need. Design rationale is preserved alongside code. **This is for humans that care about functionality of software, not about the code.**
 
 > **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.20).
 
