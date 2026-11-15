@@ -1,0 +1,47 @@
+// Tests of std/crypto.
+import std/crypto
+
+fn key() -> Bytes = crypto.derive_key(to_bytes("a long master secret for the tests"), "tests")
+
+test "derive_key is deterministic, 32 bytes, and separates purposes" {
+let a = crypto.derive_key(to_bytes("secret"), "cookies")
+assert(length(a) == 32)
+assert(a == crypto.derive_key(to_bytes("secret"), "cookies"))
+assert(a != crypto.derive_key(to_bytes("secret"), "files"))
+assert(a != crypto.derive_key(to_bytes("other secret"), "cookies"))
+// HKDF-SHA-256 with salt "tessera std/crypto", checked with Python's cryptography package
+assert(hex_encode(a) == "6d46a009682ddae7bb25df7c7063c13b481104911ab77f48bd080fe482421523")
+}
+
+test "encrypt and decrypt round-trip, with fresh nonces" {
+let message = to_bytes("attack at dawn")
+let one = crypto.encrypt(key(), message, "orders")
+let two = crypto.encrypt(key(), message, "orders")
+assert(length(one) == 12 + length(message) + 16)
+assert(one != two)
+assert(crypto.decrypt(key(), one, "orders") == .Some(message))
+assert(crypto.decrypt(key(), two, "orders") == .Some(message))
+assert(length(crypto.new_key()) == 32)
+assert(crypto.new_key() != crypto.new_key())
+}
+
+test "decrypt refuses changed data, other keys, other contexts and short input" {
+let sealed = crypto.encrypt(key(), to_bytes("attack at dawn"), "orders")
+var changed = sealed
+set changed[20] = (changed[20] + 1) % 256
+assert(crypto.decrypt(key(), changed, "orders") == .None)
+assert(crypto.decrypt(crypto.new_key(), sealed, "orders") == .None)
+assert(crypto.decrypt(key(), sealed, "other") == .None)
+assert(crypto.decrypt(key(), slice(sealed, 0, 27), "orders") == .None)
+assert(crypto.decrypt(key(), bytes([]), "orders") == .None)
+}
+
+test "text tokens are URL-safe and round-trip" {
+let token = crypto.encrypt_text(key(), "user 42 ünïcode", "session")
+assert(not contains(token, "+") and not contains(token, "/") and not contains(token, "="))
+assert(crypto.decrypt_text(key(), token, "session") == .Some("user 42 ünïcode"))
+assert(crypto.decrypt_text(key(), token, "other") == .None)
+assert(crypto.decrypt_text(key(), token + "A", "session") == .None)
+assert(crypto.decrypt_text(key(), "not a token!", "session") == .None)
+assert(crypto.decrypt_text(key(), "", "session") == .None)
+}

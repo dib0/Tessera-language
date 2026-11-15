@@ -140,3 +140,16 @@ What had to change, and why:
 | HTTP server | A connection closed while the client is still sending is reset on Windows, which throws away the response the client has not read yet, so the 413 and 503 answers never arrived. Both now shut the sending side down and read the rest away before closing. Turning an overload away happens on a short-lived thread of its own (at most `TW_MAX_REFUSALS`), so the accept loop never waits for it. |
 
 macOS stays untested: it takes the unix side of every `#[cfg]`, as Linux does, so everything but `ui` is expected to work, which is not the same as measured. Not available on Windows: nothing in the language. The `db` effect needs the `sqlite3` command, as it does everywhere. Tesseradoom runs at 17 frames per second at 1024 x 768 and 123 at 512 x 384 (`--classic`) on this machine; the display path costs 4 ms of that, the rest is the engine composing the frame in Tessera.
+
+## Draft 0.22: TLS and std/crypto
+
+Measured on Linux x86-64, rustc 1.99.1, on 2026-11-15.
+
+| | Result |
+|---|---|
+| `./build.sh` | succeeds, fixpoint reached |
+| `cd compiler && cargo test --release` | **18 + 8 passed, 0 failed** (new: `tests/stage1_run/crypto_builtins.tes`, `tests/stage1_runtime_fail/R004-aead-key-length.tes`, `tests/std/crypto_test.tes`) |
+| `runtime/tests/run_web_tests.sh` | 38 unit tests (11 new in `tls_test.rs`: RFC/FIPS vectors for SHA-384/512, HMAC, HKDF, Poly1305, ChaCha20-Poly1305, AES, GCM, X25519; P-256/P-384 ECDSA and RSA PKCS #1/PSS against OpenSSL-made signatures; certificate and name checks; a TLS loopback with ECDSA and RSA keys) and 10 end-to-end checks (3 new: `serve --tls-cert/--tls-key` answered over TLS 1.3 by curl for an ECDSA and an RSA certificate, and a key that does not match its certificate is refused) |
+| Interoperability, by hand | Our client against `openssl s_server -tls1_3` and our server against `openssl s_client` and curl: every combination of the three cipher suites, X25519 and secp256r1, and RSA and ECDSA certificates works; a TLS 1.2-only server is refused with a clear message. The client fetched example.com, google.com, github.com, cloudflare.com and letsencrypt.org through the system's trusted certificates |
+| `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |
+| Windows | not measured: the trust store is read through PowerShell there, which is untested |

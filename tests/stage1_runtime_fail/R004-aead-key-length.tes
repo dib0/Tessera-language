@@ -1,0 +1,3 @@
+fn main() -> Unit uses io {
+print(hex_encode(aead_seal(to_bytes("too short"), bytes(repeat([0], 12)), to_bytes("x"), to_bytes(""))))
+}

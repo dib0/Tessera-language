@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.21. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
+**Status:** Draft 0.22. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), and TLS and the crypto built-ins of draft 0.22. Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -246,6 +246,25 @@ From draft 0.20 to 0.21, the same language on Windows as on unix (section 16.1).
 | Generated Rust says `#![cfg_attr(windows, deny(unsafe_code))]` instead of `forbid` when, and only when, a program uses `ui` or `audio` (section 16) | A window and a sound card have no interface other than their C functions. `forbid` cannot be lifted anywhere in a crate, so those two programs say `deny` on Windows, where exactly one module per device is `#[allow(unsafe_code)]`. On every other system, and for every program without `ui` or `audio`, the blanket `forbid` is unchanged. |
 | `build -o name` writes `name.exe` on Windows | Windows cannot start a program without the extension; `-o name.exe` is left exactly as given. The generated Rust is `name.rs` either way. |
 | `\` counts as a path separator on Windows | A path typed with backslashes must find its modules. The path is otherwise kept exactly as typed, so a diagnostic points at what the person wrote. |
+
+From draft 0.21 to 0.22, TLS and authenticated encryption:
+
+| Added | Why |
+|---|---|
+| `net_request`, and so `std/http`'s `fetch` and `get_text`, accept `https://` URLs (section 10) | Almost every service a program talks to is only reachable over HTTPS; "use a reverse proxy" is no answer for a client. The runtime speaks TLS 1.3 and checks the server's certificate chain against the system's trusted certificates, its dates and its host name. There is no switch to skip those checks. |
+| `app serve --tls-cert FILE --tls-key FILE` (section 9.7) | A web application can serve HTTPS itself, for development or small deployments, without nginx, Apache or IIS in front. |
+| Built-ins `sha512`, `hmac_sha512`, `hkdf_sha256`, `aead_seal`, `aead_open` (section 10) | Key derivation and authenticated encryption, which TLS needs anyway, for programs: encrypted cookies, tokens and files. |
+| `std/crypto`: `new_key`, `derive_key`, `encrypt`, `decrypt`, `encrypt_text`, `decrypt_text` (section 10.1) | The built-ins are primitives a program can misuse (a repeated nonce breaks ChaCha20-Poly1305). The module fixes the one safe combination: a random nonce stored with the ciphertext, and a context that binds a value to its use. |
+
+All cryptography is in the runtime (`runtime/crypto.rs`, `runtime/tls.rs`), written once, in safe Rust, without dependencies, and tested against the published test vectors and against OpenSSL and curl in both directions. Code that handles secrets runs in constant time: AES is computed without lookup tables, and the field arithmetic selects with masks instead of branches.
+
+Decided against, with the reasons:
+
+- **Running `curl` or `openssl` as a child process**, the way SQLite is reached. Small, but it makes HTTPS depend on a program being installed and on its version, and the server side would still need its own TLS.
+- **Allowing crates such as rustls.** The runtime and the generated programs are built with `rustc` alone, without Cargo; a dependency would change how every program is built.
+- **TLS 1.2 and older.** SSL 2 and 3 and TLS 1.0 and 1.1 are broken or deprecated (RFC 8996). TLS 1.2 would double the protocol code and its cipher-suite pitfalls for the few servers that lack TLS 1.3; the error message for such a server says so.
+- **An option to skip certificate checks.** It is the usual way a test setting reaches production. A test server's certificate is trusted by pointing `TESSERA_CA_FILE` at it instead.
+- **Session resumption, 0-RTT and client certificates.** Resumption and 0-RTT save one round trip at the price of state and replay risks; client certificates have no use yet.
 
 ## 4. Source files and lexical structure
 
@@ -934,6 +953,7 @@ http.text(200, "item \(value_or(get(parameters, "id"), ""))")
 
 - An entry file with `handle` and no `main` is a web application. `handle` must have exactly this signature (E0213) and may not use `io` or `ui` (E0213): standard output belongs to the server; diagnostics go through `log`.
 - `tessera1 build app.tes -o app` gives an executable that is a CGI program (when the server sets `GATEWAY_INTERFACE`), an HTTP/1.1 server (`app serve --port N`, also started without arguments when IIS HttpPlatformHandler sets `HTTP_PLATFORM_PORT`), a FastCGI server (`app fastcgi --port N`) or a test host (`app request GET /path`).
+- `app serve --tls-cert cert.pem --tls-key key.pem` serves HTTPS (TLS 1.3) instead of HTTP (draft 0.22). The certificate file holds the server's certificate followed by any intermediate certificates, in PEM; the key file the private key, in PEM (PKCS #8, SEC 1 or PKCS #1; ECDSA P-256 or P-384, or RSA of 2048 bits or more), without a passphrase. A key that does not belong to the certificate stops the server at start-up. Behind nginx, Apache or IIS, those servers handle TLS instead.
 - `tessera1 build app.tes --library -o libapp.so` gives a shared library with a small C interface, loaded by the modules for nginx, Apache and IIS in `hosts/`. The generated code stays free of `unsafe`; the C interface lives in one hand-written adapter, `runtime/adapter.rs`.
 - Every request runs on its own thread with its own stack, a time limit and a memory limit, and shares nothing with other requests: Tessera has no global variables. A runtime error in one request gives that request a 500 response and a log entry.
 
@@ -1004,7 +1024,7 @@ Added in draft 0.13:
 | `password_hash`, `password_verify` | `Text -> Text uses random`, `(password, hash) -> Bool` | PBKDF2-HMAC-SHA-256 with 600,000 iterations and a random salt. |
 | `log` | `(level: Text, message: Text) -> Unit uses log` | Standard error, which servers route to their error log. |
 | `db_open`, `db_query`, `db_execute` | `Text -> Result[Database, Text]`, `(Database, sql: Text, params: List[Text]) -> Result[List[Map[Text, Text]], Text]`, `... -> Result[Int, Text]` | SQLite. One statement per call; parameters `?1`, `?2`, ... are bound, never pasted into the SQL. A row maps column names to text; NULL columns are absent. `db_execute` returns the number of changed rows. |
-| `net_request` | `(method, url, header_lines: List[Text], body: Bytes) -> Result[Bytes, Text] uses net` | Plain HTTP only; the raw response, for `std/http`. |
+| `net_request` | `(method, url, header_lines: List[Text], body: Bytes) -> Result[Bytes, Text] uses net` | `http://` or `https://` (since draft 0.22); the raw response, for `std/http`. |
 | `assert` | `(condition: Bool) -> Unit` | R019 when false. |
 
 Added in draft 0.14:
@@ -1039,7 +1059,18 @@ Added in draft 0.17 (`Float`, section 5.1):
 
 `to_text`, interpolation, `sort` and `sort_by` keys also accept `Float`. `to_text` gives the shortest text that reads back as the same number, always with a `.` or an exponent: `1.0`, `0.1`, `-2.5`, `1e21`, `1e-7`.
 
-The runtime has no external dependencies, so SQLite is reached through the `sqlite3` program (a persistent child process per database) and the HTTP client has no TLS. Both are interim choices of draft 0.13; see the roadmap.
+Added in draft 0.22:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `sha512`, `hmac_sha512` | `Bytes -> Bytes`, `(key, message) -> Bytes` | 64-byte results. |
+| `hkdf_sha256` | `(secret: Bytes, salt: Bytes, info: Bytes, length: Int) -> Bytes` | HKDF (RFC 5869) with SHA-256: `length` bytes (1 to 8,160, else R004) of key material for the purpose named in `info`. |
+| `aead_seal` | `(key: Bytes, nonce: Bytes, plaintext: Bytes, associated: Bytes) -> Bytes` | ChaCha20-Poly1305 (RFC 8439): the ciphertext followed by a 16-byte tag. `key` is 32 bytes and `nonce` 12 (R004 otherwise). A nonce may never be used twice with the same key; `std/crypto.encrypt` takes care of that. |
+| `aead_open` | `(key: Bytes, nonce: Bytes, sealed: Bytes, associated: Bytes) -> Option[Bytes]` | The plaintext, or `.None` when `sealed` or `associated` was changed or the key or nonce differ. |
+
+**HTTPS.** `net_request` speaks TLS 1.3 to `https://` URLs (default port 443) with the cipher suites TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384 and TLS_CHACHA20_POLY1305_SHA256 and the key exchange X25519 or secp256r1. The server's certificate chain must lead to a trusted certificate: those of the system (on unix the CA bundle in `/etc/ssl` or `/etc/pki`, or `SSL_CERT_FILE`; on Windows the certificate store, read through PowerShell), or, when `TESSERA_CA_FILE` names a PEM file, only the certificates in that file. Certificates are checked for their dates, their key usage, name constraints, RSA keys of at least 2048 bits, and the host name against the subject alternative names (the common name is not used). A server without TLS 1.3, a certificate that fails a check, or any protocol error gives `.Error` with the reason; nothing can switch the checks off. `TESSERA_NET_ALLOW` applies as for `http://`.
+
+The runtime has no external dependencies, so SQLite is reached through the `sqlite3` program (a persistent child process per database), an interim choice of draft 0.13; see the roadmap. TLS and the cryptography under it are part of the runtime itself (draft 0.22).
 
 ### 10.1 Standard modules
 
@@ -1047,7 +1078,8 @@ The runtime has no external dependencies, so SQLite is reached through the `sqli
 
 | Module | Contents |
 |---|---|
-| `std/http` | `Request`, `Response`, `Header`; `text`, `html` (with a Content-Security-Policy), `json`, `redirect`, `not_found`, `with_header`, `with_cookie` (HttpOnly, Secure, SameSite=Lax); `header`, `text_body`, `form`, `cookies`, `cookie`, `match_path`; `sign`/`verify` (HMAC-signed values), `csrf_token`/`check_csrf`; the client `fetch` and `get_text` (effect `net`); `request` and `response_text` for tests. |
+| `std/http` | `Request`, `Response`, `Header`; `text`, `html` (with a Content-Security-Policy), `json`, `redirect`, `not_found`, `with_header`, `with_cookie` (HttpOnly, Secure, SameSite=Lax); `header`, `text_body`, `form`, `cookies`, `cookie`, `match_path`; `sign`/`verify` (HMAC-signed values), `csrf_token`/`check_csrf`; the client `fetch` and `get_text` (effect `net`; `http://` and `https://`); `request` and `response_text` for tests. |
+| `std/crypto` | `new_key() -> Bytes uses random` (32 random bytes); `derive_key(secret: Bytes, purpose: Text) -> Bytes` (HKDF-SHA-256, a 32-byte key per purpose); `encrypt(key, plaintext: Bytes, context: Text) -> Bytes uses random` (ChaCha20-Poly1305 under a random nonce: nonce, ciphertext and tag); `decrypt(key, sealed, context) -> Option[Bytes]`; `encrypt_text(key, text, context) -> Text uses random` and `decrypt_text(key, token, context) -> Option[Text]` (URL-safe base64 without padding, for cookies and URLs). `context` is authenticated but not stored, so a value encrypted for one use is refused in another. Draft 0.22. |
 | `std/json` | `enum Json`, `parse`, `encode` (keys sorted), `quote`, `field`, `as_text`, `as_int`, `as_decimal`, `as_bool`, `as_list`, `text_field`, `int_field`, `from_int`. |
 | `std/url` | `percent_encode`, `percent_decode`, `parse_query`, `parse_query_all`, `encode_query`, `path_segments`. |
 | `std/html` | `escape`. |
@@ -1367,7 +1399,7 @@ Imported modules are found automatically; only the entry file is given.
 
 Compiler exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure (always a compiler bug). Stage 1 reports an unreadable source file as runtime error R006 (exit code 70).
 
-Both compilers embed the same runtime `runtime/core.rs`. Stage 1 adds `runtime/extra.rs` to every program and, per program, `runtime/web.rs` for decimals, time, randomness, crypto, the database, the network or `handle`; `runtime/ui.rs` and `runtime/win32.rs` for `ui`; `runtime/audio.rs` and `runtime/winmm.rs` for `audio`. `runtime/adapter.rs` is the C interface of `--library` builds. Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
+Both compilers embed the same runtime `runtime/core.rs`. Stage 1 adds `runtime/extra.rs` to every program and, per program, `runtime/web.rs` for decimals, time, randomness, crypto, the database, the network or `handle`, always together with `runtime/crypto.rs` (the cryptographic primitives) and `runtime/tls.rs` (TLS 1.3 for the HTTP client and server); `runtime/ui.rs` and `runtime/win32.rs` for `ui`; `runtime/audio.rs` and `runtime/winmm.rs` for `audio`. `runtime/adapter.rs` is the C interface of `--library` builds. Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
 
 Four runtime files contain `unsafe` code, and they are the only ones: `adapter.rs` (the C interface a web host calls), `win32.rs` (the window) and `winmm.rs` (the sound card). The last two are reached only on Windows and only by a program that asked for a window or sound; everything that can be done without the operating system's C functions is done in safe Rust.
 
@@ -1382,6 +1414,7 @@ The compiler and the programs it builds run on Linux and on Windows; the only th
 | Compiler, console programs, files, modules, `std/` | yes | yes | expected, untested |
 | Web applications (`handle`, `serve`, CGI, `--library`) | yes | yes | expected, untested |
 | `db` (needs the `sqlite3` command) | yes | yes, once `sqlite3` is on `PATH` | expected, untested |
+| `https://` in `net_request`: the trusted certificates | the system CA bundle | the certificate store, read through PowerShell (untested) | `/etc/ssl/cert.pem`, expected, untested |
 | `ui` | X11 | GDI | no backend |
 | `audio` | `aplay` or `pw-cat` | the sound card itself | `TESSERA_AUDIO_PLAYER` only |
 
@@ -1404,7 +1437,7 @@ On Windows:
 1. The rest of the formatter (section 14) and typed IR export with notes.
 2. User-defined generics (typed JSON decoding, generic containers).
 3. Closures, nested patterns, `Set`, constants.
-4. TLS and a native SQLite or PostgreSQL client, which need a decision on runtime dependencies.
+4. A native SQLite or PostgreSQL client, which needs a decision on runtime dependencies (TLS was added without any in draft 0.22).
 5. Notes on statements.
 
 What complete applications, web applications and nginx/Apache hosting need beyond this list is analysed in [`application-roadmap.md`](application-roadmap.md), with a proposed order and the decisions that have to be made first.

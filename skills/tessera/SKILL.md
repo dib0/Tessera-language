@@ -61,7 +61,7 @@ Values never share state. Large lists or records are updated in place only when 
 
 ## Web applications
 
-An entry file with `fn handle(request: http.Request) -> http.Response` and no `main` is a web application (`import std/http`). `handle` may not use `io` or `ui`; log with `log` (`uses log`). Test it without a server: `prog request GET /path`, or `prog serve --port 8080`. `db_open` starts an `sqlite3` child process, so open the database once per request, not per query.
+An entry file with `fn handle(request: http.Request) -> http.Response` and no `main` is a web application (`import std/http`). `handle` may not use `io` or `ui`; log with `log` (`uses log`). Test it without a server: `prog request GET /path`, or `prog serve --port 8080`. `db_open` starts an `sqlite3` child process, so open the database once per request, not per query. `http.fetch` handles `https://` (TLS 1.3, certificates always checked; trust a test server's certificate with `TESSERA_CA_FILE=cert.pem`), and `prog serve --port 8443 --tls-cert cert.pem --tls-key key.pem` serves HTTPS. Encrypt cookies and tokens with `std/crypto`, not with the `aead_*` built-ins directly.
 
 ## When the user is working on the Tessera compiler itself
 

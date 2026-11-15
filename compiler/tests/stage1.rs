@@ -195,6 +195,8 @@ fn embedded_runtime_is_up_to_date() {
         .arg(format!("winmm_runtime={}", root().join("runtime/winmm.rs").display()))
         .arg(format!("extra_runtime={}", root().join("runtime/extra.rs").display()))
         .arg(format!("web_runtime={}", root().join("runtime/web.rs").display()))
+        .arg(format!("crypto_runtime={}", root().join("runtime/crypto.rs").display()))
+        .arg(format!("tls_runtime={}", root().join("runtime/tls.rs").display()))
         .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
         .args(&std_modules)
         .output()

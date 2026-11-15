@@ -1,0 +1,48 @@
+// std/crypto: authenticated encryption and key derivation.
+//
+// The primitives are built-ins, written once in the runtime (runtime/crypto.rs):
+// `aead_seal`/`aead_open` (ChaCha20-Poly1305), `hkdf_sha256`, `sha512`,
+// `hmac_sha512`, next to `sha256`, `hmac_sha256` and `random_bytes`. This module
+// only fixes the safe way to combine them, so that programs never choose nonces
+// or wire formats themselves.
+//
+//     import std/crypto
+//     let key = crypto.derive_key(master_secret, "session cookies")
+//     let token = crypto.encrypt_text(key, user_id, "session")
+//     let back = crypto.decrypt_text(key, token, "session")   // .Some(user_id), or .None when changed
+
+note "A new random 32-byte key for `encrypt` and `decrypt`."
+pub fn new_key() -> Bytes uses random = random_bytes(32)
+
+note "A 32-byte key for one purpose, derived from a longer secret with HKDF-SHA-256. Different purposes give independent keys, so one master secret can serve cookies, files and tokens without one use weakening another."
+pub fn derive_key(secret: Bytes, purpose: Text) -> Bytes = hkdf_sha256(secret, to_bytes("tessera std/crypto"), to_bytes(purpose), 32)
+
+note "Encrypts and authenticates `plaintext` with ChaCha20-Poly1305 under `key` (32 bytes, R004 otherwise) and a random nonce. The result is the nonce (12 bytes), the ciphertext and the tag (16 bytes). `context` is authenticated but not stored: `decrypt` must be given the same one, so a value encrypted for one use is refused in another."
+pub fn encrypt(key: Bytes, plaintext: Bytes, context: Text) -> Bytes uses random {
+let nonce = random_bytes(12)
+nonce + aead_seal(key, nonce, plaintext, to_bytes(context))
+}
+
+note "The plaintext of an `encrypt` result, or `.None` when the data was changed, is too short, or the key or context differ."
+pub fn decrypt(key: Bytes, sealed: Bytes, context: Text) -> Option[Bytes] {
+if length(sealed) < 28 {
+return .None
+}
+aead_open(key, slice(sealed, 0, 12), slice(sealed, 12, length(sealed)), to_bytes(context))
+}
+
+note "`encrypt` for text, as URL-safe base64 without padding, so the result fits in a cookie or a URL unchanged."
+pub fn encrypt_text(key: Bytes, text: Text, context: Text) -> Text uses random {
+let encoded = base64_encode(encrypt(key, to_bytes(text), context))
+replace(replace(replace(encoded, "+", "-"), "/", "_"), "=", "")
+}
+
+note "The text of an `encrypt_text` result, or `.None` when it was changed or is not one."
+pub fn decrypt_text(key: Bytes, token: Text, context: Text) -> Option[Text] {
+if contains(token, "+") or contains(token, "/") or contains(token, "=") {
+return .None
+}
+let data = try base64_decode(replace(replace(token, "-", "+"), "_", "/"))
+let plain = try decrypt(key, data, context)
+from_bytes(plain)
+}

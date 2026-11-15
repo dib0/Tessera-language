@@ -1,9 +1,10 @@
 
 // ---------------------------------------------------------------------------
 // Tessera `web` runtime: decimals, time, randomness, crypto and encodings,
-// SQLite (through the sqlite3 command-line program), a plain-HTTP client and
+// SQLite (through the sqlite3 command-line program), an HTTP client and
 // the web hosts (HTTP/1.1 server, FastCGI responder, CGI, a binary library
-// protocol and a one-shot "request" test host).
+// protocol and a one-shot "request" test host). TLS for the client and the
+// server lives in tls.rs, the primitives under it in crypto.rs.
 // Pasted at top level after core.rs. Safe Rust and std only; every item is
 // prefixed `tw_` / `TW_` (or is `TDecimal`, `TDatabase`, `RawRequest`,
 // `RawResponse`) so it cannot clash with core.rs or generated code. No plain
@@ -1147,10 +1148,14 @@ fn tw_read_chunked<R: std::io::Read>(r: &mut TwReader<R>, limit: usize) -> Resul
 }
 
 // ===========================================================================
-// 6. HTTP client (plain http:// only)
+// 6. HTTP client (http:// and https://)
 // ===========================================================================
 
 const TW_CLIENT_MAX_RESPONSE: usize = 256 * 1024 * 1024;
+
+/// A plain TCP stream or a TLS connection, for the HTTP client.
+trait TwConn: std::io::Read + std::io::Write {}
+impl<T: std::io::Read + std::io::Write> TwConn for T {}
 
 fn tw_net_request(method: Rc<String>, url: Rc<String>, header_lines: Rc<Vec<Rc<String>>>, body: Rc<Vec<u8>>, loc: &str) -> Result<Rc<Vec<u8>>, Rc<String>> {
     tw_http_client(&method, &url, &header_lines, &body).map(Rc::new).map_err(Rc::new)
@@ -1159,9 +1164,9 @@ fn tw_net_request(method: Rc<String>, url: Rc<String>, header_lines: Rc<Vec<Rc<S
 fn tw_http_client(method: &str, url: &str, header_lines: &[Rc<String>], body: &[u8]) -> Result<Vec<u8>, String> {
     if !tw_is_token(method) { return Err(format!("invalid HTTP method `{}`", method)); }
     let lower = url.to_ascii_lowercase();
-    if lower.starts_with("https://") { return Err("https is not supported; use a reverse proxy".to_string()); }
-    if !lower.starts_with("http://") { return Err(format!("unsupported URL `{}`: only http:// URLs are supported", url)); }
-    let rest = &url[7..];
+    let secure = lower.starts_with("https://");
+    if !secure && !lower.starts_with("http://") { return Err(format!("unsupported URL `{}`: only http:// and https:// URLs are supported", url)); }
+    let rest = if secure { &url[8..] } else { &url[7..] };
     let auth_end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let mut target = &rest[auth_end..];
@@ -1183,7 +1188,7 @@ fn tw_http_client(method: &str, url: &str, header_lines: &[Rc<String>], body: &[
     };
     if host.is_empty() || host.bytes().any(|c| c <= 0x20 || c == 0x7f || c == b'/' ) { return Err(format!("invalid host in URL `{}`", url)); }
     let port: u16 = match port_text {
-        None => 80,
+        None => if secure { 443 } else { 80 },
         Some(p) => match p.parse::<u16>() { Ok(v) if !p.starts_with('+') && v > 0 => v, _ => return Err(format!("invalid port in URL `{}`", url)) },
     };
     let host_lower = host.to_ascii_lowercase();
@@ -1227,11 +1232,19 @@ fn tw_http_client(method: &str, url: &str, header_lines: &[Rc<String>], body: &[
             Err(e) => last_err = format!("cannot connect to {}: {}", host_port, e),
         }
     }
-    let mut stream = match stream { Some(s) => s, None => return Err(last_err) };
+    let stream = match stream { Some(s) => s, None => return Err(last_err) };
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    if let Err(e) = stream.write_all(&out_bytes) { return Err(format!("cannot send the request to {}: {}", host_port, e)); }
-    let mut r = TwReader::new(stream);
+    let mut conn: Box<dyn TwConn> = if secure {
+        match tw_tls_connect(stream, &host_lower) {
+            Ok(tls) => Box::new(TwTlsStream::new(tls)),
+            Err(e) => return Err(format!("TLS handshake with {} failed: {}", host_port, e)),
+        }
+    } else {
+        Box::new(stream)
+    };
+    if let Err(e) = conn.write_all(&out_bytes).and_then(|_| conn.flush()) { return Err(format!("cannot send the request to {}: {}", host_port, e)); }
+    let mut r = TwReader::new(conn);
     let rd_err = |e: TwRd| match e {
         TwRd::Eof => "the connection was closed before the response was complete".to_string(),
         TwRd::Io => "error while reading the response (timeout or connection reset)".to_string(),
@@ -1692,34 +1705,59 @@ fn tw_http_read_request<R: std::io::Read>(r: &mut TwReader<R>, w: &mut dyn std::
     Ok((RawRequest { method: method.to_string(), path, query, remote_addr: remote.to_string(), headers, body }, keep_alive))
 }
 
-fn tw_http_connection(app: fn(RawRequest) -> RawResponse, stream: std::net::TcpStream, max_body: usize) {
+fn tw_http_connection(app: fn(RawRequest) -> RawResponse, stream: std::net::TcpStream, max_body: usize, tls: Option<&TwTlsConfig>) {
     let timeout = Some(std::time::Duration::from_secs(30));
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
     let _ = stream.set_nodelay(true);
     let remote = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
-    let mut writer = match stream.try_clone() { Ok(s) => s, Err(_) => return };
-    let mut reader = TwReader::new(stream);
+    let tcp = match stream.try_clone() { Ok(s) => s, Err(_) => return };
+    match tls {
+        None => {
+            let mut writer = match stream.try_clone() { Ok(s) => s, Err(_) => return };
+            let reader = TwReader::new(stream);
+            tw_http_exchange(app, reader, &mut writer, &remote, max_body, &mut |drain| {
+                if drain { tw_close_after_response(&tcp) } else { let _ = tcp.shutdown(std::net::Shutdown::Write); }
+            });
+        }
+        Some(config) => {
+            // A failed handshake (a scanner, a client that does not trust the
+            // certificate) is the client's problem and is not logged.
+            let conn = match tw_tls_accept(stream, config) { Ok(t) => TwTlsStream::new(t), Err(_) => return };
+            let mut writer = conn.clone();
+            let reader = TwReader::new(conn.clone());
+            tw_http_exchange(app, reader, &mut writer, &remote, max_body, &mut |drain| {
+                conn.close();
+                if drain { tw_close_after_response(&tcp) } else { let _ = tcp.shutdown(std::net::Shutdown::Write); }
+            });
+        }
+    }
+}
+
+/// Requests and responses on one connection until it closes. `finish(drain)`
+/// ends the connection: after an error response (drain the client's unread
+/// bytes) or after a response that closes it.
+fn tw_http_exchange<R: std::io::Read, W: std::io::Write>(app: fn(RawRequest) -> RawResponse, mut reader: TwReader<R>, writer: &mut W, remote: &str, max_body: usize, finish: &mut dyn FnMut(bool)) {
     loop {
-        match tw_http_read_request(&mut reader, &mut writer, &remote, max_body) {
+        match tw_http_read_request(&mut reader, writer, remote, max_body) {
             Err(TwReqErr::Closed) => return,
             Err(TwReqErr::Status(code)) => {
                 let _ = writer.write_all(&tw_http_response_bytes(&tw_status_response(code), false, false));
                 let _ = writer.flush();
-                tw_close_after_response(&writer);
+                finish(true);
                 return;
             }
             Ok((req, keep_alive)) => {
                 let head = req.method == "HEAD";
                 let resp = tw_run_request(app, req);
                 if writer.write_all(&tw_http_response_bytes(&resp, head, keep_alive)).and_then(|_| writer.flush()).is_err() { return; }
-                if !keep_alive { let _ = writer.shutdown(std::net::Shutdown::Write); return; }
+                if !keep_alive { finish(false); return; }
             }
         }
     }
 }
 
-fn tw_accept_loop(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpListener, fastcgi: bool) -> ! {
+fn tw_accept_loop(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpListener, fastcgi: bool, tls: Option<std::sync::Arc<TwTlsConfig>>) -> ! {
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // Turning a connection away also takes a moment (the 503 has to be written
     // and the connection closed in an orderly way), and the accept loop must
@@ -1731,7 +1769,7 @@ fn tw_accept_loop(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpLis
         match listener.accept() {
             Ok((mut stream, _)) => {
                 if active.load(std::sync::atomic::Ordering::SeqCst) >= TW_MAX_CONNECTIONS {
-                    if !fastcgi && refusing.load(std::sync::atomic::Ordering::SeqCst) < TW_MAX_REFUSALS {
+                    if !fastcgi && tls.is_none() && refusing.load(std::sync::atomic::Ordering::SeqCst) < TW_MAX_REFUSALS {
                         refusing.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let guard = TwConnGuard(refusing.clone());
                         let _ = std::thread::Builder::new().name("tessera-overload".to_string()).spawn(move || {
@@ -1745,9 +1783,10 @@ fn tw_accept_loop(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpLis
                 }
                 active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let guard = TwConnGuard(active.clone());
+                let tls = tls.clone();
                 let _ = std::thread::Builder::new().name("tessera-connection".to_string()).spawn(move || {
                     let _guard = guard;
-                    if fastcgi { tw_fcgi_connection(app, stream, max_body) } else { tw_http_connection(app, stream, max_body) }
+                    if fastcgi { tw_fcgi_connection(app, stream, max_body) } else { tw_http_connection(app, stream, max_body, tls.as_deref()) }
                 });
             }
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
@@ -1757,7 +1796,7 @@ fn tw_accept_loop(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpLis
 
 /// HTTP/1.1 server on an already bound listener. Never returns.
 pub fn tw_serve_listener(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpListener) -> ! {
-    tw_accept_loop(app, listener, false)
+    tw_accept_loop(app, listener, false, None)
 }
 fn tw_host_port_text(host: &str, port: u16) -> String {
     if host.contains(':') { format!("[{}]:{}", host, port) } else { format!("{}:{}", host, port) }
@@ -1767,6 +1806,12 @@ pub fn tw_serve(app: fn(RawRequest) -> RawResponse, host: &str, port: u16) -> st
     let listener = std::net::TcpListener::bind((host, port))?;
     tw_log(&format!("listening on http://{}\n", tw_host_port_text(host, port)));
     tw_serve_listener(app, listener)
+}
+/// Binds host:port and runs the HTTPS (TLS 1.3) server; returns only if binding fails.
+pub fn tw_serve_tls(app: fn(RawRequest) -> RawResponse, host: &str, port: u16, config: TwTlsConfig) -> std::io::Result<()> {
+    let listener = std::net::TcpListener::bind((host, port))?;
+    tw_log(&format!("listening on https://{}\n", tw_host_port_text(host, port)));
+    tw_accept_loop(app, listener, false, Some(std::sync::Arc::new(config)))
 }
 
 // ---- FastCGI responder ----------------------------------------------------------
@@ -1937,7 +1982,7 @@ fn tw_fcgi_connection(app: fn(RawRequest) -> RawResponse, stream: std::net::TcpS
 
 /// FastCGI responder on an already bound listener. Never returns.
 pub fn tw_fastcgi_serve_listener(app: fn(RawRequest) -> RawResponse, listener: std::net::TcpListener) -> ! {
-    tw_accept_loop(app, listener, true)
+    tw_accept_loop(app, listener, true, None)
 }
 /// Binds host:port and runs the FastCGI responder; returns only if binding fails.
 pub fn tw_fastcgi_serve(app: fn(RawRequest) -> RawResponse, host: &str, port: u16) -> std::io::Result<()> {
@@ -1951,23 +1996,32 @@ pub fn tw_fastcgi_serve(app: fn(RawRequest) -> RawResponse, host: &str, port: u1
 fn tw_usage() -> ! {
     let program = std::env::args().next().unwrap_or_else(|| "app".to_string());
     tw_log(&format!(
-        "usage:\n  {0} serve [--host HOST] [--port PORT]      HTTP/1.1 server (default 127.0.0.1:8080)\n  {0} fastcgi [--host HOST] [--port PORT]    FastCGI responder (default 127.0.0.1:9000)\n  {0} request METHOD PATH[?QUERY] [-H \"Name: value\"]... [--body TEXT]\n  run as a CGI program when GATEWAY_INTERFACE is set\n",
+        "usage:\n  {0} serve [--host HOST] [--port PORT] [--tls-cert FILE --tls-key FILE]\n                                             HTTP/1.1 server (default 127.0.0.1:8080); HTTPS with a PEM certificate chain and key\n  {0} fastcgi [--host HOST] [--port PORT]    FastCGI responder (default 127.0.0.1:9000)\n  {0} request METHOD PATH[?QUERY] [-H \"Name: value\"]... [--body TEXT]\n  run as a CGI program when GATEWAY_INTERFACE is set\n",
         program));
     std::process::exit(2)
 }
 fn tw_parse_host_port(args: &[String], default_port: u16) -> (String, u16) {
+    let (host, port, cert, key) = tw_parse_serve_args(args, default_port);
+    if cert.is_some() || key.is_some() { tw_usage() }
+    (host, port)
+}
+/// --host, --port and the optional --tls-cert and --tls-key.
+fn tw_parse_serve_args(args: &[String], default_port: u16) -> (String, u16, Option<String>, Option<String>) {
     let mut host = "127.0.0.1".to_string();
     let mut port = default_port;
+    let (mut cert, mut key) = (None, None);
     let mut i = 0;
     while i < args.len() {
         match (args[i].as_str(), args.get(i + 1)) {
             ("--host", Some(h)) if !h.is_empty() => host = h.clone(),
             ("--port", Some(p)) => match p.parse::<u16>() { Ok(v) => port = v, Err(_) => tw_usage() },
+            ("--tls-cert", Some(c)) if !c.is_empty() => cert = Some(c.clone()),
+            ("--tls-key", Some(k)) if !k.is_empty() => key = Some(k.clone()),
             _ => tw_usage(),
         }
         i += 2;
     }
-    (host, port)
+    (host, port, cert, key)
 }
 fn tw_default_http_port() -> u16 {
     for name in ["HTTP_PLATFORM_PORT", "ASPNETCORE_PORT", "PORT"] {
@@ -2027,8 +2081,16 @@ pub fn tw_web_main(app: fn(RawRequest) -> RawResponse) {
             if let Err(e) = tw_serve(app, "127.0.0.1", port) { tw_log(&format!("cannot listen on 127.0.0.1:{}: {}\n", port, e)); std::process::exit(1) }
         }
         Some("serve") => {
-            let (host, port) = tw_parse_host_port(&args[1..], tw_default_http_port());
-            if let Err(e) = tw_serve(app, &host, port) { tw_log(&format!("cannot listen on {}: {}\n", tw_host_port_text(&host, port), e)); std::process::exit(1) }
+            let (host, port, cert, key) = tw_parse_serve_args(&args[1..], tw_default_http_port());
+            let result = match (cert, key) {
+                (None, None) => tw_serve(app, &host, port),
+                (Some(cert), Some(key)) => match tw_tls_load_config(&cert, &key) {
+                    Ok(config) => tw_serve_tls(app, &host, port, config),
+                    Err(e) => { tw_log(&format!("{}\n", e)); std::process::exit(1) }
+                },
+                _ => { tw_log("--tls-cert and --tls-key go together\n"); std::process::exit(2) }
+            };
+            if let Err(e) = result { tw_log(&format!("cannot listen on {}: {}\n", tw_host_port_text(&host, port), e)); std::process::exit(1) }
         }
         Some("fastcgi") => {
             let (host, port) = tw_parse_host_port(&args[1..], 9000);

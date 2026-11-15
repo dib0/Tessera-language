@@ -1,0 +1,30 @@
+// The crypto built-ins of draft 0.22 against published vectors:
+// FIPS 180-2 (SHA-512), RFC 4231 test case 2 (HMAC-SHA-512),
+// RFC 5869 test case 1 (HKDF-SHA-256), RFC 8439 section 2.8.2 (ChaCha20-Poly1305).
+fn hex(text: Text) -> Bytes = value_or(hex_decode(text), bytes([]))
+
+fn main() -> Unit uses io {
+print(hex_encode(sha512(to_bytes("abc"))))
+print(hex_encode(hmac_sha512(to_bytes("Jefe"), to_bytes("what do ya want for nothing?"))))
+print(hex_encode(hkdf_sha256(hex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"), hex("000102030405060708090a0b0c"), hex("f0f1f2f3f4f5f6f7f8f9"), 42)))
+let key = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+let nonce = hex("070000004041424344454647")
+let associated = hex("50515253c0c1c2c3c4c5c6c7")
+let plaintext = to_bytes("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+let sealed = aead_seal(key, nonce, plaintext, associated)
+print(hex_encode(sealed))
+match aead_open(key, nonce, sealed, associated) {
+.Some(back) => print(value_or(from_bytes(back), "not text"))
+.None => print("refused")
+}
+var changed = sealed
+set changed[0] = (changed[0] + 1) % 256
+match aead_open(key, nonce, changed, associated) {
+.Some(_) => print("accepted a changed message")
+.None => print("changed message refused")
+}
+match aead_open(key, nonce, sealed, to_bytes("other")) {
+.Some(_) => print("accepted other associated data")
+.None => print("other associated data refused")
+}
+}

@@ -13,8 +13,8 @@
 | Standard modules `std/http`, `std/json`, `std/url`, `std/html` | Done, written in Tessera |
 | Handler contract, test host, CGI, HTTP server, FastCGI | Done |
 | `db` | Done for SQLite, through the `sqlite3` program as a child process (no crates are available to generated programs); PostgreSQL not started |
-| `net` | Plain HTTP client only; TLS needs a dependency decision |
-| Crypto | SHA-256, HMAC, PBKDF2 (instead of Argon2, which is impractical to write from scratch), base64, hex, constant-time comparison, secure random |
+| `net` | Done: HTTP and HTTPS client; `serve` also speaks HTTPS. TLS 1.3 written in the runtime without dependencies (draft 0.22) |
+| Crypto | SHA-256, SHA-512, HMAC, HKDF, PBKDF2 (instead of Argon2, which is impractical to write from scratch), ChaCha20-Poly1305 with `std/crypto` on top, base64, hex, constant-time comparison, secure random |
 | Cookies, signed values, CSRF tokens, security headers | Done in `std/http` |
 | Tests in the language, `tessera1 test`; `tessera1 format` | Done; the formatter applies the layout rules, not yet spacing within lines |
 | `--library`, C adapter, nginx and Apache modules | Done and tested here against real nginx 1.30 and Apache 2.4 (`hosts/README.md`) |

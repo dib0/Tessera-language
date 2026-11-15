@@ -572,7 +572,12 @@ fn http_client_requests() {
     assert!(client("GET", &format!("http://127.0.0.1:{}/", port), &[], b"").unwrap_err().contains("closed"));
 
     // errors
-    assert_eq!(client("GET", "https://example.com/", &[], b"").unwrap_err(), "https is not supported; use a reverse proxy");
+    // https to a server that speaks plain HTTP: the TLS handshake fails (the full TLS tests are in tls_test.rs)
+    let plain = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = plain.local_addr().unwrap().port();
+    std::thread::spawn(move || { if let Ok((mut s, _)) = plain.accept() { let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"); } });
+    let e = client("GET", &format!("https://127.0.0.1:{}/", port), &[], b"").unwrap_err();
+    assert!(e.starts_with(&format!("TLS handshake with 127.0.0.1:{} failed: ", port)), "{}", e);
     assert!(client("GET", "ftp://example.com/", &[], b"").is_err());
     assert!(client("GET", "http://user:pw@example.com/", &[], b"").is_err());
     assert!(client("GET", "http://127.0.0.1:99999/", &[], b"").is_err());
@@ -595,8 +600,10 @@ fn http_client_requests() {
     std::env::set_var("TESSERA_NET_ALLOW", format!("127.0.0.1:{}", port2));
     let allowed_port = client("GET", &format!("http://127.0.0.1:{}/", port2), &[], b"");
     let denied_port = client("GET", "http://127.0.0.1:1/", &[], b"");
+    let denied_https = client("GET", "https://127.0.0.1/", &[], b"");
     std::env::remove_var("TESSERA_NET_ALLOW");
     assert_eq!(denied.unwrap_err(), "network access to 127.0.0.1:8123 is not allowed");
+    assert_eq!(denied_https.unwrap_err(), format!("network access to 127.0.0.1:443 is not allowed"));
     assert_eq!(allowed.unwrap(), "HTTP/1.1 204 No Content\r\n\r\n");
     assert!(allowed_port.is_ok());
     assert_eq!(denied_port.unwrap_err(), "network access to 127.0.0.1:1 is not allowed");

@@ -181,6 +181,9 @@ fn standard_module(path: Text) -> Text {
 if path == "std/http" {
 return runtime_text.std_http()
 }
+if path == "std/crypto" {
+return runtime_text.std_crypto()
+}
 if path == "std/json" {
 return runtime_text.std_json()
 }
@@ -534,7 +537,7 @@ if command == "notes" {
 print(without_final_newline(notes_json(frontend.program.items, files)))
 exit(0)
 }
-let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), win32: runtime_text.win32_runtime(), audio: runtime_text.audio_runtime(), winmm: runtime_text.winmm_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() }
+let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), win32: runtime_text.win32_runtime(), audio: runtime_text.audio_runtime(), winmm: runtime_text.winmm_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() + runtime_text.crypto_runtime() + runtime_text.tls_runtime() }
 if command == "test" {
 let base = without_extension(options.files[0])
 let test_binary = if options.output == "" { "\(base).tests" } else { options.output }

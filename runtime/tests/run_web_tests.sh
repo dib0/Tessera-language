@@ -25,13 +25,13 @@ if [[ -n $exe ]]; then
     export MSYS2_ARG_CONV_EXCL='*'
     export MSYS_NO_PATHCONV=1
 fi
-cat "$here/core_stub.rs" "$here/../web.rs" "$here/web_test.rs" > "$work/web_tests.rs"
+cat "$here/core_stub.rs" "$here/../web.rs" "$here/../crypto.rs" "$here/../tls.rs" "$here/web_test.rs" "$here/tls_test.rs" > "$work/web_tests.rs"
 head -n1 "$work/web_tests.rs" | grep -qx '#!\[forbid(unsafe_code)\]'
 rustc --edition 2021 --test -C opt-level="$opt" -o "$work/web_tests$exe" "$work/web_tests.rs"
 "$work/web_tests$exe" "$@"
 
 # End-to-end checks of tw_web_main through a real executable.
-cat "$here/core_stub.rs" "$here/../web.rs" "$here/web_app_main.rs" > "$work/web_app.rs"
+cat "$here/core_stub.rs" "$here/../web.rs" "$here/../crypto.rs" "$here/../tls.rs" "$here/web_app_main.rs" > "$work/web_app.rs"
 rustc --edition 2021 -C opt-level="$opt" -o "$work/web_app$exe" "$work/web_app.rs"
 app="$work/web_app$exe"
 fail() { echo "e2e FAILED: $*" >&2; exit 1; }
@@ -68,4 +68,28 @@ for mode in serve iis; do
   kill $pid; wait $pid 2>/dev/null || true
   [[ "$out" == HTTP/1.1\ 200\ OK* && "$out" == *"GET /s y=3 " ]] || fail "$mode output: $out"; ok
 done
+# serve over TLS 1.3, checked with curl against a fresh self-signed certificate
+if command -v openssl >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+  for key in ec rsa; do
+    if [[ $key == ec ]]; then newkey=(-newkey ec -pkeyopt ec_paramgen_curve:P-256); else newkey=(-newkey rsa:2048); fi
+    openssl req -x509 "${newkey[@]}" -nodes -keyout "$work/$key.key" -out "$work/$key.crt" -days 2 -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 || fail "openssl req ($key)"
+    for attempt in 1 2 3 4 5; do
+      port=$((20000 + RANDOM % 20000))
+      "$app" serve --port "$port" --tls-cert "$work/$key.crt" --tls-key "$work/$key.key" 2>"$work/serve.err" &
+      pid=$!
+      for _ in $(seq 50); do grep -q "listening on https://127.0.0.1:$port" "$work/serve.err" 2>/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+      if grep -q "listening on" "$work/serve.err"; then break; fi
+      wait $pid 2>/dev/null || true
+    done
+    out="$(curl -sS --tlsv1.3 --cacert "$work/$key.crt" "https://localhost:$port/s?y=3" -d body)" || { kill $pid; fail "https ($key): curl"; }
+    plain="$(curl -sS "http://127.0.0.1:$port/" 2>&1)" && { kill $pid; fail "https ($key): plain HTTP was answered"; }
+    kill $pid; wait $pid 2>/dev/null || true
+    [[ "$out" == "POST /s y=3 body" ]] || fail "https ($key) output: $out"; ok
+  done
+  "$app" serve --port 1 --tls-cert "$work/ec.crt" --tls-key "$work/rsa.key" 2>"$work/serve.err" && fail "mismatched key accepted"
+  grep -q "does not belong" "$work/serve.err" || fail "mismatched key message: $(cat "$work/serve.err")"; ok
+else
+  echo "e2e: openssl or curl not found, skipping the TLS checks"
+fi
 echo "e2e: $passed passed"
