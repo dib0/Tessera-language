@@ -6,7 +6,7 @@
 
 The Tessera language aims to make it easy for language models to create, review, and maintain software without sacrificing clear behavior or safety. Models write the code and models review it, so the syntax is designed to be as token-friendly as possible: compact, regular, and without layout that only a human reader would need. Design rationale is preserved alongside code. **This is for humans that care about functionality of software, not about the code.**
 
-> **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.20).
+> **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.23). Tessera source files use the extension `.tes`.
 
 ## Design goals
 
@@ -125,6 +125,10 @@ The first prototype covered a small, useful command-line program (it has since g
 - Clear diagnostics and tests for invalid programs
 
 Generics, concurrency, foreign-function interfaces, package management, GUI APIs, and web frameworks are outside the initial POC scope.
+
+## Tessera on GitHub
+
+GitHub does not recognize Tessera yet: [Linguist](https://github.com/github-linguist/linguist), which decides the language of each file, only adds a language once it is used widely, so `.tes` files show as "Other" in the language bar and are not highlighted. The entry and samples for the Linguist pull request are ready in [`linguist/`](linguist/README.md). Repositories with Tessera code can carry the topic [`tessera-lang`](https://github.com/topics/tessera-lang), so they can be found until then.
 
 ## Safety and security
 
