@@ -153,3 +153,15 @@ Measured on Linux x86-64, rustc 1.99.1, on 2026-11-15.
 | Interoperability, by hand | Our client against `openssl s_server -tls1_3` and our server against `openssl s_client` and curl: every combination of the three cipher suites, X25519 and secp256r1, and RSA and ECDSA certificates works; a TLS 1.2-only server is refused with a clear message. The client fetched example.com, google.com, github.com, cloudflare.com and letsencrypt.org through the system's trusted certificates |
 | `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |
 | Windows | not measured: the trust store is read through PowerShell there, which is untested |
+
+## Draft 0.23: std/logging and std/config
+
+Measured on Linux x86-64, rustc 1.99.1, on 2026-11-15.
+
+| | Result |
+|---|---|
+| `./build.sh` | succeeds, fixpoint reached |
+| `cd compiler && cargo test --release` | **18 + 8 passed, 0 failed** |
+| `bin/tessera1 test tests/std/logging_test.tes` | 6 passed: level filtering, `parse_level`, field order, quoting and escaping (a newline in a value cannot forge a line), JSON lines, writing at every level |
+| `bin/tessera1 test tests/std/config_test.tes` | 9 passed: sections, comments and quoted values, typed getters, error messages with key and origin, parse errors with line numbers, defaults and `merge`, `section`, environment overrides, `encode` round-trip, a missing file |
+| `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |

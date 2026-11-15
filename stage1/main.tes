@@ -176,6 +176,9 @@ return false
 true
 }
 
+note "Every standard module, for the help of E0601. Keep it in step with `standard_module`; compiler/tests/stage1.rs checks that the help names every file in std/."
+fn standard_module_names() -> List[Text] = ["std/bytes", "std/config", "std/crypto", "std/fixed", "std/html", "std/http", "std/json", "std/keys", "std/logging", "std/math", "std/palette", "std/plane", "std/ppm", "std/raster", "std/rng", "std/sound", "std/url"]
+
 note "The source of a standard module (embedded in the compiler), or empty text."
 fn standard_module(path: Text) -> Text {
 if path == "std/http" {
@@ -186,6 +189,12 @@ return runtime_text.std_crypto()
 }
 if path == "std/json" {
 return runtime_text.std_json()
+}
+if path == "std/logging" {
+return runtime_text.std_logging()
+}
+if path == "std/config" {
+return runtime_text.std_config()
 }
 if path == "std/url" {
 return runtime_text.std_url()
@@ -261,7 +270,7 @@ set modules = append(modules, ast.Module { path: i.path, prefix: ast.module_pref
 continue
 }
 if source.starts_with_text(i.path, "std/") {
-set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "there is no standard module `\(i.path)`", "the standard modules are std/http, std/json, std/url and std/html"))
+set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "there is no standard module `\(i.path)`", "the standard modules are \(join(standard_module_names(), ", "))"))
 continue
 }
 let file_path = join_path(root, "\(i.path).tes")

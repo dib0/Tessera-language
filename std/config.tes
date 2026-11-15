@@ -1,0 +1,296 @@
+// std/config: settings from configuration files, defaults and environment variables (draft 0.23).
+//
+// A configuration file has one `key = value` per line, `[section]` headers and
+// comment lines starting with `#` or `;`:
+//
+//     # app.conf
+//     name = Shop
+//     [server]
+//     port = 8080
+//     greeting = "  Welcome!  "
+//
+// Keys are named by their section: `server.port`. A value is the rest of the line
+// without outer spaces; in double quotes it keeps its spaces and may use the
+// escapes `\"`, `\\`, `\n`, `\r` and `\t`. A `#` after a value is part of the value.
+//
+//     import std/config
+//     let defaults = config.from_map(["server.port": "8080", "log.level": "info"], "default")
+//     let file = try config.load("app.conf")
+//     let settings = config.from_environment(config.merge(defaults, file), "SHOP")
+//     let port = try config.get_int(settings, "server.port")
+//
+// Every error names the key and where its value came from, such as `app.conf line 3`.
+
+pub type Config {
+values: Map[Text, Text]
+origins: Map[Text, Text]
+}
+
+note "A configuration without settings."
+pub fn empty() -> Config = Config { values: [:], origins: [:] }
+
+note "A configuration with the given settings, for defaults. `origin` names them in error messages, such as `\"default\"`."
+pub fn from_map(values: Map[Text, Text], origin: Text) -> Config {
+var origins: Map[Text, Text] = [:]
+for key in keys(values) {
+set origins = put(origins, key, origin)
+}
+Config { values: values, origins: origins }
+}
+
+note "The settings in the text of a configuration file. `name` is used in error messages, usually the file name. A line that is not a comment, a section or `key = value`, a key used twice and a quoted value without its closing quote are errors."
+pub fn parse(text: Text, name: Text) -> Result[Config, Text] {
+var out = empty()
+var section = ""
+var number = 0
+for raw in lines(text) {
+set number += 1
+let line = trim(raw)
+let place = "\(name) line \(number)"
+if line == "" or starts_with(line, "#") or starts_with(line, ";") {
+continue
+}
+if starts_with(line, "[") {
+if not ends_with(line, "]") {
+return .Error("\(place): a section header ends with `]`")
+}
+let header = trim(slice_text(line, 1, length(line) - 1))
+if not valid_key(header) {
+return .Error("\(place): `\(header)` is not a valid section name (letters, digits, `_`, `-` and `.`)")
+}
+set section = "\(header)."
+continue
+}
+let at = index_of(line, "=") else return .Error("\(place): expected `key = value`, `[section]` or a comment")
+let key_part = trim(slice_text(line, 0, at))
+if not valid_key(key_part) {
+return .Error("\(place): `\(key_part)` is not a valid key (letters, digits, `_`, `-` and `.`)")
+}
+let key = section + key_part
+if contains(out.values, key) {
+return .Error("\(place): `\(key)` is already set on \(value_or(get(out.origins, key), "an earlier line"))")
+}
+let value = try parse_value(trim(slice_text(line, at + 1, length(line))), place)
+set out = Config { values: put(out.values, key, value), origins: put(out.origins, key, place) }
+}
+.Ok(out)
+}
+
+fn valid_key(key: Text) -> Bool {
+if key == "" or starts_with(key, ".") or ends_with(key, ".") or contains(key, "..") {
+return false
+}
+for code in code_points(key) {
+let letter = (code >= 97 and code <= 122) or (code >= 65 and code <= 90)
+let digit = code >= 48 and code <= 57
+if not (letter or digit or code == 95 or code == 45 or code == 46) {
+return false
+}
+}
+true
+}
+
+fn parse_value(text: Text, place: Text) -> Result[Text, Text] {
+if not starts_with(text, "\"") {
+return .Ok(text)
+}
+let parts = split(text, "")
+var out = ""
+var index = 1
+while index < length(parts) {
+let part = parts[index]
+if part == "\"" {
+if index != length(parts) - 1 {
+return .Error("\(place): nothing may follow the closing quote")
+}
+return .Ok(out)
+}
+if part == "\\" {
+if index + 1 >= length(parts) {
+break
+}
+let next = parts[index + 1]
+set out += match next {
+"\"" => "\""
+"\\" => "\\"
+"n" => "\n"
+"t" => "\t"
+"r" => from_code_point(13)
+_ => return .Error("\(place): unknown escape `\\\(next)` (use `\\\"`, `\\\\`, `\\n`, `\\r` or `\\t`)")
+}
+set index += 2
+continue
+}
+set out += part
+set index += 1
+}
+.Error("\(place): the quoted value has no closing `\"`")
+}
+
+note "Reads and parses the configuration file at `path`."
+pub fn load(path: Text) -> Result[Config, Text] uses fs {
+let text = match read_text(path) {
+.Ok(t) => t
+.Error(e) => return .Error("cannot read the configuration file `\(path)`: \(file_error_text(e))")
+}
+parse(text, path)
+}
+
+fn file_error_text(error: FileError) -> Text {
+match error {
+.NotFound => "it does not exist"
+.PermissionDenied => "permission denied"
+.Other(message) => message
+}
+}
+
+note "`base` with every setting of `top` added; where both have a key, the value of `top` wins."
+pub fn merge(base: Config, top: Config) -> Config {
+var out = base
+for key in keys(top.values) {
+set out = Config { values: put(out.values, key, value_or(get(top.values, key), "")), origins: put(out.origins, key, value_or(get(top.origins, key), "")) }
+}
+out
+}
+
+note "A copy of `config` with `key` set to `value`; `origin` names it in error messages."
+pub fn with_value(config: Config, key: Text, value: Text, origin: Text) -> Config = Config { values: put(config.values, key, value), origins: put(config.origins, key, origin) }
+
+note "The environment variable that `from_environment` reads for a key: `prefix`, `_` and the key in upper case with `.` and `-` replaced by `_`, so `server.port` with prefix `SHOP` is `SHOP_SERVER_PORT`."
+pub fn environment_name(prefix: Text, key: Text) -> Text {
+let name = to_upper(replace(replace(key, ".", "_"), "-", "_"))
+if prefix == "" { name } else { "\(prefix)_\(name)" }
+}
+
+note "A copy of `config` in which every key it already has is replaced by its environment variable (see `environment_name`), when that variable is set and not empty. Only known keys are read, so give every setting a default first."
+pub fn from_environment(config: Config, prefix: Text) -> Config uses env {
+var out = config
+for key in keys(config.values) {
+let name = environment_name(prefix, key)
+let value = environment_variable(name)
+if value != "" {
+set out = with_value(out, key, value, "environment variable \(name)")
+}
+}
+out
+}
+
+note "Whether `config` has a setting for `key`."
+pub fn has(config: Config, key: Text) -> Bool = contains(config.values, key)
+
+note "The value of `key`, or `.None` when it is not set."
+pub fn find(config: Config, key: Text) -> Option[Text] = get(config.values, key)
+
+note "All keys in sorted order."
+pub fn names(config: Config) -> List[Text] = keys(config.values)
+
+note "The settings whose key starts with `prefix.`, with that part removed: `section(c, \"server\")` turns `server.port` into `port`."
+pub fn section(config: Config, prefix: Text) -> Config {
+var out = empty()
+let start = "\(prefix)."
+for key in keys(config.values) {
+if starts_with(key, start) {
+let short = slice_text(key, length(start), length(key))
+set out = with_value(out, short, value_or(get(config.values, key), ""), value_or(get(config.origins, key), ""))
+}
+}
+out
+}
+
+note "Where the value of `key` came from, such as `app.conf line 3`, `default` or `environment variable SHOP_SERVER_PORT`; `\"\"` when it is not set."
+pub fn origin(config: Config, key: Text) -> Text = value_or(get(config.origins, key), "")
+
+fn invalid(config: Config, key: Text, value: Text, expected: Text) -> Text = "setting `\(key)` (\(origin(config, key))) is \"\(value)\", expected \(expected)"
+
+note "The value of `key`, or an error when it is not set."
+pub fn get_text(config: Config, key: Text) -> Result[Text, Text] {
+match get(config.values, key) {
+.Some(value) => .Ok(value)
+.None => .Error("setting `\(key)` is missing")
+}
+}
+
+note "The value of `key` as a whole number; an error when it is missing or not one."
+pub fn get_int(config: Config, key: Text) -> Result[Int, Text] {
+let value = try get_text(config, key)
+match parse_int(value) {
+.Some(n) => .Ok(n)
+.None => .Error(invalid(config, key, value, "a whole number"))
+}
+}
+
+note "The value of `key` as a `Decimal`; an error when it is missing or not a number."
+pub fn get_decimal(config: Config, key: Text) -> Result[Decimal, Text] {
+let value = try get_text(config, key)
+match parse_decimal(value) {
+.Some(n) => .Ok(n)
+.None => .Error(invalid(config, key, value, "a number"))
+}
+}
+
+note "The value of `key` as a `Float`; an error when it is missing or not a number."
+pub fn get_float(config: Config, key: Text) -> Result[Float, Text] {
+let value = try get_text(config, key)
+match parse_float(value) {
+.Some(n) => .Ok(n)
+.None => .Error(invalid(config, key, value, "a number"))
+}
+}
+
+note "The value of `key` as a `Bool`: `true`, `yes`, `on` and `1` are true, `false`, `no`, `off` and `0` are false, in any case. Anything else, and a missing key, is an error."
+pub fn get_bool(config: Config, key: Text) -> Result[Bool, Text] {
+let value = try get_text(config, key)
+match to_lower(value) {
+"true" => .Ok(true)
+"yes" => .Ok(true)
+"on" => .Ok(true)
+"1" => .Ok(true)
+"false" => .Ok(false)
+"no" => .Ok(false)
+"off" => .Ok(false)
+"0" => .Ok(false)
+_ => .Error(invalid(config, key, value, "true or false"))
+}
+}
+
+note "The value of `key` split at commas, each part without outer spaces; an empty value is an empty list. An error when the key is missing."
+pub fn get_list(config: Config, key: Text) -> Result[List[Text], Text] {
+let value = try get_text(config, key)
+if trim(value) == "" {
+return .Ok([])
+}
+.Ok(map(split(value, ","), trim))
+}
+
+note "The configuration as file text that `parse` reads back to the same settings: keys without a section first, then one `[section]` per first key part, both in key order. Values with outer spaces, quotes, backslashes or line breaks are quoted."
+pub fn encode(config: Config) -> Text {
+var top = ""
+var sections: Map[Text, Text] = [:]
+for key in keys(config.values) {
+let value = encode_value(value_or(get(config.values, key), ""))
+match index_of(key, ".") {
+.Some(at) => {
+let name = slice_text(key, 0, at)
+let rest = slice_text(key, at + 1, length(key))
+set sections = put(sections, name, value_or(get(sections, name), "") + "\(rest) = \(value)\n")
+}
+.None => set top += "\(key) = \(value)\n"
+}
+}
+var out = top
+for name in keys(sections) {
+if out != "" {
+set out += "\n"
+}
+set out += "[\(name)]\n\(value_or(get(sections, name), ""))"
+}
+out
+}
+
+fn encode_value(value: Text) -> Text {
+let plain = trim(value) == value and not starts_with(value, "\"") and not contains(value, "\n") and not contains(value, from_code_point(13)) and not contains(value, "\\")
+if plain {
+return value
+}
+"\"\(replace(replace(replace(replace(value, "\\", "\\\\"), "\"", "\\\""), "\n", "\\n"), from_code_point(13), "\\r"))\""
+}

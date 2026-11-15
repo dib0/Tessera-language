@@ -1,0 +1,56 @@
+// Tests of std/logging.
+import std/logging
+
+test "levels filter lines" {
+let logger = logging.new(.Warning)
+assert(not logging.enabled(logger, .Debug))
+assert(not logging.enabled(logger, .Info))
+assert(logging.enabled(logger, .Warning))
+assert(logging.enabled(logger, .Error))
+assert(logging.enabled(logging.with_level(logger, .Debug), .Debug))
+}
+
+test "parse_level accepts the names in any case" {
+assert(logging.parse_level("debug") == .Some(.Debug))
+assert(logging.parse_level(" INFO ") == .Some(.Info))
+assert(logging.parse_level("Warn") == .Some(.Warning))
+assert(logging.parse_level("warning") == .Some(.Warning))
+assert(logging.parse_level("error") == .Some(.Error))
+assert(logging.parse_level("verbose") == .None)
+assert(logging.level_name(.Warning) == "warning")
+}
+
+test "text lines put context fields first, then call fields in key order" {
+let logger = logging.with_field(logging.with_field(logging.new(.Info), "request", "7f3a"), "app", "shop")
+let line = logging.render(logger, .Info, "user logged in", ["user": "alice", "age": "42"])
+assert(line == "user logged in request=7f3a app=shop age=42 user=alice")
+assert(logging.render(logging.new(.Info), .Info, "plain", [:]) == "plain")
+}
+
+test "text lines quote and escape values, keys and messages" {
+let logger = logging.new(.Debug)
+assert(logging.render(logger, .Info, "m", ["name": "Jan de Vries"]) == "m name=\"Jan de Vries\"")
+assert(logging.render(logger, .Info, "m", ["empty": ""]) == "m empty=\"\"")
+assert(logging.render(logger, .Info, "m", ["q": "a=b"]) == "m q=\"a=b\"")
+assert(logging.render(logger, .Info, "m", ["evil": "x\n[error] forged"]) == "m evil=\"x\\n[error] forged\"")
+assert(logging.render(logger, .Info, "two\nlines\t\u{1}", [:]) == "two\\nlines\\t\\u0001")
+assert(logging.render(logger, .Info, "m", ["bad key=": "v"]) == "m bad_key_=v")
+assert(logging.render(logger, .Info, "m", ["": "v"]) == "m _=v")
+assert(logging.render(logger, .Info, "path", ["file": "C:\\data"]) == "path file=C:\\data")
+}
+
+test "json lines" {
+let logger = logging.with_field(logging.new(.Info) with { format: .Json }, "request", "7f3a")
+let line = logging.render(logger, .Warning, "disk \"full\"", ["free": "0"])
+assert(line == "{\"level\":\"warning\",\"message\":\"disk \\\"full\\\"\",\"request\":\"7f3a\",\"free\":\"0\"}")
+}
+
+test "writing at every level" {
+let logger = logging.new(.Debug)
+logging.debug(logger, "debug line", [:])
+logging.info(logger, "info line", ["k": "v"])
+logging.warning(logger, "warning line", [:])
+logging.error(logger, "error line", [:])
+logging.write(logging.new(.Error), .Info, "not written", [:])
+assert(true)
+}

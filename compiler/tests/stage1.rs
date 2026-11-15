@@ -174,6 +174,17 @@ fn module_errors_are_reported() {
 }
 
 #[test]
+fn unknown_standard_module_help_lists_every_module() {
+    let main = root().join("tests/modules/fail/E0601-unknown-std-module/main.tes");
+    let out = Command::new(stage1()).arg("check").arg("--json").arg(&main).output().unwrap();
+    let json = String::from_utf8_lossy(&out.stdout);
+    for path in tes_files("std") {
+        let name = format!("std/{}", path.file_stem().unwrap().to_string_lossy());
+        assert!(json.contains(&format!("{},", name)) || json.contains(&format!("{}\"", name)), "E0601 help does not list {}: {}", name, json);
+    }
+}
+
+#[test]
 fn embedded_runtime_is_up_to_date() {
     let generated = work_dir().join("runtime_text.tes");
     // Every file in std/, in the order build.sh passes them (sorted by name).

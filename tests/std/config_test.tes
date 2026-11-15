@@ -1,0 +1,93 @@
+// Tests of std/config.
+import std/config
+
+fn sample() -> Text = "# shop settings\nname = Shop\n\n[server]\nport = 8080\nhost = 0.0.0.0\n; quoted values keep their spaces\ngreeting = \"  Welcome, \\\"friend\\\"!\\n\"\nurl = https://example.com/#top\n[features]\nbeta = yes\nlimit = 2.5\ntags = a, b ,c\nnone =\n"
+
+test "parse reads sections, comments and quoted values" {
+let c = config.parse(sample(), "app.conf") else fail("parse failed")
+assert(config.names(c) == ["features.beta", "features.limit", "features.none", "features.tags", "name", "server.greeting", "server.host", "server.port", "server.url"])
+assert(config.get_text(c, "name") == .Ok("Shop"))
+assert(config.get_text(c, "server.greeting") == .Ok("  Welcome, \"friend\"!\n"))
+assert(config.get_text(c, "server.url") == .Ok("https://example.com/#top"))
+assert(config.get_text(c, "features.none") == .Ok(""))
+assert(config.origin(c, "server.port") == "app.conf line 5")
+assert(config.has(c, "name"))
+assert(config.find(c, "missing") == .None)
+}
+
+test "typed getters" {
+let c = config.parse(sample(), "app.conf") else fail("parse failed")
+assert(config.get_int(c, "server.port") == .Ok(8080))
+assert(config.get_bool(c, "features.beta") == .Ok(true))
+assert(config.get_decimal(c, "features.limit") == .Ok(2.5))
+let limit: Float = 2.5
+assert(config.get_float(c, "features.limit") == .Ok(limit))
+assert(config.get_list(c, "features.tags") == .Ok(["a", "b", "c"]))
+assert(config.get_list(c, "features.none") == .Ok([]))
+}
+
+test "getter errors name the key and its origin" {
+let c = config.parse(sample(), "app.conf") else fail("parse failed")
+assert(config.get_int(c, "name") == .Error("setting `name` (app.conf line 2) is \"Shop\", expected a whole number"))
+assert(config.get_bool(c, "server.port") == .Error("setting `server.port` (app.conf line 5) is \"8080\", expected true or false"))
+assert(config.get_text(c, "server.missing") == .Error("setting `server.missing` is missing"))
+assert(config.get_int(c, "server.missing") == .Error("setting `server.missing` is missing"))
+}
+
+test "parse errors give the line" {
+assert(config.parse("a = 1\njunk\n", "x.conf") == .Error("x.conf line 2: expected `key = value`, `[section]` or a comment"))
+assert(config.parse("a = 1\na = 2\n", "x.conf") == .Error("x.conf line 2: `a` is already set on x.conf line 1"))
+assert(config.parse("[s\n", "x.conf") == .Error("x.conf line 1: a section header ends with `]`"))
+assert(config.parse("[a b]\n", "x.conf") == .Error("x.conf line 1: `a b` is not a valid section name (letters, digits, `_`, `-` and `.`)"))
+assert(config.parse("my key = 1\n", "x.conf") == .Error("x.conf line 1: `my key` is not a valid key (letters, digits, `_`, `-` and `.`)"))
+assert(config.parse("= 1\n", "x.conf") == .Error("x.conf line 1: `` is not a valid key (letters, digits, `_`, `-` and `.`)"))
+assert(config.parse("a = \"open\n", "x.conf") == .Error("x.conf line 1: the quoted value has no closing `\"`"))
+assert(config.parse("a = \"x\" y\n", "x.conf") == .Error("x.conf line 1: nothing may follow the closing quote"))
+assert(config.parse("a = \"\\q\"\n", "x.conf") == .Error("x.conf line 1: unknown escape `\\q` (use `\\\"`, `\\\\`, `\\n`, `\\r` or `\\t`)"))
+assert(config.parse("", "x.conf") == .Ok(config.empty()))
+}
+
+test "defaults, merge and with_value" {
+let defaults = config.from_map(["server.port": "80", "server.host": "localhost"], "default")
+let file = config.parse("[server]\nport = 8080\n", "app.conf") else fail("parse failed")
+let c = config.merge(defaults, file)
+assert(config.get_int(c, "server.port") == .Ok(8080))
+assert(config.origin(c, "server.port") == "app.conf line 2")
+assert(config.get_text(c, "server.host") == .Ok("localhost"))
+assert(config.origin(c, "server.host") == "default")
+let changed = config.with_value(c, "server.port", "9000", "command line")
+assert(config.get_int(changed, "server.port") == .Ok(9000))
+assert(config.origin(changed, "server.port") == "command line")
+}
+
+test "section strips the prefix" {
+let c = config.parse(sample(), "app.conf") else fail("parse failed")
+let server = config.section(c, "server")
+assert(config.names(server) == ["greeting", "host", "port", "url"])
+assert(config.get_int(server, "port") == .Ok(8080))
+assert(config.origin(server, "port") == "app.conf line 5")
+}
+
+test "environment overrides known keys" {
+assert(config.environment_name("SHOP", "server.max-size") == "SHOP_SERVER_MAX_SIZE")
+assert(config.environment_name("", "log.level") == "LOG_LEVEL")
+let defaults = config.from_map(["path": "/nowhere", "zz_tessera_unset": "kept"], "default")
+let c = config.from_environment(defaults, "")
+// PATH is set in every test environment; ZZ_TESSERA_UNSET is not
+assert(config.get_text(c, "path") != .Ok("/nowhere"))
+assert(config.origin(c, "path") == "environment variable PATH")
+assert(config.get_text(c, "zz_tessera_unset") == .Ok("kept"))
+}
+
+test "encode and parse round-trip" {
+let c = config.parse(sample(), "app.conf") else fail("parse failed")
+let odd = config.with_value(config.with_value(c, "quote", "\"x\\y\"\u{d}", "test"), "pad", " p ", "test")
+let back = config.parse(config.encode(odd), "again") else fail("parse of encode failed")
+assert(back.values == odd.values)
+assert(config.encode(config.from_map(["b": "2", "a.x": "1", "a.y": "", "c.d.e": "3"], "d")) == "b = 2\n\n[a]\nx = 1\ny = \n\n[c]\nd.e = 3\n")
+}
+
+test "load reports missing files" {
+let result = config.load("/nonexistent/tessera/app.conf")
+assert(result == .Error("cannot read the configuration file `/nonexistent/tessera/app.conf`: it does not exist"))
+}

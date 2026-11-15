@@ -1,0 +1,192 @@
+// std/logging: levels, context fields and structured log lines (draft 0.23).
+//
+// There are no global variables, so a `Logger` is a value: make one at the start
+// (usually from the configuration), add context fields such as a request id, and
+// pass it to the functions that log. Lines go to the `log` built-in, which writes
+// standard error and, in a web host, the server's error log.
+//
+//     import std/logging
+//     let logger = logging.with_field(logging.new(.Info), "request", request_id)
+//     logging.info(logger, "user logged in", ["user": name])
+//     // [info] user logged in request=7f3a user=alice
+//
+// Every value is escaped, so a newline in user input can never start a forged line.
+
+import std/json
+
+pub enum Level {
+Debug
+Info
+Warning
+Error
+}
+
+pub enum Format {
+Text
+Json
+}
+
+pub type Field {
+key: Text
+value: Text
+}
+
+pub type Logger {
+level: Level
+format: Format
+fields: List[Field]
+}
+
+note "A logger that writes lines of `level` and above in the text format, without context fields. Change the format with `logger with { format: .Json }`."
+pub fn new(level: Level) -> Logger = Logger { level: level, format: .Text, fields: [] }
+
+note "A copy of `logger` that adds `key=value` to every line, after the message and before the fields of the call. Context fields keep the order in which they were added."
+pub fn with_field(logger: Logger, key: Text, value: Text) -> Logger = logger with { fields: logger.fields + [Field { key: key, value: value }] }
+
+note "A copy of `logger` that writes lines of `level` and above."
+pub fn with_level(logger: Logger, level: Level) -> Logger = logger with { level: level }
+
+note "The level for a name such as `\"info\"` from a configuration file or environment variable: `debug`, `info`, `warning` (also `warn`) or `error`, in any case."
+pub fn parse_level(text: Text) -> Option[Level] {
+match to_lower(trim(text)) {
+"debug" => .Some(.Debug)
+"info" => .Some(.Info)
+"warning" => .Some(.Warning)
+"warn" => .Some(.Warning)
+"error" => .Some(.Error)
+_ => .None
+}
+}
+
+note "The lowercase name of a level, as passed to the `log` built-in."
+pub fn level_name(level: Level) -> Text {
+match level {
+.Debug => "debug"
+.Info => "info"
+.Warning => "warning"
+.Error => "error"
+}
+}
+
+fn rank(level: Level) -> Int {
+match level {
+.Debug => 0
+.Info => 1
+.Warning => 2
+.Error => 3
+}
+}
+
+note "Whether `logger` writes lines of `level`. Check it before building an expensive message."
+pub fn enabled(logger: Logger, level: Level) -> Bool = rank(level) >= rank(logger.level)
+
+note "The line `logger` writes for a message, without the level prefix the `log` built-in adds, whether or not the level is enabled. Use it to write log lines somewhere else, such as a file."
+pub fn render(logger: Logger, level: Level, message: Text, fields: Map[Text, Text]) -> Text {
+var all = logger.fields
+for key in keys(fields) {
+set all += [Field { key: key, value: value_or(get(fields, key), "") }]
+}
+match logger.format {
+.Text => render_text(message, all)
+.Json => render_json(level, message, all)
+}
+}
+
+fn render_text(message: Text, fields: List[Field]) -> Text {
+var out = escape_controls(message)
+for field in fields {
+set out += " \(field_key(field.key))=\(field_value(field.value))"
+}
+out
+}
+
+fn render_json(level: Level, message: Text, fields: List[Field]) -> Text {
+var out = "{\"level\":\"\(level_name(level))\",\"message\":\(json.quote(message))"
+for field in fields {
+set out += ",\(json.quote(field.key)):\(json.quote(field.value))"
+}
+out + "}"
+}
+
+note "A key is written as it is when it consists of letters, digits, `_`, `-` and `.`; anything else becomes `_`, so a key can never break the line apart."
+fn field_key(key: Text) -> Text {
+if key == "" {
+return "_"
+}
+var out = ""
+for code in code_points(key) {
+set out += if is_key_code(code) { from_code_point(code) } else { "_" }
+}
+out
+}
+
+fn is_key_code(code: Int) -> Bool {
+if code >= 97 and code <= 122 {
+return true
+}
+if code >= 65 and code <= 90 {
+return true
+}
+if code >= 48 and code <= 57 {
+return true
+}
+code == 95 or code == 45 or code == 46
+}
+
+note "A value is quoted, as a JSON string, when it is empty or contains a space, `=`, `\"` or a control character; otherwise it is written as it is."
+fn field_value(value: Text) -> Text {
+if value == "" {
+return "\"\""
+}
+for code in code_points(value) {
+if code <= 32 or code == 61 or code == 34 or code == 127 {
+return json.quote(value)
+}
+}
+value
+}
+
+fn escape_controls(text: Text) -> Text {
+var out = ""
+for code in code_points(text) {
+set out += if code == 10 {
+"\\n"
+} else if code == 13 {
+"\\r"
+} else if code == 9 {
+"\\t"
+} else if code < 32 or code == 127 {
+"\\u\(pad_left(hex_digits(code), 4, "0"))"
+} else {
+from_code_point(code)
+}
+}
+out
+}
+
+fn hex_digits(value: Int) -> Text {
+let digits = split("0123456789abcdef", "")
+if value < 16 {
+return digits[value]
+}
+hex_digits(value / 16) + digits[value % 16]
+}
+
+note "Writes `message` with the logger's context fields and `fields` (in key order) at `level`, if the logger writes that level."
+pub fn write(logger: Logger, level: Level, message: Text, fields: Map[Text, Text]) -> Unit uses log {
+if enabled(logger, level) {
+log(level_name(level), render(logger, level, message, fields))
+}
+}
+
+note "`write` at level `.Debug`."
+pub fn debug(logger: Logger, message: Text, fields: Map[Text, Text]) -> Unit uses log = write(logger, .Debug, message, fields)
+
+note "`write` at level `.Info`."
+pub fn info(logger: Logger, message: Text, fields: Map[Text, Text]) -> Unit uses log = write(logger, .Info, message, fields)
+
+note "`write` at level `.Warning`."
+pub fn warning(logger: Logger, message: Text, fields: Map[Text, Text]) -> Unit uses log = write(logger, .Warning, message, fields)
+
+note "`write` at level `.Error`."
+pub fn error(logger: Logger, message: Text, fields: Map[Text, Text]) -> Unit uses log = write(logger, .Error, message, fields)

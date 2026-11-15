@@ -9,7 +9,7 @@
 | Runtime errors unwind to the host; stack depth (R013), time (R014) and memory (R015) limits; `exit` in a request (R017) | Done |
 | File functions returning `Result` (`read_text`, `write_text`, `list_directory`, `create_directory`, `remove_file`) | Done, as new names: `read_file` and `write_file` stay, because the compiler's own source uses them and the bootstrap seed would not accept a changed type |
 | `Map`, `Bytes`, `Decimal`, function values with `map`/`filter`/`sort_by` | Done. `Decimal` has a fixed 9 decimal places |
-| Text functions, standard input, `time`, `random`, `log` | Done. Time values are `Int` milliseconds, not separate `Instant`/`Duration` types |
+| Text functions, standard input, `time`, `random`, `log` | Done; `std/logging` adds levels, context fields and escaped `key=value` or JSON lines (draft 0.23). Time values are `Int` milliseconds, not separate `Instant`/`Duration` types |
 | Standard modules `std/http`, `std/json`, `std/url`, `std/html` | Done, written in Tessera |
 | Handler contract, test host, CGI, HTTP server, FastCGI | Done |
 | `db` | Done for SQLite, through the `sqlite3` program as a child process (no crates are available to generated programs); PostgreSQL not started |
@@ -148,7 +148,7 @@ These must not be written in Tessera by a model. They belong in the runtime, imp
 | nginx module | A content handler that reads the body, calls the library and writes the response | In C, using the adapter. Blocking calls (database, `net`) must run in nginx's thread pool, not the event loop |
 | Apache module | A `mod_tessera` content handler | In C. Simpler than nginx because Apache allows blocking handlers |
 | Hot reload | Deploying a new version without restarting the server | Load the new library next to the old one; the version symbol prevents mixing |
-| Configuration | Database location, secrets, allowed paths | From the host (nginx/Apache directives or environment variables), available through `env` |
+| Configuration | Database location, secrets, allowed paths | From the host (nginx/Apache directives or environment variables), available through `env`. Done for files and environment variables: `std/config` (draft 0.23) |
 | Packages | Sharing `std` extensions and application modules | Deferred (section 18). Vendored modules in the project work until then |
 
 ### 3.8 Testing and tooling (P2)
