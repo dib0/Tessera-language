@@ -15,7 +15,7 @@ The Tessera language aims to make it easy for language models to create, review,
 - **Safety by default:** The planned safe subset excludes raw pointers and unchecked memory access, and uses bounds-checked collections.
 - **Preserved rationale:** Attach design notes to declarations and preserve them through compiler tooling.
 - **Portable native software:** The long-term goal is to compile for Linux, Windows, and macOS, with libraries for scripts, web applications, and desktop applications.
-- **Self-hosting:** The long-term goal is to implement the Tessera compiler in Tessera itself.
+- **Self-hosting:** The Tessera compiler is written in Tessera and compiles itself; a Rust seed bootstraps it (see [Compiler bootstrap](#compiler-bootstrap)).
 
 These are design goals, not guarantees of the current prototype.
 
