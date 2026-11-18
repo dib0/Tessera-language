@@ -359,7 +359,7 @@ let speed = match m.state {
 _ => 8
 }
 let count = length(frames)
-slice_text(frames, (tic / speed) % count, (tic / speed) % count + 1)
+slice_text(frames, tic / speed % count, tic / speed % count + 1)
 }
 
 note "Everything in the world to draw as sprites: things, projectiles (seen from the direction they fly) and effects."
@@ -372,7 +372,7 @@ set out += [render.SpriteDraw { x: m.x, y: m.y, z: fixed.from_int(sector.floor),
 }
 }
 for m in w.missiles {
-let frame = if (w.tic / 4) % 2 == 0 { "A" } else { "B" }
+let frame = if w.tic / 4 % 2 == 0 { "A" } else { "B" }
 let angle = if math.abs(m.dx) >= math.abs(m.dy) { if m.dx > 0 { 0 } else { 4096 } } else if m.dy > 0 { 2048 } else { 6144 }
 set out += [render.SpriteDraw { x: m.x, y: m.y, z: m.z - fixed.from_int(8), sprite: m.sprite, frame: frame, angle: angle, light: 255, radius: m.radius }]
 }
@@ -388,7 +388,7 @@ pub fn weapon_view(w: state.World) -> List[Text] {
 let slot = w.stats.weapon
 let sprite = things.weapon_sprite(slot)
 let frames = things.weapon_frames(slot)
-var frame = if slot == 7 { if (w.tic / 4) % 2 == 0 { "C" } else { "D" } } else { "A" }
+var frame = if slot == 7 { if w.tic / 4 % 2 == 0 { "C" } else { "D" } } else { "A" }
 var flash = ""
 if w.firing >= 0 {
 let index = math.min(w.firing * length(frames) / combat.weapon_cooldown(slot), length(frames) - 1)

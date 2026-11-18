@@ -51,8 +51,8 @@ fn turn_sine(numerator: Int, denominator: Int) -> Int {
 if denominator <= 0 {
 fail("sine and cosine need a positive count, found \(denominator / 4)")
 }
-let turn = ((numerator % denominator) + denominator) % denominator
-let quadrant = (4 * turn) / denominator
+let turn = (numerator % denominator + denominator) % denominator
+let quadrant = 4 * turn / denominator
 let rest = 4 * turn - quadrant * denominator
 // The angle inside the quadrant, from 0 up to π/2, with 28 fraction bits.
 let x = pi_28() * rest / (2 * denominator)
@@ -72,7 +72,7 @@ var term = x
 var sum = x
 var k = 1
 while term != 0 {
-set term = -(term * square / shift_left((2 * k) * (2 * k + 1), 28))
+set term = -(term * square / shift_left(2 * k * (2 * k + 1), 28))
 set sum += term
 set k += 1
 }

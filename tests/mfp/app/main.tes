@@ -1,0 +1,16 @@
+// Fixture for the edit operations (compiler/tests/stage1.rs, `edit_operations_*`).
+
+import geometry/shapes
+
+// Prints the areas.
+fn main() -> Unit uses io {
+let items = [shapes.Shape.Circle(2), .Square(3)]
+// Sum them.
+var total = 0
+for s in items {
+set total += shapes.area(s)
+}
+print("total \(total)")
+let p = shapes.Point { x: 1, y: 2 }
+print(to_text(p.x))
+}

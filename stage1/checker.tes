@@ -67,6 +67,9 @@ uses_window_event: Bool
 prefix: Text
 imports: List[ast.Import]
 used_aliases: List[Text]
+effect_insert: source.Span
+has_effects: Bool
+first_line: Int
 }
 
 type Checked {
@@ -115,113 +118,7 @@ Builtin { name: name, params: params, return_type: return_type, effect: effect }
 }
 
 fn builtin_table() -> List[Builtin] {
-[
-builtin("print", [.Text], .Unit, "io"),
-builtin("print_error", [.Text], .Unit, "io"),
-builtin("range", [.Int, .Int], list_of(.Int), ""),
-builtin("code_points", [.Text], list_of(.Int), ""),
-builtin("from_code_point", [.Int], .Text, ""),
-builtin("from_code_points", [list_of(.Int)], .Text, ""),
-builtin("join", [list_of(.Text), .Text], .Text, ""),
-builtin("split", [.Text, .Text], list_of(.Text), ""),
-builtin("parse_int", [.Text], .Option(.Int), ""),
-builtin("to_lower", [.Text], .Text, ""),
-builtin("to_upper", [.Text], .Text, ""),
-builtin("trim", [.Text], .Text, ""),
-builtin("starts_with", [.Text, .Text], .Bool, ""),
-builtin("ends_with", [.Text, .Text], .Bool, ""),
-builtin("replace", [.Text, .Text, .Text], .Text, ""),
-builtin("slice_text", [.Text, .Int, .Int], .Text, ""),
-builtin("repeat", [.Text, .Int], .Text, ""),
-builtin("bit_and", [.Int, .Int], .Int, ""),
-builtin("bit_or", [.Int, .Int], .Int, ""),
-builtin("bit_xor", [.Int, .Int], .Int, ""),
-builtin("shift_left", [.Int, .Int], .Int, ""),
-builtin("shift_right", [.Int, .Int], .Int, ""),
-builtin("pad_left", [.Text, .Int, .Text], .Text, ""),
-builtin("pad_right", [.Text, .Int, .Text], .Text, ""),
-builtin("lines", [.Text], list_of(.Text), ""),
-builtin("read_line", [], .Option(.Text), "io"),
-builtin("read_input", [], .Text, "io"),
-builtin("read_text", [.Text], .Result(.Text, .Named("FileError")), "fs"),
-builtin("write_text", [.Text, .Text], .Result(.Unit, .Named("FileError")), "fs"),
-builtin("read_bytes", [.Text], .Result(.Bytes, .Named("FileError")), "fs"),
-builtin("write_bytes", [.Text, .Bytes], .Result(.Unit, .Named("FileError")), "fs"),
-builtin("list_directory", [.Text], .Result(list_of(.Text), .Named("FileError")), "fs"),
-builtin("create_directory", [.Text], .Result(.Unit, .Named("FileError")), "fs"),
-builtin("remove_file", [.Text], .Result(.Unit, .Named("FileError")), "fs"),
-builtin("log", [.Text, .Text], .Unit, "log"),
-builtin("to_bytes", [.Text], .Bytes, ""),
-builtin("from_bytes", [.Bytes], .Option(.Text), ""),
-builtin("bytes", [list_of(.Int)], .Bytes, ""),
-builtin("byte_values", [.Bytes], list_of(.Int), ""),
-builtin("decimal", [.Int], .Decimal, ""),
-builtin("parse_decimal", [.Text], .Option(.Decimal), ""),
-builtin("round", [.Decimal, .Int], .Decimal, ""),
-builtin("to_int", [.Decimal], .Int, ""),
-builtin("float", [.Int], .Float, ""),
-builtin("floor", [.Float], .Float, ""),
-builtin("ceil", [.Float], .Float, ""),
-builtin("sqrt", [.Float], .Float, ""),
-builtin("exp", [.Float], .Float, ""),
-builtin("ln", [.Float], .Float, ""),
-builtin("sin", [.Float], .Float, ""),
-builtin("cos", [.Float], .Float, ""),
-builtin("tan", [.Float], .Float, ""),
-builtin("atan2", [.Float, .Float], .Float, ""),
-builtin("pow", [.Float, .Float], .Float, ""),
-builtin("pi", [], .Float, ""),
-builtin("parse_float", [.Text], .Option(.Float), ""),
-builtin("now", [], .Int, "time"),
-builtin("monotonic", [], .Int, "time"),
-builtin("sleep", [.Int], .Unit, "time"),
-builtin("format_time", [.Int], .Text, ""),
-builtin("parse_time", [.Text], .Option(.Int), ""),
-builtin("http_date", [.Int], .Text, ""),
-builtin("random_int", [.Int, .Int], .Int, "random"),
-builtin("random_bytes", [.Int], .Bytes, "random"),
-builtin("sha256", [.Bytes], .Bytes, ""),
-builtin("hmac_sha256", [.Bytes, .Bytes], .Bytes, ""),
-builtin("base64_encode", [.Bytes], .Text, ""),
-builtin("base64_decode", [.Text], .Option(.Bytes), ""),
-builtin("hex_encode", [.Bytes], .Text, ""),
-builtin("hex_decode", [.Text], .Option(.Bytes), ""),
-builtin("equal_constant_time", [.Bytes, .Bytes], .Bool, ""),
-builtin("password_hash", [.Text], .Text, "random"),
-builtin("password_verify", [.Text, .Text], .Bool, ""),
-builtin("sha512", [.Bytes], .Bytes, ""),
-builtin("hmac_sha512", [.Bytes, .Bytes], .Bytes, ""),
-builtin("hkdf_sha256", [.Bytes, .Bytes, .Bytes, .Int], .Bytes, ""),
-builtin("aead_seal", [.Bytes, .Bytes, .Bytes, .Bytes], .Bytes, ""),
-builtin("aead_open", [.Bytes, .Bytes, .Bytes, .Bytes], .Option(.Bytes), ""),
-builtin("db_open", [.Text], .Result(.Database, .Text), "db"),
-builtin("db_query", [.Database, .Text, list_of(.Text)], .Result(list_of(.Map(.Text, .Text)), .Text), "db"),
-builtin("db_execute", [.Database, .Text, list_of(.Text)], .Result(.Int, .Text), "db"),
-builtin("net_request", [.Text, .Text, list_of(.Text), .Bytes], .Result(.Bytes, .Text), "net"),
-builtin("assert", [.Bool], .Unit, ""),
-builtin("read_file", [.Text], .Text, "fs"),
-builtin("write_file", [.Text, .Text], .Unit, "fs"),
-builtin("args", [], list_of(.Text), "env"),
-builtin("exit", [.Int], .Never, "env"),
-builtin("exit_with", [.Int, .Text], .Never, "env"),
-builtin("fail", [.Text], .Never, ""),
-builtin("file_exists", [.Text], .Bool, "fs"),
-builtin("environment_variable", [.Text], .Text, "env"),
-builtin("run_process", [.Text, list_of(.Text)], .Int, "process"),
-builtin("rgb", [.Int, .Int, .Int], .Int, ""),
-builtin("open_window", [.Text, .Int, .Int], .Unit, "ui"),
-builtin("fill_rectangle", [.Int, .Int, .Int, .Int, .Int], .Unit, "ui"),
-builtin("draw_line", [.Int, .Int, .Int, .Int, .Int, .Int], .Unit, "ui"),
-builtin("draw_circle", [.Int, .Int, .Int, .Int, .Int], .Unit, "ui"),
-builtin("fill_circle", [.Int, .Int, .Int, .Int], .Unit, "ui"),
-builtin("draw_text", [.Int, .Int, .Text, .Int], .Unit, "ui"),
-builtin("text_width", [.Text], .Int, "ui"),
-builtin("present", [], .Unit, "ui"),
-builtin("next_event", [], .Named("WindowEvent"), "ui"),
-builtin("poll_event", [], .Option(.Named("WindowEvent")), "ui"),
-builtin("play_sound", [.Bytes, .Int, .Int, .Int], .Unit, "audio"),
-builtin("draw_pixels", [.Int, .Int, .Int, list_of(.Int), .Int], .Unit, "ui"),
-]
+[builtin("print", [.Text], .Unit, "io"), builtin("print_error", [.Text], .Unit, "io"), builtin("range", [.Int, .Int], list_of(.Int), ""), builtin("code_points", [.Text], list_of(.Int), ""), builtin("from_code_point", [.Int], .Text, ""), builtin("from_code_points", [list_of(.Int)], .Text, ""), builtin("join", [list_of(.Text), .Text], .Text, ""), builtin("split", [.Text, .Text], list_of(.Text), ""), builtin("parse_int", [.Text], .Option(.Int), ""), builtin("to_lower", [.Text], .Text, ""), builtin("to_upper", [.Text], .Text, ""), builtin("trim", [.Text], .Text, ""), builtin("starts_with", [.Text, .Text], .Bool, ""), builtin("ends_with", [.Text, .Text], .Bool, ""), builtin("replace", [.Text, .Text, .Text], .Text, ""), builtin("slice_text", [.Text, .Int, .Int], .Text, ""), builtin("repeat", [.Text, .Int], .Text, ""), builtin("bit_and", [.Int, .Int], .Int, ""), builtin("bit_or", [.Int, .Int], .Int, ""), builtin("bit_xor", [.Int, .Int], .Int, ""), builtin("shift_left", [.Int, .Int], .Int, ""), builtin("shift_right", [.Int, .Int], .Int, ""), builtin("pad_left", [.Text, .Int, .Text], .Text, ""), builtin("pad_right", [.Text, .Int, .Text], .Text, ""), builtin("lines", [.Text], list_of(.Text), ""), builtin("read_line", [], .Option(.Text), "io"), builtin("read_input", [], .Text, "io"), builtin("read_text", [.Text], .Result(.Text, .Named("FileError")), "fs"), builtin("write_text", [.Text, .Text], .Result(.Unit, .Named("FileError")), "fs"), builtin("read_bytes", [.Text], .Result(.Bytes, .Named("FileError")), "fs"), builtin("write_bytes", [.Text, .Bytes], .Result(.Unit, .Named("FileError")), "fs"), builtin("list_directory", [.Text], .Result(list_of(.Text), .Named("FileError")), "fs"), builtin("create_directory", [.Text], .Result(.Unit, .Named("FileError")), "fs"), builtin("remove_file", [.Text], .Result(.Unit, .Named("FileError")), "fs"), builtin("log", [.Text, .Text], .Unit, "log"), builtin("to_bytes", [.Text], .Bytes, ""), builtin("from_bytes", [.Bytes], .Option(.Text), ""), builtin("bytes", [list_of(.Int)], .Bytes, ""), builtin("byte_values", [.Bytes], list_of(.Int), ""), builtin("decimal", [.Int], .Decimal, ""), builtin("parse_decimal", [.Text], .Option(.Decimal), ""), builtin("round", [.Decimal, .Int], .Decimal, ""), builtin("to_int", [.Decimal], .Int, ""), builtin("float", [.Int], .Float, ""), builtin("floor", [.Float], .Float, ""), builtin("ceil", [.Float], .Float, ""), builtin("sqrt", [.Float], .Float, ""), builtin("exp", [.Float], .Float, ""), builtin("ln", [.Float], .Float, ""), builtin("sin", [.Float], .Float, ""), builtin("cos", [.Float], .Float, ""), builtin("tan", [.Float], .Float, ""), builtin("atan2", [.Float, .Float], .Float, ""), builtin("pow", [.Float, .Float], .Float, ""), builtin("pi", [], .Float, ""), builtin("parse_float", [.Text], .Option(.Float), ""), builtin("now", [], .Int, "time"), builtin("monotonic", [], .Int, "time"), builtin("sleep", [.Int], .Unit, "time"), builtin("format_time", [.Int], .Text, ""), builtin("parse_time", [.Text], .Option(.Int), ""), builtin("http_date", [.Int], .Text, ""), builtin("random_int", [.Int, .Int], .Int, "random"), builtin("random_bytes", [.Int], .Bytes, "random"), builtin("sha256", [.Bytes], .Bytes, ""), builtin("hmac_sha256", [.Bytes, .Bytes], .Bytes, ""), builtin("base64_encode", [.Bytes], .Text, ""), builtin("base64_decode", [.Text], .Option(.Bytes), ""), builtin("hex_encode", [.Bytes], .Text, ""), builtin("hex_decode", [.Text], .Option(.Bytes), ""), builtin("equal_constant_time", [.Bytes, .Bytes], .Bool, ""), builtin("password_hash", [.Text], .Text, "random"), builtin("password_verify", [.Text, .Text], .Bool, ""), builtin("sha512", [.Bytes], .Bytes, ""), builtin("hmac_sha512", [.Bytes, .Bytes], .Bytes, ""), builtin("hkdf_sha256", [.Bytes, .Bytes, .Bytes, .Int], .Bytes, ""), builtin("aead_seal", [.Bytes, .Bytes, .Bytes, .Bytes], .Bytes, ""), builtin("aead_open", [.Bytes, .Bytes, .Bytes, .Bytes], .Option(.Bytes), ""), builtin("db_open", [.Text], .Result(.Database, .Text), "db"), builtin("db_query", [.Database, .Text, list_of(.Text)], .Result(list_of(.Map(.Text, .Text)), .Text), "db"), builtin("db_execute", [.Database, .Text, list_of(.Text)], .Result(.Int, .Text), "db"), builtin("net_request", [.Text, .Text, list_of(.Text), .Bytes], .Result(.Bytes, .Text), "net"), builtin("assert", [.Bool], .Unit, ""), builtin("read_file", [.Text], .Text, "fs"), builtin("write_file", [.Text, .Text], .Unit, "fs"), builtin("args", [], list_of(.Text), "env"), builtin("exit", [.Int], .Never, "env"), builtin("exit_with", [.Int, .Text], .Never, "env"), builtin("fail", [.Text], .Never, ""), builtin("file_exists", [.Text], .Bool, "fs"), builtin("environment_variable", [.Text], .Text, "env"), builtin("run_process", [.Text, list_of(.Text)], .Int, "process"), builtin("rgb", [.Int, .Int, .Int], .Int, ""), builtin("open_window", [.Text, .Int, .Int], .Unit, "ui"), builtin("fill_rectangle", [.Int, .Int, .Int, .Int, .Int], .Unit, "ui"), builtin("draw_line", [.Int, .Int, .Int, .Int, .Int, .Int], .Unit, "ui"), builtin("draw_circle", [.Int, .Int, .Int, .Int, .Int], .Unit, "ui"), builtin("fill_circle", [.Int, .Int, .Int, .Int], .Unit, "ui"), builtin("draw_text", [.Int, .Int, .Text, .Int], .Unit, "ui"), builtin("text_width", [.Text], .Int, "ui"), builtin("present", [], .Unit, "ui"), builtin("next_event", [], .Named("WindowEvent"), "ui"), builtin("poll_event", [], .Option(.Named("WindowEvent")), "ui"), builtin("play_sound", [.Bytes, .Int, .Int, .Int], .Unit, "audio"), builtin("draw_pixels", [.Int, .Int, .Int, list_of(.Int), .Int], .Unit, "ui")]
 }
 
 fn is_builtin_name(c: Checker, name: Text) -> Bool {
@@ -368,7 +265,7 @@ c with { uses_window_event: true }
 }
 
 fn enter_function(c: Checker, name: Text, return_type: ast.Type, effects: List[Text]) -> Checker {
-c with { locals: [], function_name: name, return_type: return_type, declared_effects: effects, used_effects: [], loop_depth: 0 }
+c with { locals: [], function_name: name, return_type: return_type, declared_effects: effects, used_effects: [], loop_depth: 0, effect_insert: source.span_of(-1, 0, 0, 0), has_effects: false }
 }
 
 fn checked(c: Checker, expr: ast.Expr, ty: ast.Type) -> Checked = Checked { checker: c, expr: expr with { ty: ty } }
@@ -397,7 +294,7 @@ while index >= 0 {
 if c.locals[index].name == name {
 return .Some(c.locals[index])
 }
-set index = index - 1
+set index -= 1
 }
 .None
 }
@@ -477,7 +374,7 @@ set index = index
 } else {
 set out = append(out, code)
 }
-set index = index + 1
+set index += 1
 }
 while length(out) > 0 and out[length(out) - 1] == 95 {
 set out = slice(out, 0, length(out) - 1)
@@ -534,7 +431,8 @@ fn pop_scope(start: Checker, mark: Int) -> Checker {
 var c = start
 for local in slice(c.locals, mark, length(c.locals)) {
 if local.mutable and not local.was_set {
-set c = report(c, source.error_help("E0206", local.span, "`\(local.name)` is declared with `var` but never changed", "use `let` for values that do not change"))
+let d = source.error_help("E0206", local.span, "`\(local.name)` is declared with `var` but never changed", "use `let` for values that do not change")
+set c = report(c, source.with_fix(d, "declare `\(local.name)` with `let`", [keyword_edit(local.span, "var", "let")]))
 }
 }
 c with { locals: slice(c.locals, 0, mark) }
@@ -547,7 +445,7 @@ let local = c.locals[index]
 if local.name == name {
 return c with { locals: replace_at(c.locals, index, local with { was_set: true }) }
 }
-set index = index - 1
+set index -= 1
 }
 c
 }
@@ -668,7 +566,7 @@ let hint = match name {
 _ => ""
 }
 let d = source.error("E0208", span, "unknown type `\(name)`")
-if hint == "" { d } else { d with { help: "did you mean `\(hint)`?" } }
+if hint == "" { d } else { suggest(d with { help: "did you mean `\(hint)`?" }, span, name, builtin_type_names(), if source.contains_text(builtin_type_names(), hint) { hint } else { "" }) }
 }
 
 fn resolve_fields(start: Checker, fields: List[ast.Field]) -> ResolvedFields {
@@ -689,17 +587,29 @@ ResolvedFields { checker: c, fields: out }
 
 // ---------- modules ----------
 
+note "The line of the first declaration of the module's first file (where a missing import goes when there is none yet), or 1."
+fn first_declaration_line(m: ast.Module) -> Int {
+if length(m.items) == 0 {
+return 1
+}
+match m.items[0] {
+.FunctionItem(f) => if length(f.notes) > 0 { f.notes[0].span.line } else { f.name_span.line }
+.RecordItem(r) => if length(r.notes) > 0 { r.notes[0].span.line } else { r.name_span.line }
+.EnumItem(e) => if length(e.notes) > 0 { e.notes[0].span.line } else { e.name_span.line }
+.ImportItem(i) => i.span.line
+.TestItem(_, span, _) => span.line
+}
+}
+
 fn enter_module(c: Checker, m: ast.Module) -> Checker {
-c with { locals: [], function_name: "", return_type: .Unit, declared_effects: [], used_effects: [], loop_depth: 0, prefix: m.prefix, imports: imports_of(m) }
+c with { locals: [], function_name: "", return_type: .Unit, declared_effects: [], used_effects: [], loop_depth: 0, prefix: m.prefix, imports: imports_of(m), first_line: first_declaration_line(m) }
 }
 
 pub fn imports_of(m: ast.Module) -> List[ast.Import] {
 var out: List[ast.Import] = []
 for item in m.items {
 match item {
-.ImportItem(import_decl) => {
-set out = append(out, import_decl)
-}
+.ImportItem(import_decl) => set out = append(out, import_decl)
 _ => {}
 }
 }
@@ -814,6 +724,11 @@ let failure = match qualified_name(c, alias, member, is_type) {
 match failure {
 .UnknownModule => {
 var d = source.error_help("E0606", span, "unknown module `\(alias)`", "add `import path/to/\(alias)` at the top of the file")
+if source.contains_text(standard_module_names(), "std/\(alias)") {
+let line = if length(c.imports) > 0 { c.imports[0].span.line } else { c.first_line }
+let separator = if length(c.imports) > 0 { "" } else { "\n" }
+set d = source.with_fix(d with { help: "add `import std/\(alias)` at the top of the file" }, "import `std/\(alias)`", [source.insert_at(span.file, line, 1, "import std/\(alias)\n\(separator)")])
+}
 if find_local(c, alias) != .None {
 set d = d with { help: "Tessera has no method calls; call the function with the value as first argument, e.g. `\(member)(\(alias), ...)`" }
 }
@@ -874,7 +789,7 @@ set c = report(c, source.error_help("E0602", i.span, "module path segment `\(seg
 }
 }
 if source.contains_text(paths, i.path) {
-set c = report(c, source.error("E0604", i.span, "module `\(i.path)` is imported twice"))
+set c = report(c, source.with_fix(source.error("E0604", i.span, "module `\(i.path)` is imported twice"), "remove the second import", [source.delete_lines(i.span.file, i.span.line, i.span.end_line)]))
 } else if source.contains_text(aliases, i.alias) {
 set c = report(c, source.error_help("E0604", i.span, "two imports are both named `\(i.alias)`", "each imported module is used through its last path segment; rename one of the modules"))
 }
@@ -886,9 +801,7 @@ set c = report(c, source.error_help("E0303", i.span, "unknown effect `\(effect)`
 }
 }
 }
-_ => {
-set seen_declaration = true
-}
+_ => set seen_declaration = true
 }
 }
 c
@@ -918,13 +831,11 @@ report(c, source.error_help("E0609", span, "public \(what) `\(name)` exposes pri
 note "`tests` is true for `tessera1 test`, where the program needs no `main` or `handle`."
 pub fn check_program(modules: List[ast.Module], tests: Bool) -> CheckedProgram {
 let nowhere = source.span_of(0, 1, 1, 2)
-var c = Checker { type_defs: [window_event_type(nowhere), file_error_type(nowhere)], functions: [], builtins: builtin_table(), locals: [], diagnostics: [], function_name: "", return_type: .Unit, declared_effects: [], used_effects: [], loop_depth: 0, uses_window_event: false, prefix: "", imports: [], used_aliases: [] }
-
+var c = Checker { type_defs: [window_event_type(nowhere), file_error_type(nowhere)], functions: [], builtins: builtin_table(), locals: [], diagnostics: [], function_name: "", return_type: .Unit, declared_effects: [], used_effects: [], loop_depth: 0, uses_window_event: false, prefix: "", imports: [], used_aliases: [], effect_insert: nowhere, has_effects: false, first_line: 1 }
 // 0. Imports.
 for m in modules {
 set c = check_imports(enter_module(c, m), m)
 }
-
 // 1. Type names, so that field types can refer to any declared type.
 for m in modules {
 set c = enter_module(c, m)
@@ -950,7 +861,6 @@ continue
 set c = c with { type_defs: append(c.type_defs, decl with { name: canonical }) }
 }
 }
-
 // 2. Type bodies.
 for m in modules {
 set c = enter_module(c, m)
@@ -990,7 +900,6 @@ _ => {}
 }
 }
 }
-
 // 3. Function signatures.
 for m in modules {
 set c = enter_module(c, m)
@@ -1025,7 +934,7 @@ set c = ret.checker
 var effects: List[Text] = []
 for effect in f.effects {
 if not source.contains_text(effect_names(), effect.name) {
-set c = report(c, source.error_help("E0303", effect.span, "unknown effect `\(effect.name)`", "known effects are: \(join(effect_names(), ", "))"))
+set c = report(c, suggest(source.error_help("E0303", effect.span, "unknown effect `\(effect.name)`", "known effects are: \(join(effect_names(), ", "))"), effect.span, effect.name, effect_names(), ""))
 } else if source.contains_text(effects, effect.name) {
 set c = report(c, source.error("E0304", effect.span, "effect `\(effect.name)` is listed twice"))
 } else {
@@ -1038,7 +947,6 @@ _ => {}
 }
 }
 }
-
 // 3b. What public declarations reveal, and what imports allow.
 for m in modules {
 if m.is_entry {
@@ -1085,7 +993,6 @@ set c = report(c, d)
 }
 }
 }
-
 // 4. main, in the entry module.
 var main_found = false
 var handle_function: Option[ast.Function] = .None
@@ -1116,12 +1023,9 @@ match handle_function {
 set entry = "handle"
 set c = check_handler(c, f)
 }
-.None => {
-set c = report(c, source.error_help("E0212", nowhere, "the program has no `main` function", "add `fn main() -> Unit uses io { ... }`, or `fn handle(request: http.Request) -> http.Response` for a web application"))
+.None => set c = report(c, source.error_help("E0212", nowhere, "the program has no `main` function", "add `fn main() -> Unit uses io { ... }`, or `fn handle(request: http.Request) -> http.Response` for a web application"))
 }
 }
-}
-
 // 5. Bodies.
 var typed: List[ast.Item] = []
 var uses_ui = false
@@ -1150,12 +1054,8 @@ let typed_function = f with { name: canonical, params: params, return_type: cano
 set typed = append(typed, .FunctionItem(typed_function))
 }
 }
-.RecordItem(r) => {
-set typed = append(typed, .RecordItem(r with { name: m.prefix + r.name }))
-}
-.EnumItem(e) => {
-set typed = append(typed, .EnumItem(e with { name: m.prefix + e.name }))
-}
+.RecordItem(r) => set typed = append(typed, .RecordItem(r with { name: m.prefix + r.name }))
+.EnumItem(e) => set typed = append(typed, .EnumItem(e with { name: m.prefix + e.name }))
 .ImportItem(_) => {}
 .TestItem(name, span, body) => {
 let result = check_test(c, name, span, body)
@@ -1167,12 +1067,11 @@ set typed = append(typed, .TestItem(name, span, result.expr))
 }
 }
 }
-
 // 6. Unused imports.
 for m in modules {
 for i in imports_of(m) {
 if not source.contains_text(c.used_aliases, "\(m.prefix)|\(i.alias)") {
-set c = report(c, source.error_help("E0610", i.span, "module `\(i.path)` is imported but never used", "remove the import"))
+set c = report(c, source.with_fix(source.error_help("E0610", i.span, "module `\(i.path)` is imported but never used", "remove the import"), "remove the import", [source.delete_lines(i.span.file, i.span.line, i.span.end_line)]))
 }
 }
 }
@@ -1190,7 +1089,9 @@ Signature { name: "", params: [], return_type: .Unknown, effects: [], span: sour
 }
 
 fn check_function(start: Checker, f: ast.Function, signature: Signature) -> Checked {
-var c = enter_function(start, f.name, signature.return_type, signature.effects)
+let effect_count = length(f.effects)
+let insert_after = if effect_count > 0 { f.effects[effect_count - 1].span } else { f.return_type.span }
+var c = enter_function(start, f.name, signature.return_type, signature.effects) with { effect_insert: source.end_of(insert_after), has_effects: effect_count > 0 }
 for index in range(0, length(f.params)) {
 let p = f.params[index]
 set c = declare(c, p.name, p.span, signature.params[index], false, "parameter")
@@ -1206,7 +1107,15 @@ let span = match f.body.kind {
 }
 _ => f.body.span
 }
-let d = source.error("E0501", span, "function `\(f.name)` must return `\(ast.type_text(signature.return_type))`, but its body produces `\(ast.type_text(body_type))`")
+let result_expr = match f.body.kind {
+.BlockExpr(block) => block.tail
+_ => Option.Some(f.body)
+}
+let plain = source.error("E0501", span, "function `\(f.name)` must return `\(ast.type_text(signature.return_type))`, but its body produces `\(ast.type_text(body_type))`")
+let d = match result_expr {
+.Some(value) => conversion(plain, value, body_type, signature.return_type)
+.None => source.with_types(plain, ast.type_text(signature.return_type), ast.type_text(body_type))
+}
 set c = report(c, d with { label: "this is `\(ast.type_text(body_type))`" })
 }
 set c = pop_scope(c, 0)
@@ -1214,7 +1123,7 @@ if f.name != "main" {
 for effect in f.effects {
 if source.contains_text(signature.effects, effect.name) and not source.contains_text(c.used_effects, effect.name) {
 let d = source.error_help("E0302", effect.span, "function `\(f.name)` declares effect `\(effect.name)` but never uses it", "remove `\(effect.name)` from the `uses` list so the signature does not overstate what the function can do")
-set c = report(c, d)
+set c = report(c, source.with_fix(d, "remove `\(effect.name)` from the signature", [remove_effect_edit(f, effect)]))
 }
 }
 }
@@ -1263,7 +1172,7 @@ if fits(actual, expected) {
 return result
 }
 let d = source.error("E0501", e.span, "expected `\(ast.type_text(expected))`, found `\(ast.type_text(actual))`")
-Checked { checker: report(result.checker, d with { label: "this is `\(ast.type_text(actual))`" }), expr: result.expr }
+Checked { checker: report(result.checker, conversion(d with { label: "this is `\(ast.type_text(actual))`" }, e, actual, expected)), expr: result.expr }
 }
 
 fn check_all(start: Checker, exprs: List[ast.Expr]) -> CheckedArgs {
@@ -1297,7 +1206,7 @@ match builtin_function_type(c, name, expected) {
 .Some(ty) => return checked(c, e with { kind: .FunctionRef("#" + name) }, ty)
 .None => {}
 }
-var d = source.error("E0202", e.span, "unknown name `\(name)`")
+var d = suggest(source.error("E0202", e.span, "unknown name `\(name)`"), e.span, name, local_names(c), "")
 if is_builtin_name(c, name) {
 set d = d with { help: "`\(name)` is a function; call it with `\(name)(...)`, or use it as a value where its type is known" }
 }
@@ -1368,7 +1277,7 @@ let typed = e with { kind: .Return(.Some(result.expr)) }
 if fits(result.expr.ty, ret) {
 return checked(result.checker, typed, .Never)
 }
-let d = source.error("E0501", v.span, "function `\(c.function_name)` returns `\(ast.type_text(ret))`, but this is `\(ast.type_text(result.expr.ty))`")
+let d = conversion(source.error("E0501", v.span, "function `\(c.function_name)` returns `\(ast.type_text(ret))`, but this is `\(ast.type_text(result.expr.ty))`"), v, result.expr.ty, ret)
 checked(report(result.checker, d), typed, .Never)
 }
 .None => {
@@ -1454,16 +1363,10 @@ let value_result = check_expr(c, value, hint)
 var after = value_result.checker
 var inner = ast.Type.Unknown
 match value_result.expr.ty {
-.Option(element) => {
-set inner = element
-}
-.Result(ok, _) => {
-set inner = ok
-}
+.Option(element) => set inner = element
+.Result(ok, _) => set inner = ok
 .Unknown => {}
-_ => {
-set after = report(after, source.error_help("E0501", value.span, "`let ... else` needs an `Option` or a `Result`, found `\(ast.type_text(value_result.expr.ty))`", "`else` gives the alternative when there is no value; use a normal `let` here"))
-}
+_ => set after = report(after, source.error_help("E0501", value.span, "`let ... else` needs an `Option` or a `Result`, found `\(ast.type_text(value_result.expr.ty))`", "`else` gives the alternative when there is no value; use a normal `let` here"))
 }
 let otherwise_result = check_expr(after, otherwise, .Unknown)
 set after = otherwise_result.checker
@@ -1511,9 +1414,7 @@ let result = check_expr(c, item, element)
 set c = result.checker
 set typed = append(typed, result.expr)
 match join_types(element, result.expr.ty) {
-.Some(joined) => {
-set element = joined
-}
+.Some(joined) => set element = joined
 .None => {
 let found = ast.type_text(result.expr.ty)
 let d = source.error("E0501", item.span, "list elements must all have the same type: expected `\(ast.type_text(element))`, found `\(found)`")
@@ -1538,7 +1439,7 @@ match field_type_of(fields, name) {
 .Some(field_type) => return checked(after, typed, field_type)
 .None => {}
 }
-let d = source.error_help("E0209", name_span, "type `\(type_name)` has no field `\(name)`", "available fields: \(quoted_names(field_names(fields)))")
+let d = suggest(source.error_help("E0209", name_span, "type `\(type_name)` has no field `\(name)`", "available fields: \(quoted_names(field_names(fields)))"), name_span, name, field_names(fields), "")
 return checked(report(after, d), typed, .Unknown)
 }
 let d = source.error_help("E0512", name_span, "`\(type_name)` is an enum; it has no fields", "use `match` to read the values inside an enum")
@@ -1695,13 +1596,14 @@ CheckedStatement { checker: after, statement: .Let(name, name_span, declared, ty
 let target = match find_local(c, name) {
 .Some(local) => local
 .None => {
-let unknown = check_expr(report(c, source.error("E0202", name_span, "unknown name `\(name)`")), value, .Unknown)
+let unknown = check_expr(report(c, suggest(source.error("E0202", name_span, "unknown name `\(name)`"), name_span, name, local_names(c), "")), value, .Unknown)
 return CheckedStatement { checker: unknown.checker, statement: .Set(name, name_span, unknown.expr) }
 }
 }
 var after = c
 if not target.mutable {
-set after = report(after, source.error_help("E0205", name_span, "`\(name)` cannot be changed", "declare it with `var` instead of `let` (line \(target.span.line)); parameters can never be changed"))
+let d = source.error_help("E0205", name_span, "`\(name)` cannot be changed", "declare it with `var` instead of `let` (line \(target.span.line)); parameters can never be changed")
+set after = report(after, if target.kind == "variable" { source.with_fix(d, "declare `\(name)` with `var`", [keyword_edit(target.span, "let", "var")]) } else { d })
 } else {
 set after = mark_set(after, name)
 }
@@ -1716,7 +1618,8 @@ match root.kind {
 .Some(local) => {
 if not local.mutable {
 let help = if local.kind == "variable" { "declare it with `var` instead of `let` (line \(local.span.line))" } else { "`\(name)` is a \(local.kind); copy it with `var changed = \(name)` and change the copy" }
-set after = report(after, source.error_help("E0205", root.span, "`\(name)` cannot be changed, also not in part", help))
+let d = source.error_help("E0205", root.span, "`\(name)` cannot be changed, also not in part", help)
+set after = report(after, if local.kind == "variable" { source.with_fix(d, "declare `\(name)` with `var`", [keyword_edit(local.span, "let", "var")]) } else { d })
 } else {
 set after = mark_set(after, name)
 }
@@ -1735,9 +1638,7 @@ let iterable_result = check_expr(c, iterable, .Unknown)
 var after = iterable_result.checker
 var element = ast.Type.Unknown
 match iterable_result.expr.ty {
-.List(item_type) => {
-set element = item_type
-}
+.List(item_type) => set element = item_type
 .Unknown => {}
 _ => {
 let found = iterable_result.expr.ty
@@ -1772,7 +1673,7 @@ let result = check_expr(c, expr, .Unknown)
 if is_unit_like(result.expr.ty) {
 return CheckedStatement { checker: result.checker, statement: .ExprStatement(result.expr) }
 }
-let d = source.error_help("E0508", expr.span, "the value of this expression (`\(ast.type_text(result.expr.ty))`) is not used", "use the value, or write `let _ = ...` to discard it explicitly")
+let d = source.with_fix(source.error_help("E0508", expr.span, "the value of this expression (`\(ast.type_text(result.expr.ty))`) is not used", "use the value, or write `let _ = ...` to discard it explicitly"), "discard the value with `let _ = ...`", [source.replace_span(source.start_of(expr.span), "let _ = ")])
 CheckedStatement { checker: report(result.checker, d), statement: .ExprStatement(result.expr) }
 }
 }
@@ -1869,7 +1770,7 @@ set seen_point = true
 } else {
 set mantissa += [code]
 if not seen_point {
-set integer_digits = integer_digits + 1
+set integer_digits += 1
 }
 }
 }
@@ -1943,8 +1844,14 @@ _ => false
 }
 if mixed {
 set d = d with { help: "convert the number with `to_text(...)`; Tessera has no implicit conversions" }
+let number = if left_type == .Int { left } else { right }
+set d = wrap_fix(d, number.span, "to_text(", ")", "convert the number with `to_text(...)`")
 } else if decimal_and_float(left_type, right_type) {
 set d = d with { help: float_hint() }
+} else if (left_type == .Int and (right_type == .Float or right_type == .Decimal)) or (right_type == .Int and (left_type == .Float or left_type == .Decimal)) {
+let number = if left_type == .Int { left } else { right }
+let wanted = if left_type == .Int { right_type } else { left_type }
+set d = conversion(d, number, ast.Type.Int, wanted)
 } else if left_is_list {
 set d = d with { help: "`+` joins two lists of the same type; to add one item write `list + [item]`" }
 }
@@ -1974,12 +1881,12 @@ if operand_type == .Float and op == .Remainder {
 set after = report(after, source.error_help("E0503", op_span, "`%` works on `Int` only", "for a `Float`, use `x - floor(x / y) * y`"))
 }
 if not fits(left_result.expr.ty, operand_type) {
-set after = report(after, operand_error(op, is_order, left.span, left_result.expr.ty, operand_type))
+set after = report(after, conversion(operand_error(op, is_order, left.span, left_result.expr.ty, operand_type), left, left_result.expr.ty, operand_type))
 }
 let right_result = check_expr(after, right, operand_type)
 set after = right_result.checker
 if not fits(right_result.expr.ty, operand_type) {
-set after = report(after, operand_error(op, is_order, right.span, right_result.expr.ty, operand_type))
+set after = report(after, conversion(operand_error(op, is_order, right.span, right_result.expr.ty, operand_type), right, right_result.expr.ty, operand_type))
 }
 checked(after, e with { kind: .Binary(op, op_span, left_result.expr, right_result.expr) }, result_type)
 }
@@ -2023,11 +1930,7 @@ let start = lookup.checker
 let canonical = resolved_name(lookup)
 let index = type_index(start, canonical)
 if index < 0 or start.type_defs[index].is_enum {
-let d = if index < 0 {
-source.error("E0208", type_span, "unknown type `\(type_name)`")
-} else {
-source.error_help("E0511", type_span, "`\(type_name)` is an enum, not a record", "build an enum value with `\(type_name).Variant(...)`")
-}
+let d = if index < 0 { source.error("E0208", type_span, "unknown type `\(type_name)`") } else { source.error_help("E0511", type_span, "`\(type_name)` is an enum, not a record", "build an enum value with `\(type_name).Variant(...)`") }
 var after = if already_reported(lookup) and index < 0 { start } else { report(start, d) }
 var typed_inits: List[ast.FieldInit] = []
 for init in inits {
@@ -2163,7 +2066,8 @@ checked(report(after, d), typed, element)
 }
 .Unknown => checked(after, typed, .Unknown)
 _ => {
-let d = source.error_help("E0515", operand.span, "`try` needs a `Result` or an `Option`, found `\(ast.type_text(result.expr.ty))`", "remove `try`; it only unwraps results and options")
+let try_span = source.span_of(e.span.file, e.span.line, e.span.col, e.span.col + 4)
+let d = source.with_fix(source.error_help("E0515", operand.span, "`try` needs a `Result` or an `Option`, found `\(ast.type_text(result.expr.ty))`", "remove `try`; it only unwraps results and options"), "remove `try`", [source.replace_expected(try_span, "try ", "")])
 checked(report(after, d), typed, .Unknown)
 }
 }
@@ -2254,7 +2158,7 @@ return checked(report(c, d), e, .Unknown)
 let fields = match find_variant(def.variants, variant) {
 .Some(found) => found.fields
 .None => {
-let d = source.error_help("E0209", variant_span, "enum `\(type_name)` has no variant `\(variant)`", "available variants: \(quoted_names(variant_names(def.variants)))")
+let d = suggest(source.error_help("E0209", variant_span, "enum `\(type_name)` has no variant `\(variant)`", "available variants: \(quoted_names(variant_names(def.variants)))"), variant_span, variant, variant_names(def.variants), "")
 let all = check_all(report(c, d), args)
 return checked(all.checker, e with { kind: .VariantLiteral(type_name, variant, variant_span, all.args) }, .Unknown)
 }
@@ -2326,9 +2230,7 @@ set c = report(c, source.error_help("E0510", pattern_span, "this arm can never m
 let mark = length(c.locals)
 var typed_pattern = arm.pattern
 match arm.pattern.kind {
-.Wildcard => {
-set has_wildcard = true
-}
+.Wildcard => set has_wildcard = true
 .IntPattern(value) => {
 set c = pattern_type(c, st, .Int, pattern_span)
 let key = "i\(value)"
@@ -2395,7 +2297,7 @@ let b = bindings[position]
 if b.name != "_" {
 set c = declare(c, b.name, b.span, fields[position].ty, false, "binding")
 }
-set position = position + 1
+set position += 1
 }
 } else {
 for b in bindings {
@@ -2415,9 +2317,7 @@ set c = pop_scope(body.checker, mark)
 set typed_arms = append(typed_arms, ast.Arm { pattern: typed_pattern, body: body.expr })
 let body_type = body.expr.ty
 match result {
-.None => {
-set result = .Some(body_type)
-}
+.None => set result = .Some(body_type)
 .Some(previous) => {
 set result = join_types(previous, body_type)
 if result == .None {
@@ -2487,11 +2387,13 @@ return c
 return c with { used_effects: append(c.used_effects, effect) }
 }
 let d = source.error_help("E0301", span, "`\(callee)` uses effect `\(effect)`, but `\(c.function_name)` does not declare it", "add `uses \(effect)` to the signature of `\(c.function_name)`, or move the call to a function that already uses `\(effect)`")
-report(c, d with { label: "this call needs `\(effect)`" })
+let addition = if c.has_effects { ", \(effect)" } else { " uses \(effect)" }
+let fixed = source.with_fix(d with { label: "this call needs `\(effect)`" }, "declare `\(effect)` on `\(c.function_name)`", [source.replace_span(c.effect_insert, addition)])
+report(c, fixed)
 }
 
 fn arity_error(c: Checker, name: Text, args: List[ast.Expr], count: Int, span: source.Span) -> CheckedArgs {
-let d = source.error("E0502", span, "`\(name)` takes \(count) argument(s), but \(length(args)) were given")
+let d = source.with_types(source.error("E0502", span, "`\(name)` takes \(count) argument(s), but \(length(args)) were given"), "\(count) argument(s)", "\(length(args)) argument(s)")
 check_all(report(c, d), args)
 }
 
@@ -2602,14 +2504,10 @@ let option = check_expr(c, args[0], if expected == .Unknown { .Unknown } else { 
 var after = option.checker
 var element = ast.Type.Unknown
 match option.expr.ty {
-.Option(inner) => {
-set element = inner
-}
+.Option(inner) => set element = inner
 .Unknown => {}
 .Never => {}
-_ => {
-set after = report(after, source.error("E0501", args[0].span, "`value_or` needs an `Option`, found `\(ast.type_text(option.expr.ty))`"))
-}
+_ => set after = report(after, source.error("E0501", args[0].span, "`value_or` needs an `Option`, found `\(ast.type_text(option.expr.ty))`"))
 }
 let fallback = expect_expr(after, args[1], element)
 let result_type = if element == ast.Type.Unknown { fallback.expr.ty } else { element }
@@ -2735,9 +2633,7 @@ set after = report(after, source.error("E0501", args[1].span, "`\(name)` needs a
 set result = returned
 }
 .Unknown => {}
-_ => {
-set after = report(after, source.error_help("E0501", args[1].span, "`\(name)` needs a function, found `\(ast.type_text(function.expr.ty))`", "pass the name of a function, e.g. `\(name)(items, to_text)`"))
-}
+_ => set after = report(after, source.error_help("E0501", args[1].span, "`\(name)` needs a function, found `\(ast.type_text(function.expr.ty))`", "pass the name of a function, e.g. `\(name)(items, to_text)`"))
 }
 if name == "filter" and not (result == .Bool or result == .Unknown) {
 set after = report(after, source.error("E0501", args[1].span, "`filter` needs a function that returns `Bool`, found one returning `\(ast.type_text(result))`"))
@@ -2818,7 +2714,7 @@ let typed = expect_args(c, args, b.params)
 return call_result(typed.checker, e, name, name_span, typed.args, b.return_type)
 }
 }
-let lookup = lookup_function(start, name, name_span)
+let lookup = method_call_fix(start, lookup_function(start, name, name_span), name, name_span, args)
 let canonical = resolved_name(lookup)
 let sig = match find_signature(lookup.checker, canonical) {
 .Some(found) => found
@@ -2827,7 +2723,7 @@ if already_reported(lookup) {
 let quiet = check_all(lookup.checker, args)
 return call_result(quiet.checker, e, name, name_span, quiet.args, .Unknown)
 }
-var d = source.error("E0203", name_span, "unknown function `\(name)`")
+var d = suggest(source.error("E0203", name_span, "unknown function `\(name)`"), name_span, name, callable_names(start), common_function_name(name))
 let hint = hint_for_function(start, name)
 if find_local(start, name) != .None {
 set d = d with { help: "`\(name)` is a value, not a function" }
@@ -2849,3 +2745,218 @@ return call_result(all.checker, e, name, name_span, all.args, sig.return_type)
 let typed = expect_args(c, args, sig.params)
 call_result(typed.checker, e, canonical, name_span, typed.args, sig.return_type)
 }
+
+// ---------- fixes (spec section 20.4) ----------
+
+fn name_only(span: source.Span, name: Text) -> source.Span = source.Span { file: span.file, line: span.line, col: span.col, end_line: span.line, end_col: span.col + length(code_points(name)) }
+
+note "`let` and `var` stand right before the name in the canonical form; the edit checks that the keyword is really there."
+fn keyword_edit(name_span: source.Span, old: Text, new: Text) -> source.TextEdit {
+source.replace_expected(source.span_of(name_span.file, name_span.line, name_span.col - 4, name_span.col - 1), old, new)
+}
+
+fn wrap_fix(d: source.Diagnostic, span: source.Span, before: Text, after: Text, message: Text) -> source.Diagnostic {
+source.with_fix(d, message, [source.replace_span(source.start_of(span), before), source.replace_span(source.end_of(span), after)])
+}
+
+note "Removes one effect from a `uses` list, with its separator (or the whole `uses` when it is the only one)."
+fn remove_effect_edit(f: ast.Function, effect: ast.EffectName) -> source.TextEdit {
+let count = length(f.effects)
+var position = 0
+for i in range(0, count) {
+if f.effects[i].span == effect.span {
+set position = i
+}
+}
+let s = effect.span
+if count == 1 {
+let r = f.return_type.span
+return source.replace_span(source.Span { file: s.file, line: r.end_line, col: r.end_col, end_line: s.end_line, end_col: s.end_col }, "")
+}
+if position == 0 {
+let next = f.effects[1].span
+return source.replace_span(source.Span { file: s.file, line: s.line, col: s.col, end_line: next.line, end_col: next.col }, "")
+}
+let previous = f.effects[position - 1].span
+source.replace_span(source.Span { file: s.file, line: previous.end_line, col: previous.end_col, end_line: s.end_line, end_col: s.end_col }, "")
+}
+
+note "The obvious conversion when a value has the wrong type: `float(...)` or `decimal(...)` for an `Int` (`.0` after a literal), `to_text(...)` where `Text` is wanted, `.Some(...)` or `.Ok(...)` where an `Option` or `Result` of the value's type is wanted. Also records the expected and actual types."
+fn conversion(d: source.Diagnostic, e: ast.Expr, actual: ast.Type, expected: ast.Type) -> source.Diagnostic {
+let typed = source.with_types(d, ast.type_text(expected), ast.type_text(actual))
+if actual == .Unknown or expected == .Unknown {
+return typed
+}
+let literal = match e.kind {
+.IntLiteral(_) => true
+_ => false
+}
+if actual == .Int and (expected == .Float or expected == .Decimal) {
+if literal {
+return source.with_fix(typed, "write the number with a decimal point", [source.replace_span(source.end_of(e.span), ".0")])
+}
+let name = if expected == .Float { "float" } else { "decimal" }
+return wrap_fix(typed, e.span, "\(name)(", ")", "convert with `\(name)(...)`")
+}
+if expected == .Text and (actual == .Int or actual == .Bool or actual == .Decimal or actual == .Float) {
+return wrap_fix(typed, e.span, "to_text(", ")", "convert with `to_text(...)`")
+}
+match expected {
+.Option(inner) => if fits(actual, inner) {
+return wrap_fix(typed, e.span, ".Some(", ")", "wrap the value in `.Some(...)`")
+}
+.Result(value, _) => if fits(actual, value) {
+return wrap_fix(typed, e.span, ".Ok(", ")", "wrap the value in `.Ok(...)`")
+}
+_ => {}
+}
+typed
+}
+
+fn local_names(c: Checker) -> List[Text] {
+var out: List[Text] = []
+for local in c.locals {
+set out = append(out, local.name)
+}
+for f in c.functions {
+if f.prefix == c.prefix {
+set out = append(out, slice_name(f.name, f.prefix))
+}
+}
+out
+}
+
+fn callable_names(c: Checker) -> List[Text] {
+var out = generic_builtin_names()
+for b in c.builtins {
+set out = append(out, b.name)
+}
+for f in c.functions {
+if f.prefix == c.prefix {
+set out = append(out, slice_name(f.name, f.prefix))
+}
+}
+out
+}
+
+note "Names other languages use for a Tessera built-in."
+fn common_function_name(name: Text) -> Text {
+match name {
+"len" => "length"
+"size" => "length"
+"count" => "length"
+"str" => "to_text"
+"string" => "to_text"
+"to_string" => "to_text"
+"tostring" => "to_text"
+"push" => "append"
+"println" => "print"
+"print_line" => "print"
+"printf" => "print"
+"puts" => "print"
+"echo" => "print"
+"eprintln" => "print_error"
+"int" => "parse_int"
+"atoi" => "parse_int"
+"parse" => "parse_int"
+"lower" => "to_lower"
+"lowercase" => "to_lower"
+"upper" => "to_upper"
+"uppercase" => "to_upper"
+"strip" => "trim"
+"substring" => "slice_text"
+"substr" => "slice_text"
+"startswith" => "starts_with"
+"endswith" => "ends_with"
+"find" => "index_of"
+"includes" => "contains"
+"has" => "contains"
+"sorted" => "sort"
+_ => ""
+}
+}
+
+note "Levenshtein distance over code points."
+fn edit_distance(a: Text, b: Text) -> Int {
+let x = code_points(a)
+let y = code_points(b)
+var previous = range(0, length(y) + 1)
+for i in range(1, length(x) + 1) {
+var row = [i]
+for j in range(1, length(y) + 1) {
+let cost = if x[i - 1] == y[j - 1] { 0 } else { 1 }
+let deletion = previous[j] + 1
+let insertion = row[j - 1] + 1
+let substitution = previous[j - 1] + cost
+var best = deletion
+if insertion < best {
+set best = insertion
+}
+if substitution < best {
+set best = substitution
+}
+set row = append(row, best)
+}
+set previous = row
+}
+previous[length(y)]
+}
+
+note "The one candidate closest to `name` (one edit for short names, two for longer ones), or empty when there is none or a tie."
+fn closest(name: Text, candidates: List[Text]) -> Text {
+let limit = if length(code_points(name)) <= 4 { 1 } else { 2 }
+var best = ""
+var best_distance = limit + 1
+var tie = false
+for candidate in candidates {
+if candidate == name or candidate == best {
+continue
+}
+let distance = edit_distance(name, candidate)
+if distance < best_distance {
+set best = candidate
+set best_distance = distance
+set tie = false
+} else if distance == best_distance {
+set tie = true
+}
+}
+if tie { "" } else { best }
+}
+
+note "Adds a did-you-mean fix: `preferred` when it is given, else the closest candidate."
+fn suggest(d: source.Diagnostic, span: source.Span, name: Text, candidates: List[Text], preferred: Text) -> source.Diagnostic {
+let choice = if preferred != "" { preferred } else { closest(name, candidates) }
+if choice == "" {
+return d
+}
+let fixed = source.with_fix(d, "did you mean `\(choice)`?", [source.replace_expected(name_only(span, name), name, choice)])
+if fixed.help == "" { fixed with { help: "did you mean `\(choice)`?" } } else { fixed }
+}
+
+note "`xs.length()` reads as a call into a module `xs`. When `xs` is a local value, the fix is the function call `length(xs)`."
+fn method_call_fix(c: Checker, lookup: NameLookup, name: Text, name_span: source.Span, args: List[ast.Expr]) -> NameLookup {
+let parts = source.split_on(name, 46)
+let count = length(lookup.checker.diagnostics)
+if length(parts) != 2 or find_local(c, parts[0]) == .None or count == 0 {
+return lookup
+}
+let last = lookup.checker.diagnostics[count - 1]
+if last.code != "E0606" {
+return lookup
+}
+let paren = source.span_of(name_span.file, name_span.end_line, name_span.end_col, name_span.end_col + 1)
+let receiver = if length(args) == 0 { parts[0] } else { "\(parts[0]), " }
+let member = common_or_same(parts[1])
+let edits = [source.replace_expected(name_span, name, member), source.replace_expected(paren, "(", "(\(receiver)")]
+let fixed = source.with_fix(last, "call `\(member)` with `\(parts[0])` as first argument", edits)
+lookup with { checker: lookup.checker with { diagnostics: replace_at(lookup.checker.diagnostics, count - 1, fixed) } }
+}
+
+fn common_or_same(name: Text) -> Text {
+let common = common_function_name(name)
+if common == "" { name } else { common }
+}
+
+note "Every standard module, for the help of E0601 and the import fix of E0606. Keep it in step with `standard_module` in main.tes; compiler/tests/stage1.rs checks that the help names every file in std/."
+pub fn standard_module_names() -> List[Text] = ["std/bytes", "std/config", "std/crypto", "std/fixed", "std/html", "std/http", "std/json", "std/keys", "std/logging", "std/math", "std/palette", "std/plane", "std/ppm", "std/raster", "std/rng", "std/sound", "std/url"]

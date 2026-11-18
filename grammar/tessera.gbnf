@@ -1,0 +1,69 @@
+# Tessera canonical text (spec sections 14 and 20.3), in GBNF for grammar-constrained decoding.
+# It accepts the canonical form that `tessera1 format` writes: no indentation, single spaces,
+# one statement per line. A decoder that follows it cannot produce a syntax error the
+# canonical printer would not; type and effect errors are still the compiler's to find.
+# Exported by `tessera1 grammar --format gbnf`; harness/tools/check_grammar.py checks it
+# against every canonical file in the repository.
+
+root ::= gap* (item gap*)*
+gap ::= "\n" | comment "\n"
+comment ::= "//" [^\n]*
+
+item ::= notes? declaration | import | test
+notes ::= ("note " text "\n")+
+declaration ::= ("pub ")? (function | record | enum)
+import ::= "import " modpath (" uses " ("nothing" | name (", " name)*))? "\n"
+modpath ::= name ("/" name)*
+test ::= "test " text " " block "\n"
+
+function ::= "fn " name "(" (param (", " param)*)? ") -> " type (" uses " name (", " name)*)? (" = " expr | " " block) "\n"
+param ::= name ": " type
+record ::= "type " upper " {" ("}" | "\n" (field "\n" | comment "\n")* "}") "\n"
+field ::= name ": " type
+enum ::= "enum " upper " {\n" (variant "\n" | comment "\n")* "}\n"
+variant ::= upper ("(" field (", " field)* ")")?
+
+type ::= typename ("[" type (", " type)* "]")? | "fn(" (type (", " type)*)? ") -> " type (" uses " name (", " name)*)?
+typename ::= (name ".")? upper
+
+block ::= "{}" | "{\n" (line "\n")* "}"
+line ::= comment | statement
+statement ::= binding | assignment | for | while | expr
+binding ::= ("let " | "var ") (name | "_") (": " type)? " = " expr (" else " expr)?
+assignment ::= "set " place (" = " | " += " | " -= ") expr
+place ::= name ("." name | "[" expr "]")*
+for ::= "for " (name | "_") " in " expr " " block
+while ::= "while " expr " " block
+
+expr ::= comparison ((" and " | " or ") comparison)*
+comparison ::= sum ((" == " | " != " | " < " | " <= " | " > " | " >= ") sum)?
+sum ::= product ((" + " | " - ") product)*
+product ::= prefix ((" * " | " / " | " % ") prefix)*
+prefix ::= "-" prefix | "not " prefix | "try " prefix | postfix
+postfix ::= primary ("[" expr "]" | "." name | "(" args? ")" | " with " inits)*
+args ::= expr (", " expr)*
+inits ::= "{}" | "{ " init (", " init)* " }"
+init ::= name ": " expr
+
+primary ::= number | text | "true" | "false" | "()" | "(" expr ")" | list | map | call | name
+  | record-literal | variant-literal | if | match | block
+  | "return" (" " expr)? | "break" | "continue"
+call ::= name ("." name)? "(" args? ")"
+list ::= "[" args? "]"
+map ::= "[:]" | "[" expr ": " expr (", " expr ": " expr)* "]"
+record-literal ::= typename " " inits
+variant-literal ::= typename? "." upper ("(" args ")")?
+if ::= "if " expr " " branch (" else " (if | branch))?
+branch ::= block | "{ " expr " }"
+match ::= "match " expr " {\n" (arm "\n" | comment "\n")* "}"
+arm ::= pattern " => " (binding | assignment | for | while | expr)
+pattern ::= "_" | "-"? digits | text | "true" | "false" | typename? "." upper ("(" binder (", " binder)* ")")?
+binder ::= name | "_"
+
+name ::= [a-z] [a-z0-9_]*
+upper ::= [A-Z] [A-Za-z0-9]*
+digits ::= [0-9]+
+number ::= digits ("." digits)? ([eE] [+-]? digits)?
+text ::= "\"" (text-char | escape | "\\(" expr ")")* "\""
+text-char ::= [^"\\\n]
+escape ::= "\\" ["\\nt] | "\\u{" [0-9a-fA-F]+ "}"

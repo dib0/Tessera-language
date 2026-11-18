@@ -272,7 +272,7 @@ match index_of(key, ".") {
 .Some(at) => {
 let name = slice_text(key, 0, at)
 let rest = slice_text(key, at + 1, length(key))
-set sections = put(sections, name, value_or(get(sections, name), "") + "\(rest) = \(value)\n")
+set sections = put(sections, name, value_or(get(sections, name), "") + ("\(rest) = \(value)\n"))
 }
 .None => set top += "\(key) = \(value)\n"
 }

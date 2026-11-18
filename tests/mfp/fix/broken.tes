@@ -1,0 +1,37 @@
+// Fixture for `tessera1 fix`: typical mistakes; all but `p.z` have one machine-applicable fix.
+
+import std/math
+
+type Point {
+x: Int
+y: Int
+}
+
+fn average(values: List[Int]) -> Float {
+var total: Float = 0.0
+for v in values {
+set total = total + v
+}
+total
+}
+
+fn first(values: List[Int]) -> Option[Int] {
+if len(values) == 0 {
+return .None
+}
+values[0]
+}
+
+fn describe(p: Point) -> Text uses fs {
+let label = "point"
+set label = label + p.z
+label
+}
+
+fn main() -> Unit {
+let numbers = [1, 2, 3]
+print(to_text(numbers.length()))
+let n = 5
+n + 1
+print(json.encode(.Null))
+}

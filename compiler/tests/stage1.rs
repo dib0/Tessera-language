@@ -209,6 +209,7 @@ fn embedded_runtime_is_up_to_date() {
         .arg(format!("crypto_runtime={}", root().join("runtime/crypto.rs").display()))
         .arg(format!("tls_runtime={}", root().join("runtime/tls.rs").display()))
         .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
+        .arg(format!("grammar_gbnf={}", root().join("grammar/tessera.gbnf").display()))
         .args(&std_modules)
         .output()
         .unwrap();
@@ -448,4 +449,181 @@ fn web_application_runs_in_every_host() {
     let adapter = std::fs::read_to_string(build.join("adapter.rs")).unwrap();
     let generated = std::fs::read_to_string(build.join("app.rs")).unwrap();
     assert!(adapter.contains("tessera_handle") && generated.starts_with("// Generated") && generated.contains("#![forbid(unsafe_code)]") && !generated.contains("unsafe {"));
+}
+
+// ---------- Model First Programming tools (spec section 20) ----------
+
+fn run_stage1(args: &[&str], dir: &Path) -> std::process::Output {
+    Command::new(stage1()).args(args).current_dir(dir).output().unwrap()
+}
+
+fn text(output: &std::process::Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+}
+
+/// Every `.tes` file under `dir` (recursively), except generated ones.
+fn tes_files_deep(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            tes_files_deep(&path, out);
+        } else if path.extension().map_or(false, |x| x == "tes") && !path.ends_with("runtime_text.tes") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn canonical_text_and_json_tree_round_trip() {
+    // Section 17.1: text -> tree -> text gives the canonical text, and the canonical text gives the same tree.
+    let dir = work_dir().join("roundtrip");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut files = Vec::new();
+    for d in ["stage1", "std", "examples", "tests", "tools"] {
+        tes_files_deep(&root().join(d), &mut files);
+    }
+    let mut checked = 0;
+    for path in files {
+        let copy = dir.join("file.tes");
+        std::fs::copy(&path, &copy).unwrap();
+        let tree = Command::new(stage1()).arg("ast").arg(&path).output().unwrap();
+        if !tree.status.success() {
+            continue; // syntax errors on purpose
+        }
+        check_build(Command::new(stage1()).arg("format").arg(&copy).output().unwrap(), "format");
+        let canonical = std::fs::read_to_string(&copy).unwrap();
+        let tree_path = dir.join("file.json");
+        std::fs::write(&tree_path, &tree.stdout).unwrap();
+        let rendered = Command::new(stage1()).arg("render").arg(&tree_path).output().unwrap();
+        assert!(rendered.status.success(), "{}: render failed: {}", path.display(), text(&rendered));
+        assert_eq!(String::from_utf8_lossy(&rendered.stdout).trim_end(), canonical.trim_end(), "{}: rendering the tree differs from the canonical text", path.display());
+        let again = Command::new(stage1()).arg("ast").arg(&copy).output().unwrap();
+        assert_eq!(again.stdout, tree.stdout, "{}: the canonical text gives another tree", path.display());
+        let check = Command::new(stage1()).arg("format").arg("--check").arg(&copy).output().unwrap();
+        assert!(check.status.success(), "{}: the canonical form is not stable", path.display());
+        checked += 1;
+    }
+    assert!(checked > 250, "only {} files checked", checked);
+}
+
+#[test]
+fn programs_build_from_a_json_tree() {
+    let dir = work_dir().join("from_tree");
+    std::fs::create_dir_all(&dir).unwrap();
+    let tree = Command::new(stage1()).arg("ast").arg(root().join("tests/run/semantics.tes")).output().unwrap();
+    check_build(tree.clone(), "ast");
+    let tree_path = dir.join("semantics.json");
+    std::fs::write(&tree_path, &tree.stdout).unwrap();
+    let exe = binary(&dir, "semantics");
+    check_build(Command::new(stage1()).arg("build").arg(&tree_path).arg("-o").arg(&dir.join("semantics")).output().unwrap(), "build from a tree");
+    let run = Command::new(&exe).current_dir(&dir).output().unwrap();
+    let expected = std::fs::read_to_string(root().join("tests/run/semantics.out")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), expected.replace("\r\n", "\n"));
+    let bad = Command::new(stage1()).arg("check").arg("--json").arg(root().join("tests/mfp/bad_tree.json")).output().unwrap();
+    assert!(text(&bad).contains("\"code\":\"E0701\"") && text(&bad).contains("items[0].body"), "{}", text(&bad));
+}
+
+fn fresh_app(name: &str) -> PathBuf {
+    let dir = work_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("geometry")).unwrap();
+    std::fs::copy(root().join("tests/mfp/app/main.tes"), dir.join("main.tes")).unwrap();
+    std::fs::copy(root().join("tests/mfp/app/geometry/shapes.tes"), dir.join("geometry/shapes.tes")).unwrap();
+    dir
+}
+
+#[test]
+fn edit_operations_change_the_tree_and_keep_the_program_valid() {
+    let dir = fresh_app("edit_ok");
+    let ops = r#"[
+{"op":"rename_symbol","file":"geometry/shapes.tes","from":"area","to":"surface"},
+{"op":"rename_symbol","file":"geometry/shapes.tes","from":"Shape.Square","to":"Box"},
+{"op":"rename_symbol","file":"geometry/shapes.tes","from":"Point.x","to":"left"},
+{"op":"rename_symbol","fn":"main","from":"total","to":"sum"},
+{"op":"add_item","file":"geometry/shapes.tes","after":"Shape","source":"// Perimeter in whole units.\npub fn perimeter(shape: Shape) -> Int {\nmatch shape {\n.Circle(r) => 6 * r\n.Box(side) => 4 * side\n}\n}"},
+{"op":"insert_stmt_after","fn":"main","anchor":"set sum += shapes.surface(s)","source":"set sum += shapes.perimeter(s)"},
+{"op":"replace_stmt","fn":"main","anchor":"print(to_text(p.left))","source":"print(\"left \\(p.left)\")"},
+{"op":"set_effect","file":"geometry/shapes.tes","fn":"area_unused","uses":[]}
+]"#;
+    // The last operation names a missing function: the whole batch is refused and nothing is written.
+    std::fs::write(dir.join("ops.json"), ops).unwrap();
+    let before = std::fs::read_to_string(dir.join("main.tes")).unwrap();
+    let refused = run_stage1(&["edit", "main.tes", "--ops", "ops.json", "--json"], &dir);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(text(&refused).contains("\"code\":\"E0704\""), "{}", text(&refused));
+    assert_eq!(std::fs::read_to_string(dir.join("main.tes")).unwrap(), before);
+
+    let ops = ops.replace(",\n{\"op\":\"set_effect\",\"file\":\"geometry/shapes.tes\",\"fn\":\"area_unused\",\"uses\":[]}", "");
+    std::fs::write(dir.join("ops.json"), ops).unwrap();
+    let applied = run_stage1(&["edit", "main.tes", "--ops", "ops.json"], &dir);
+    assert!(applied.status.success(), "{}", text(&applied));
+    let main = std::fs::read_to_string(dir.join("main.tes")).unwrap();
+    let shapes = std::fs::read_to_string(dir.join("geometry/shapes.tes")).unwrap();
+    for wanted in ["// Sum them.\nvar sum = 0", "set sum += shapes.surface(s)\nset sum += shapes.perimeter(s)", ".Box(3)", "shapes.Point { left: 1, y: 2 }", "print(\"left \\(p.left)\")"] {
+        assert!(main.contains(wanted), "main.tes lacks {:?}:\n{}", wanted, main);
+    }
+    for wanted in ["left: Int", "Box(side: Int)", ".Box(side) => side * side", "// Perimeter in whole units.\npub fn perimeter", "// Area in whole units.\npub fn surface"] {
+        assert!(shapes.contains(wanted), "shapes.tes lacks {:?}:\n{}", wanted, shapes);
+    }
+    let run = run_stage1(&["check", "main.tes"], &dir);
+    assert!(run.status.success(), "{}", text(&run));
+}
+
+#[test]
+fn edit_operations_report_each_problem() {
+    let dir = fresh_app("edit_errors");
+    let cases = [
+        (r#"{"op":"frobnicate"}"#, "E0702"),
+        (r#"{"op":"set_effect","fn":"main"}"#, "E0702"),
+        (r#"{"op":"add_fn","file":"nowhere.tes","source":"fn f() -> Int = 1"}"#, "E0703"),
+        (r#"{"op":"insert_stmt_after","fn":"main","anchor":"let q = 1","source":"print(\"x\")"}"#, "E0704"),
+        (r#"{"op":"add_fn","source":"fn main() -> Unit uses io = print(\"x\")"}"#, "E0705"),
+        (r#"{"op":"add_fn","source":"fn broken( -> Int = 1"}"#, "E0706"),
+        (r#"{"op":"add_match_arm","file":"geometry/shapes.tes","fn":"area","match":"shape","arm":".Circle(r) => r"}"#, "E0510"),
+    ];
+    let before = std::fs::read_to_string(dir.join("main.tes")).unwrap();
+    for (op, code) in cases {
+        let out = run_stage1(&["edit", "main.tes", "--op", op, "--json"], &dir);
+        assert_eq!(out.status.code(), Some(1), "{}: {}", op, text(&out));
+        assert!(text(&out).contains(&format!("\"code\":\"{}\"", code)), "{}: expected {} in {}", op, code, text(&out));
+    }
+    assert_eq!(std::fs::read_to_string(dir.join("main.tes")).unwrap(), before, "a refused operation changed a file");
+}
+
+#[test]
+fn fix_applies_the_machine_applicable_fixes() {
+    let dir = work_dir().join("fix");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(root().join("tests/mfp/fix/broken.tes"), dir.join("broken.tes")).unwrap();
+    let report = run_stage1(&["check", "--json", "broken.tes"], &dir);
+    let json = String::from_utf8_lossy(&report.stdout);
+    assert!(json.contains("\"fixes\":[{\"message\":") && json.contains("\"expected\":\"Option[Int]\""), "{}", json);
+    let out = run_stage1(&["fix", "broken.tes"], &dir);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("E0209") && text(&out).contains("1 error(s) left"), "{}", text(&out));
+    let fixed = std::fs::read_to_string(dir.join("broken.tes")).unwrap();
+    let expected = std::fs::read_to_string(root().join("tests/mfp/fix/broken.fixed")).unwrap();
+    assert_eq!(fixed.replace("\r\n", "\n"), expected.replace("\r\n", "\n"));
+}
+
+fn python3() -> Option<String> {
+    for name in ["python3", "python"] {
+        if let Ok(out) = Command::new(name).arg("--version").output() {
+            if out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("Python 3") {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn exported_grammars_accept_the_canonical_files() {
+    let Some(python) = python3() else {
+        eprintln!("skipped: no Python 3");
+        return;
+    };
+    let out = Command::new(python).arg(root().join("harness/tools/check_grammar.py")).arg("--compiler").arg(stage1()).current_dir(root()).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
 }

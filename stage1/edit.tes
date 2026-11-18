@@ -1,0 +1,1204 @@
+// Semantic edit operations (spec section 20.2): typed changes to the syntax tree, such as
+// `add_fn`, `rename_symbol` or `insert_stmt_after`, instead of changes to text. Each operation
+// finds its target in the tree; `tessera1 edit` then prints the changed files in their
+// canonical form and checks the whole program before anything is written.
+
+import source uses nothing
+import lexer uses nothing
+import ast uses nothing
+import parser uses nothing
+import printer uses nothing
+import astjson uses nothing
+import std/json uses nothing
+
+note "One source file of the program being edited. `module_path` is the import path of the module (`geometry/shapes`), empty for the entry module."
+pub type EditFile {
+path: Text
+file: Int
+module_path: Text
+items: List[ast.Item]
+comments: List[lexer.Comment]
+changed: Bool
+}
+
+note "The files after an operation, or the reason it was refused: a diagnostic code (E0702 to E0706), a message and a concrete fix."
+pub type Outcome {
+files: List[EditFile]
+code: Text
+message: Text
+help: Text
+}
+
+fn refuse(files: List[EditFile], code: Text, message: Text, help: Text) -> Outcome = Outcome { files: files, code: code, message: message, help: help }
+
+fn done(files: List[EditFile]) -> Outcome = Outcome { files: files, code: "", message: "", help: "" }
+
+note "Every operation, for the help of E0702 and for `tessera1 grammar --format edit-schema`."
+pub fn operation_names() -> List[Text] = ["add_fn", "add_item", "replace_fn", "replace_item", "remove_fn", "remove_item", "rename_symbol", "set_effect", "add_match_arm", "insert_stmt_before", "insert_stmt_after", "replace_stmt", "remove_stmt"]
+
+// ---------- snippets ----------
+
+type Snippet {
+items: List[ast.Item]
+comments: List[lexer.Comment]
+error: Text
+}
+
+note "Parses the source text of an operation. Its lines are numbered from `first_line`, after every line of the file, so the printer can tell its comments from the file's."
+fn parse_snippet(text: Text, file: Int, first_line: Int) -> Snippet {
+let lexed = lexer.tokenize_from(text, file, first_line)
+let problems = if length(lexed.diagnostics) > 0 { lexed.diagnostics } else { [] }
+if length(problems) > 0 {
+return Snippet { items: [], comments: [], error: snippet_problem(problems[0], first_line) }
+}
+let parsed = parser.parse_file(lexed.tokens)
+if length(parsed.diagnostics) > 0 {
+return Snippet { items: [], comments: [], error: snippet_problem(parsed.diagnostics[0], first_line) }
+}
+Snippet { items: parsed.items, comments: lexed.comments, error: "" }
+}
+
+fn snippet_problem(d: source.Diagnostic, first_line: Int) -> Text {
+let help = if d.help == "" { "" } else { " (\(d.help))" }
+"the source does not parse: error[\(d.code)] on its line \(d.span.line - first_line + 1): \(d.message)\(help)"
+}
+
+fn wrapped_body(snippet: Snippet) -> List[ast.Statement] {
+if length(snippet.items) == 0 {
+return []
+}
+match snippet.items[0] {
+.FunctionItem(f) => match f.body.kind {
+.BlockExpr(block) => block_statements(block)
+_ => []
+}
+_ => []
+}
+}
+
+note "Statements given as source: they are parsed as the body of a function."
+fn parse_statements(text: Text, file: Int, first_line: Int) -> Snippet {
+let snippet = parse_snippet("fn edit_snippet() -> Unit {\n\(text)\n}", file, first_line - 1)
+snippet
+}
+
+fn block_statements(block: ast.Block) -> List[ast.Statement] {
+match block.tail {
+.Some(tail) => append(block.statements, .ExprStatement(tail))
+.None => block.statements
+}
+}
+
+fn snippet_arms(snippet: Snippet) -> List[ast.Arm] {
+let statements = wrapped_body(snippet)
+if length(statements) != 1 {
+return []
+}
+match statements[0] {
+.ExprStatement(e) => match e.kind {
+.Match(_, arms) => arms
+_ => []
+}
+_ => []
+}
+}
+
+// ---------- reading operations ----------
+
+fn op_text(op: json.Json, name: Text) -> Text = value_or(json.text_field(op, name), "")
+
+fn op_texts(op: json.Json, name: Text) -> List[Text] {
+var out: List[Text] = []
+match json.field(op, name) {
+.Some(value) => {
+for item in json.as_list(value) {
+set out = append(out, value_or(json.as_text(item), ""))
+}
+}
+.None => {}
+}
+out
+}
+
+fn has_field(op: json.Json, name: Text) -> Bool = json.field(op, name) != .None
+
+fn file_index(files: List[EditFile], path: Text) -> Int {
+for i in range(0, length(files)) {
+if files[i].path == path {
+return i
+}
+}
+-1
+}
+
+fn paths(files: List[EditFile]) -> List[Text] {
+var out: List[Text] = []
+for f in files {
+set out = append(out, f.path)
+}
+out
+}
+
+fn with_file(files: List[EditFile], index: Int, items: List[ast.Item], comments: List[lexer.Comment]) -> List[EditFile] {
+replace_at(files, index, files[index] with { items: items, comments: comments, changed: true })
+}
+
+fn missing(files: List[EditFile], op_name: Text, field: Text) -> Outcome {
+refuse(files, "E0702", "`\(op_name)` needs the field `\(field)`", "see `tessera1 grammar --format edit-schema` for the fields of each operation")
+}
+
+note "Applies one operation. `spans` holds the places a field or variant rename must change, found by the caller in the typed program (`typed_spans`)."
+pub fn apply(files: List[EditFile], op: json.Json, default_path: Text, first_line: Int, spans: Map[Text, Bool]) -> Outcome {
+let name = op_text(op, "op")
+if not source.contains_text(operation_names(), name) {
+return refuse(files, "E0702", "unknown edit operation `\(name)`", "the operations are \(join(operation_names(), ", "))")
+}
+let path = if has_field(op, "file") { op_text(op, "file") } else { default_path }
+let index = file_index(files, path)
+if index < 0 {
+return refuse(files, "E0703", "`\(path)` is not a file of this program", "the files are \(join(paths(files), ", "))")
+}
+let target = files[index]
+if name == "add_fn" or name == "add_item" {
+return add_items(files, index, op, name, first_line)
+}
+if name == "replace_fn" or name == "replace_item" {
+return replace_item(files, index, op, name, first_line)
+}
+if name == "remove_fn" or name == "remove_item" {
+if not has_field(op, "name") {
+return missing(files, name, "name")
+}
+let position = item_position(target.items, op_text(op, "name"))
+if position < 0 {
+return not_found_item(files, target, op_text(op, "name"))
+}
+let removed_range = item_range(target.items, position)
+return done(with_file(files, index, concat(slice(target.items, 0, position), slice(target.items, position + 1, length(target.items))), drop_comments(target.comments, removed_range)))
+}
+if name == "set_effect" {
+return set_effect(files, index, op)
+}
+if name == "rename_symbol" {
+return rename(files, index, op, spans)
+}
+statement_operation(files, index, op, name, first_line)
+}
+
+// ---------- declarations ----------
+
+pub fn item_name(item: ast.Item) -> Text {
+match item {
+.FunctionItem(f) => f.name
+.RecordItem(r) => r.name
+.EnumItem(e) => e.name
+.ImportItem(i) => i.path
+.TestItem(name, _, _) => name
+}
+}
+
+fn item_position(items: List[ast.Item], name: Text) -> Int {
+for i in range(0, length(items)) {
+if item_name(items[i]) == name {
+return i
+}
+}
+-1
+}
+
+fn item_names(items: List[ast.Item]) -> List[Text] {
+var out: List[Text] = []
+for item in items {
+if not printer.is_import(item) {
+set out = append(out, item_name(item))
+}
+}
+out
+}
+
+fn not_found_item(files: List[EditFile], target: EditFile, name: Text) -> Outcome {
+refuse(files, "E0704", "`\(target.path)` has no declaration named `\(name)`", "the declarations are \(join(item_names(target.items), ", "))")
+}
+
+fn first_span(item: ast.Item) -> source.Span {
+match item {
+.FunctionItem(f) => if length(f.notes) > 0 { f.notes[0].span } else { f.name_span }
+.RecordItem(r) => if length(r.notes) > 0 { r.notes[0].span } else { r.name_span }
+.EnumItem(e) => if length(e.notes) > 0 { e.notes[0].span } else { e.name_span }
+.ImportItem(i) => i.span
+.TestItem(_, span, _) => span
+}
+}
+
+fn last_line(item: ast.Item) -> Int {
+match item {
+.FunctionItem(f) => f.body.span.end_line
+.RecordItem(r) => if length(r.fields) > 0 { r.fields[length(r.fields) - 1].span.line } else { r.name_span.line }
+.EnumItem(e) => if length(e.variants) > 0 { e.variants[length(e.variants) - 1].span.line } else { e.name_span.line }
+.ImportItem(i) => i.span.end_line
+.TestItem(_, _, body) => body.span.end_line
+}
+}
+
+type LineRange {
+first: Int
+last: Int
+}
+
+note "The lines whose comments belong to the declaration at `position`: from after the previous declaration to its own last line."
+fn item_range(items: List[ast.Item], position: Int) -> LineRange {
+let first = if position == 0 { 0 } else { last_line(items[position - 1]) }
+LineRange { first: first, last: last_line(items[position]) }
+}
+
+fn drop_comments(comments: List[lexer.Comment], range: LineRange) -> List[lexer.Comment] {
+var out: List[lexer.Comment] = []
+for c in comments {
+if c.line <= range.first or c.line > range.last {
+set out = append(out, c)
+}
+}
+out
+}
+
+note "Moves a declaration to `span`, so the comments above the declaration it replaces stay above it."
+fn relocate_item(item: ast.Item, span: source.Span) -> ast.Item {
+match item {
+.FunctionItem(f) => .FunctionItem(f with { name_span: span, notes: relocate_notes(f.notes, span) })
+.RecordItem(r) => .RecordItem(r with { name_span: span, notes: relocate_notes(r.notes, span) })
+.EnumItem(e) => .EnumItem(e with { name_span: span, notes: relocate_notes(e.notes, span) })
+.ImportItem(i) => .ImportItem(i with { span: span })
+.TestItem(name, _, body) => .TestItem(name, span, body)
+}
+}
+
+fn relocate_notes(notes: List[ast.Note], span: source.Span) -> List[ast.Note] {
+var out: List[ast.Note] = []
+for n in notes {
+set out = append(out, n with { span: span })
+}
+out
+}
+
+fn item_notes(item: ast.Item) -> List[ast.Note] {
+match item {
+.FunctionItem(f) => f.notes
+.RecordItem(r) => r.notes
+.EnumItem(e) => e.notes
+_ => []
+}
+}
+
+note "A replacement without notes keeps the notes of the declaration it replaces: rationale is not lost by accident."
+fn keep_notes(item: ast.Item, notes: List[ast.Note]) -> ast.Item {
+if length(notes) == 0 or length(item_notes(item)) > 0 {
+return item
+}
+match item {
+.FunctionItem(f) => .FunctionItem(f with { notes: notes })
+.RecordItem(r) => .RecordItem(r with { notes: notes })
+.EnumItem(e) => .EnumItem(e with { notes: notes })
+_ => item
+}
+}
+
+fn is_function(item: ast.Item) -> Bool {
+match item {
+.FunctionItem(_) => true
+_ => false
+}
+}
+
+fn add_items(files: List[EditFile], index: Int, op: json.Json, name: Text, first_line: Int) -> Outcome {
+if not has_field(op, "source") {
+return missing(files, name, "source")
+}
+let target = files[index]
+let snippet = parse_snippet(op_text(op, "source"), target.file, first_line)
+if snippet.error != "" {
+return refuse(files, "E0706", snippet.error, "give complete declarations in canonical Tessera text")
+}
+if length(snippet.items) == 0 {
+return refuse(files, "E0706", "the source holds no declaration", "give a declaration such as `fn name() -> Int = 1`")
+}
+if name == "add_fn" and (length(snippet.items) != 1 or not is_function(snippet.items[0])) {
+return refuse(files, "E0706", "`add_fn` takes exactly one function", "use `add_item` for other or several declarations")
+}
+for item in snippet.items {
+if not printer.is_import(item) and item_position(target.items, item_name(item)) >= 0 {
+return refuse(files, "E0705", "`\(target.path)` already has a declaration named `\(item_name(item))`", "use `replace_item` to change it, or choose another name")
+}
+}
+var items = target.items
+for item in snippet.items {
+var position = length(items)
+if printer.is_import(item) {
+set position = 0
+while position < length(items) and printer.is_import(items[position]) {
+set position = position + 1
+}
+} else if has_field(op, "after") {
+let after = item_position(items, op_text(op, "after"))
+if after < 0 {
+return not_found_item(files, target, op_text(op, "after"))
+}
+set position = after + 1
+} else if has_field(op, "before") {
+let before = item_position(items, op_text(op, "before"))
+if before < 0 {
+return not_found_item(files, target, op_text(op, "before"))
+}
+set position = before
+}
+set items = concat(append(slice(items, 0, position), item), slice(items, position, length(items)))
+}
+done(with_file(files, index, items, concat(target.comments, snippet.comments)))
+}
+
+fn replace_item(files: List[EditFile], index: Int, op: json.Json, name: Text, first_line: Int) -> Outcome {
+if not has_field(op, "name") {
+return missing(files, name, "name")
+}
+if not has_field(op, "source") {
+return missing(files, name, "source")
+}
+let target = files[index]
+let position = item_position(target.items, op_text(op, "name"))
+if position < 0 {
+return not_found_item(files, target, op_text(op, "name"))
+}
+let snippet = parse_snippet(op_text(op, "source"), target.file, first_line)
+if snippet.error != "" {
+return refuse(files, "E0706", snippet.error, "give the complete new declaration in canonical Tessera text")
+}
+if length(snippet.items) != 1 {
+return refuse(files, "E0706", "`\(name)` takes exactly one declaration, found \(length(snippet.items))", "give only the new declaration; add others with `add_item`")
+}
+if name == "replace_fn" and not is_function(snippet.items[0]) {
+return refuse(files, "E0706", "`replace_fn` takes a function", "use `replace_item` for types and enums")
+}
+let old = target.items[position]
+let replacement = relocate_item(keep_notes(snippet.items[0], item_notes(old)), first_span(old))
+let range = LineRange { first: first_span(old).line, last: last_line(old) }
+let items = replace_at(target.items, position, replacement)
+done(with_file(files, index, items, concat(drop_comments(target.comments, range), snippet.comments)))
+}
+
+fn function_position(files: List[EditFile], index: Int, op: json.Json, name: Text) -> Int {
+let target = files[index]
+let position = item_position(target.items, op_text(op, "fn"))
+if position < 0 or not is_function(target.items[position]) {
+return -1
+}
+position
+}
+
+fn function_at(items: List[ast.Item], position: Int) -> ast.Function {
+match items[position] {
+.FunctionItem(f) => f
+_ => fail("not a function")
+}
+}
+
+fn no_function(files: List[EditFile], index: Int, op: json.Json, name: Text) -> Outcome {
+if not has_field(op, "fn") {
+return missing(files, name, "fn")
+}
+let target = files[index]
+var functions: List[Text] = []
+for item in target.items {
+if is_function(item) {
+set functions = append(functions, item_name(item))
+}
+}
+refuse(files, "E0704", "`\(target.path)` has no function `\(op_text(op, "fn"))`", "the functions are \(join(functions, ", "))")
+}
+
+fn set_effect(files: List[EditFile], index: Int, op: json.Json) -> Outcome {
+let position = function_position(files, index, op, "set_effect")
+if position < 0 {
+return no_function(files, index, op, "set_effect")
+}
+if not has_field(op, "uses") {
+return missing(files, "set_effect", "uses")
+}
+let target = files[index]
+let f = function_at(target.items, position)
+var effects: List[ast.EffectName] = []
+for effect in op_texts(op, "uses") {
+set effects = append(effects, ast.EffectName { name: effect, span: f.name_span })
+}
+done(with_file(files, index, replace_at(target.items, position, .FunctionItem(f with { effects: effects })), target.comments))
+}
+
+// ---------- the tree walk ----------
+
+note "What a walk over a function body does. `action` is `statement` (anchor, mode, statements), `arm` (scrutinee, arms, after), `local` (rename a variable from -> to), `global` (rename functions, types and variants by name: from -> to, and `qualified`, the `alias.from` forms used in other modules), or `spans` (rename the field or variant at the places in `spans` to `to`)."
+type Job {
+action: Text
+anchor: Text
+mode: Text
+statements: List[ast.Statement]
+scrutinee: Text
+arms: List[ast.Arm]
+after: Text
+from: Text
+bare: Text
+to: Text
+what: Text
+qualified: List[Text]
+aliases: List[Text]
+spans: Map[Text, Bool]
+p: printer.Printer
+}
+
+fn new_job(action: Text, p: printer.Printer) -> Job {
+Job { action: action, anchor: "", mode: "", statements: [], scrutinee: "", arms: [], after: "", from: "-", bare: "-", to: "", what: "", qualified: [], aliases: [], spans: [:], p: p }
+}
+
+type Walked {
+expr: ast.Expr
+count: Int
+}
+
+type WalkedBlock {
+block: ast.Block
+count: Int
+}
+
+type WalkedStatements {
+statements: List[ast.Statement]
+count: Int
+}
+
+type WalkedList {
+exprs: List[ast.Expr]
+count: Int
+}
+
+pub fn span_key(span: source.Span) -> Text = "\(span.file):\(span.line):\(span.col)"
+
+fn in_spans(job: Job, span: source.Span) -> Bool = get(job.spans, span_key(span)) != .None
+
+note "A name after a rename; `qualified` forms keep their module alias."
+fn renamed(job: Job, name: Text) -> Text {
+if name == job.from {
+return job.to
+}
+let segments = source.split_on(name, 46)
+if length(segments) == 2 and source.contains_text(job.qualified, name) {
+return "\(segments[0]).\(job.to)"
+}
+name
+}
+
+fn rename_global(job: Job, name: Text, what: Text) -> Text = if job.action == "global" and job.what == what { renamed(job, name) } else { name }
+
+fn rename_type_expr(job: Job, te: ast.TypeExpr) -> ast.TypeExpr {
+var args: List[ast.TypeExpr] = []
+for a in te.args {
+set args = append(args, rename_type_expr(job, a))
+}
+te with { name: rename_global(job, te.name, "type"), args: args }
+}
+
+fn walk_list(job: Job, items: List[ast.Expr]) -> WalkedList {
+var out: List[ast.Expr] = []
+var count = 0
+for e in items {
+let w = walk_expr(job, e)
+set out = append(out, w.expr)
+set count = count + w.count
+}
+WalkedList { exprs: out, count: count }
+}
+
+fn walk_inits(job: Job, fields: List[ast.FieldInit], record_type: Text) -> List[ast.FieldInit] {
+var out: List[ast.FieldInit] = []
+for f in fields {
+let value = walk_expr(job, f.value).expr
+var name = f.name
+if job.action == "spans" and in_spans(job, f.span) {
+set name = job.to
+}
+set out = append(out, f with { name: name, value: value })
+}
+out
+}
+
+fn count_inits(job: Job, fields: List[ast.FieldInit]) -> Int {
+var count = 0
+for f in fields {
+set count = count + walk_expr(job, f.value).count
+}
+count
+}
+
+fn walked(e: ast.Expr, kind: ast.ExprKind, count: Int) -> Walked = Walked { expr: e with { kind: kind }, count: count }
+
+fn walk_expr(job: Job, e: ast.Expr) -> Walked {
+match e.kind {
+.Name(name) => {
+let changed = if job.action == "local" and name == job.from { job.to } else { rename_global(job, name, "function") }
+walked(e, .Name(changed), 0)
+}
+.FunctionRef(name) => walked(e, .FunctionRef(rename_global(job, name, "function")), 0)
+.ListLiteral(items) => {
+let w = walk_list(job, items)
+walked(e, .ListLiteral(w.exprs), w.count)
+}
+.MapLiteral(keys, values) => {
+let k = walk_list(job, keys)
+let v = walk_list(job, values)
+walked(e, .MapLiteral(k.exprs, v.exprs), k.count + v.count)
+}
+.Call(name, name_span, args) => {
+let w = walk_list(job, args)
+walked(e, .Call(rename_global(job, name, "function"), name_span, w.exprs), w.count)
+}
+.CallValue(callee, args) => {
+let c = walk_expr(job, callee)
+let w = walk_list(job, args)
+walked(e, .CallValue(c.expr, w.exprs), c.count + w.count)
+}
+.Index(target, index) => {
+let t = walk_expr(job, target)
+let i = walk_expr(job, index)
+walked(e, .Index(t.expr, i.expr), t.count + i.count)
+}
+.FieldAccess(target, name, name_span) => {
+let t = walk_expr(job, target)
+var changed = name
+if job.action == "spans" and in_spans(job, name_span) {
+set changed = job.to
+}
+match target.kind {
+.Name(alias) => if job.action == "global" and job.what == "function" and name == job.bare and source.contains_text(job.aliases, alias) {
+set changed = job.to
+}
+_ => {}
+}
+walked(e, .FieldAccess(t.expr, changed, name_span), t.count)
+}
+.RecordUpdate(target, fields) => {
+let t = walk_expr(job, target)
+walked(e, .RecordUpdate(t.expr, walk_inits(job, fields, "")), t.count + count_inits(job, fields))
+}
+.Unary(op, operand) => {
+let o = walk_expr(job, operand)
+walked(e, .Unary(op, o.expr), o.count)
+}
+.Try(operand) => {
+let o = walk_expr(job, operand)
+walked(e, .Try(o.expr), o.count)
+}
+.Binary(op, op_span, left, right) => {
+let l = walk_expr(job, left)
+let r = walk_expr(job, right)
+walked(e, .Binary(op, op_span, l.expr, r.expr), l.count + r.count)
+}
+.If(condition, then_block, else_branch) => {
+let c = walk_expr(job, condition)
+let t = walk_block(job, then_block)
+match else_branch {
+.Some(other) => {
+let o = walk_expr(job, other)
+walked(e, .If(c.expr, t.block, .Some(o.expr)), c.count + t.count + o.count)
+}
+.None => walked(e, .If(c.expr, t.block, .None), c.count + t.count)
+}
+}
+.BlockExpr(block) => {
+let b = walk_block(job, block)
+walked(e, .BlockExpr(b.block), b.count)
+}
+.Match(scrutinee, arms) => walk_match(job, e, scrutinee, arms)
+.RecordLiteral(type_name, type_span, fields) => walked(e, .RecordLiteral(rename_global(job, type_name, "type"), type_span, walk_inits(job, fields, type_name)), count_inits(job, fields))
+.VariantLiteral(type_name, variant, variant_span, args) => {
+let w = walk_list(job, args)
+var changed = variant
+if job.action == "spans" and in_spans(job, variant_span) {
+set changed = job.to
+}
+walked(e, .VariantLiteral(rename_global(job, type_name, "type"), changed, variant_span, w.exprs), w.count)
+}
+.Return(value) => match value {
+.Some(v) => {
+let w = walk_expr(job, v)
+walked(e, .Return(.Some(w.expr)), w.count)
+}
+.None => Walked { expr: e, count: 0 }
+}
+.OrElse(value, otherwise) => {
+let v = walk_expr(job, value)
+let o = walk_expr(job, otherwise)
+walked(e, .OrElse(v.expr, o.expr), v.count + o.count)
+}
+_ => Walked { expr: e, count: 0 }
+}
+}
+
+fn walk_pattern(job: Job, pattern: ast.Pattern) -> ast.Pattern {
+match pattern.kind {
+.VariantPattern(type_name, variant, bindings) => {
+var names: List[ast.Binding] = []
+for b in bindings {
+set names = append(names, if job.action == "local" and b.name == job.from { b with { name: job.to } } else { b })
+}
+let changed = if job.action == "spans" and in_spans(job, pattern.span) { job.to } else { variant }
+pattern with { kind: .VariantPattern(rename_global(job, type_name, "type"), changed, names) }
+}
+_ => pattern
+}
+}
+
+fn walk_match(job: Job, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.Arm]) -> Walked {
+let s = walk_expr(job, scrutinee)
+var count = s.count
+var out: List[ast.Arm] = []
+for arm in arms {
+let body = walk_expr(job, arm.body)
+set count = count + body.count
+set out = append(out, ast.Arm { pattern: walk_pattern(job, arm.pattern), body: body.expr })
+}
+if job.action == "arm" and printer.flat(printer.print_expr(job.p, scrutinee, false)) == job.scrutinee {
+set out = insert_arms(job, out)
+set count = count + 1
+}
+walked(e, .Match(s.expr, out), count)
+}
+
+note "New arms go after the arm whose pattern is `after`, or else before a final `_` arm, or else at the end."
+fn insert_arms(job: Job, arms: List[ast.Arm]) -> List[ast.Arm] {
+var position = length(arms)
+if job.after != "" {
+for i in range(0, length(arms)) {
+if printer.pattern_text(arms[i].pattern) == job.after {
+set position = i + 1
+}
+}
+} else if length(arms) > 0 and arms[length(arms) - 1].pattern.kind == .Wildcard {
+set position = length(arms) - 1
+}
+concat(concat(slice(arms, 0, position), job.arms), slice(arms, position, length(arms)))
+}
+
+fn walk_block(job: Job, block: ast.Block) -> WalkedBlock {
+let w = walk_statements(job, block_statements(block))
+WalkedBlock { block: astjson.make_block(w.statements, block.span), count: w.count }
+}
+
+fn statement_text(job: Job, s: ast.Statement) -> Text {
+let lines = printer.print_statement(job.p, s)
+if length(lines) == 0 { "" } else { lines[0].text }
+}
+
+fn walk_statements(job: Job, statements: List[ast.Statement]) -> WalkedStatements {
+var out: List[ast.Statement] = []
+var count = 0
+for s in statements {
+if job.action == "statement" and statement_text(job, s) == job.anchor {
+set count = count + 1
+if job.mode == "before" {
+set out = concat(concat(out, job.statements), [s])
+} else if job.mode == "after" {
+set out = concat(append(out, s), job.statements)
+} else if job.mode == "replace" {
+set out = concat(out, relocate_first(job.statements, printer.statement_span(s)))
+}
+} else {
+let w = walk_statement(job, s)
+set out = append(out, w.statement)
+set count = count + w.count
+}
+}
+WalkedStatements { statements: out, count: count }
+}
+
+type WalkedStatement {
+statement: ast.Statement
+count: Int
+}
+
+fn local_name(job: Job, name: Text) -> Text = if job.action == "local" and name == job.from { job.to } else { name }
+
+fn walk_statement(job: Job, s: ast.Statement) -> WalkedStatement {
+match s {
+.Let(name, name_span, declared, value, mutable) => {
+let v = walk_expr(job, value)
+let te = match declared {
+.Some(t) => Option.Some(rename_type_expr(job, t))
+.None => Option.None
+}
+WalkedStatement { statement: .Let(local_name(job, name), name_span, te, v.expr, mutable), count: v.count }
+}
+.Set(name, name_span, value) => {
+let v = walk_expr(job, value)
+WalkedStatement { statement: .Set(local_name(job, name), name_span, v.expr), count: v.count }
+}
+.SetPlace(target, value) => {
+let t = walk_expr(job, target)
+let v = walk_expr(job, value)
+WalkedStatement { statement: .SetPlace(t.expr, v.expr), count: t.count + v.count }
+}
+.For(variable, variable_span, iterable, body) => {
+let i = walk_expr(job, iterable)
+let b = walk_block(job, body)
+WalkedStatement { statement: .For(local_name(job, variable), variable_span, i.expr, b.block), count: i.count + b.count }
+}
+.While(condition, body) => {
+let c = walk_expr(job, condition)
+let b = walk_block(job, body)
+WalkedStatement { statement: .While(c.expr, b.block), count: c.count + b.count }
+}
+.ExprStatement(expr) => {
+let w = walk_expr(job, expr)
+WalkedStatement { statement: .ExprStatement(w.expr), count: w.count }
+}
+}
+}
+
+note "The first replacement statement takes the place (and so the comments) of the statement it replaces."
+fn relocate_first(statements: List[ast.Statement], span: source.Span) -> List[ast.Statement] {
+if length(statements) == 0 {
+return statements
+}
+let first = match statements[0] {
+.Let(name, _, declared, value, mutable) => ast.Statement.Let(name, span, declared, value, mutable)
+.Set(name, _, value) => ast.Statement.Set(name, span, value)
+.SetPlace(target, value) => ast.Statement.SetPlace(target with { span: span }, value)
+.For(variable, _, iterable, body) => ast.Statement.For(variable, span, iterable, body)
+.While(condition, body) => ast.Statement.While(condition with { span: span }, body)
+.ExprStatement(expr) => ast.Statement.ExprStatement(expr with { span: span })
+}
+replace_at(statements, 0, first)
+}
+
+fn walk_function(job: Job, f: ast.Function) -> WalkedFunction {
+var params: List[ast.Param] = []
+for param in f.params {
+let name = if job.action == "local" and param.name == job.from { job.to } else { param.name }
+set params = append(params, param with { name: name, type_expr: rename_type_expr(job, param.type_expr) })
+}
+let body = match f.body.kind {
+.BlockExpr(_) => walk_expr(job, f.body)
+_ => {
+// A statement operation needs a block: `= value` becomes `{ value }` for it.
+if job.action == "statement" {
+let block = ast.Block { statements: [], tail: .Some(f.body), span: f.body.span }
+let w = walk_block(job, block)
+if w.count > 0 { Walked { expr: ast.make_expr(.BlockExpr(w.block), f.body.span), count: w.count } } else { Walked { expr: f.body, count: 0 } }
+} else {
+walk_expr(job, f.body)
+}
+}
+}
+let name = rename_global(job, f.name, "function")
+WalkedFunction { function: f with { name: name, params: params, return_type: rename_type_expr(job, f.return_type), body: body.expr }, count: body.count }
+}
+
+type WalkedFunction {
+function: ast.Function
+count: Int
+}
+
+fn walk_fields(job: Job, fields: List[ast.Field], type_name: Text) -> List[ast.Field] {
+var out: List[ast.Field] = []
+for f in fields {
+let name = if job.action == "spans" and in_spans(job, f.span) { job.to } else { f.name }
+set out = append(out, f with { name: name, type_expr: rename_type_expr(job, f.type_expr) })
+}
+out
+}
+
+note "Applies a rename to every declaration of a file."
+fn walk_items(job: Job, items: List[ast.Item]) -> List[ast.Item] {
+var out: List[ast.Item] = []
+for item in items {
+let changed = match item {
+.FunctionItem(f) => ast.Item.FunctionItem(walk_function(job, f).function)
+.RecordItem(r) => ast.Item.RecordItem(r with { name: rename_global(job, r.name, "type"), fields: walk_fields(job, r.fields, r.name) })
+.EnumItem(e) => {
+var variants: List[ast.VariantDecl] = []
+for v in e.variants {
+let name = if job.action == "spans" and in_spans(job, v.span) { job.to } else { v.name }
+set variants = append(variants, v with { name: name, fields: walk_fields(job, v.fields, "") })
+}
+ast.Item.EnumItem(e with { name: rename_global(job, e.name, "type"), variants: variants })
+}
+.ImportItem(i) => item
+.TestItem(name, span, body) => ast.Item.TestItem(name, span, walk_expr(job, body).expr)
+}
+set out = append(out, changed)
+}
+out
+}
+
+// ---------- statement and arm operations ----------
+
+fn statement_operation(files: List[EditFile], index: Int, op: json.Json, name: Text, first_line: Int) -> Outcome {
+let position = function_position(files, index, op, name)
+if position < 0 {
+return no_function(files, index, op, name)
+}
+let target = files[index]
+let p = printer.Printer { file: target.file }
+var job = new_job("statement", p)
+var snippet = Snippet { items: [], comments: [], error: "" }
+if name == "add_match_arm" {
+if not has_field(op, "match") {
+return missing(files, name, "match")
+}
+if not has_field(op, "arm") {
+return missing(files, name, "arm")
+}
+set snippet = parse_statements("match edit_value {\n\(op_text(op, "arm"))\n}", target.file, first_line - 1)
+if snippet.error != "" {
+return refuse(files, "E0706", snippet.error, "give the arm as `pattern => value`, e.g. `.Circle(r) => r * r`")
+}
+let arms = snippet_arms(snippet)
+if length(arms) == 0 {
+return refuse(files, "E0706", "the source holds no match arm", "give the arm as `pattern => value`")
+}
+set job = job with { action: "arm", scrutinee: trim(op_text(op, "match")), arms: arms, after: trim(op_text(op, "after")) }
+} else {
+if not has_field(op, "anchor") {
+return missing(files, name, "anchor")
+}
+let mode = if name == "insert_stmt_before" { "before" } else if name == "insert_stmt_after" { "after" } else if name == "replace_stmt" { "replace" } else { "remove" }
+var statements: List[ast.Statement] = []
+if mode != "remove" {
+if not has_field(op, "source") {
+return missing(files, name, "source")
+}
+set snippet = parse_statements(op_text(op, "source"), target.file, first_line)
+if snippet.error != "" {
+return refuse(files, "E0706", snippet.error, "give one or more statements in canonical Tessera text")
+}
+set statements = wrapped_body(snippet)
+if length(statements) == 0 and mode != "replace" {
+return refuse(files, "E0706", "the source holds no statement", "give one or more statements")
+}
+}
+set job = job with { anchor: trim(op_text(op, "anchor")), mode: mode, statements: statements }
+}
+let f = function_at(target.items, position)
+let w = walk_function(job, f)
+if w.count == 0 {
+let what = if job.action == "arm" { "`match` on `\(job.scrutinee)`" } else { "a statement whose first line is `\(job.anchor)`" }
+return refuse(files, "E0704", "function `\(f.name)` has no \(what)", "anchors are the first line of a statement in canonical form; see them with `tessera1 format` or `tessera1 ast`")
+}
+if w.count > 1 {
+let what = if job.action == "arm" { "`match` expressions on `\(job.scrutinee)`" } else { "statements whose first line is `\(job.anchor)`" }
+return refuse(files, "E0705", "function `\(f.name)` has \(w.count) \(what)", "the target must be unique; edit a distinguishing statement first, or replace the whole function with `replace_fn`")
+}
+var kept = target.comments
+if job.action == "statement" and job.mode == "replace" {
+let old = find_statement(job, f)
+set kept = drop_comments(kept, LineRange { first: old.first, last: old.last })
+} else if job.action == "statement" and job.mode == "remove" {
+let old = find_statement(job, f)
+set kept = drop_comments(kept, LineRange { first: old.first - 2, last: old.last })
+}
+let comments = concat(kept, snippet.comments)
+done(with_file(files, index, replace_at(target.items, position, .FunctionItem(w.function)), comments))
+}
+
+note "The lines of the statement an operation targets, to drop the comments inside it (and, when it is removed, the comment directly above it)."
+fn find_statement(job: Job, f: ast.Function) -> LineRange {
+let found = find_in_expr(job, f.body)
+if length(found) == 0 { LineRange { first: 0, last: 0 } } else { found[0] }
+}
+
+fn find_in_block(job: Job, block: ast.Block) -> List[LineRange] {
+var out: List[LineRange] = []
+for s in block_statements(block) {
+if statement_text(job, s) == job.anchor {
+set out = append(out, LineRange { first: printer.statement_span(s).line, last: printer.statement_end_line(s) })
+}
+set out = concat(out, find_in_statement(job, s))
+}
+out
+}
+
+fn find_in_statement(job: Job, s: ast.Statement) -> List[LineRange] {
+match s {
+.Let(_, _, _, value, _) => find_in_expr(job, value)
+.Set(_, _, value) => find_in_expr(job, value)
+.SetPlace(_, value) => find_in_expr(job, value)
+.For(_, _, iterable, body) => concat(find_in_expr(job, iterable), find_in_block(job, body))
+.While(condition, body) => concat(find_in_expr(job, condition), find_in_block(job, body))
+.ExprStatement(expr) => find_in_expr(job, expr)
+}
+}
+
+fn find_in_expr(job: Job, e: ast.Expr) -> List[LineRange] {
+match e.kind {
+.If(condition, then_block, else_branch) => {
+let base = concat(find_in_expr(job, condition), find_in_block(job, then_block))
+match else_branch {
+.Some(other) => concat(base, find_in_expr(job, other))
+.None => base
+}
+}
+.BlockExpr(block) => find_in_block(job, block)
+.Match(scrutinee, arms) => {
+var out = find_in_expr(job, scrutinee)
+for arm in arms {
+set out = concat(out, find_in_expr(job, arm.body))
+}
+out
+}
+_ => []
+}
+}
+
+// ---------- renaming ----------
+
+fn find_item(items: List[ast.Item], name: Text) -> Option[ast.Item] {
+for item in items {
+if not printer.is_import(item) and item_name(item) == name {
+return .Some(item)
+}
+}
+.None
+}
+
+note "The kind of symbol `from` names in a file: `function`, `type`, `variant` or `field` (`Type.member`), or empty."
+pub fn symbol_kind(items: List[ast.Item], from: Text) -> Text {
+let parts = source.split_on(from, 46)
+if length(parts) == 2 {
+let owner = find_item(items, parts[0]) else return ""
+return match owner {
+.EnumItem(e) => {
+for v in e.variants {
+if v.name == parts[1] {
+return "variant"
+}
+}
+""
+}
+.RecordItem(r) => {
+for f in r.fields {
+if f.name == parts[1] {
+return "field"
+}
+}
+""
+}
+_ => ""
+}
+}
+match find_item(items, from) {
+.Some(item) => match item {
+.FunctionItem(_) => "function"
+.RecordItem(_) => "type"
+.EnumItem(_) => "type"
+_ => ""
+}
+.None => ""
+}
+}
+
+fn last_segment(text: Text) -> Text {
+let parts = source.split_on(text, 46)
+parts[length(parts) - 1]
+}
+
+fn imports_module(items: List[ast.Item], module_path: Text) -> Text {
+for item in items {
+match item {
+.ImportItem(i) => if i.path == module_path {
+return i.alias
+}
+_ => {}
+}
+}
+""
+}
+
+fn rename(files: List[EditFile], index: Int, op: json.Json, spans: Map[Text, Bool]) -> Outcome {
+if not has_field(op, "from") {
+return missing(files, "rename_symbol", "from")
+}
+if not has_field(op, "to") {
+return missing(files, "rename_symbol", "to")
+}
+let target = files[index]
+let from = op_text(op, "from")
+let to = last_segment(op_text(op, "to"))
+let p = printer.Printer { file: target.file }
+if has_field(op, "fn") {
+let position = function_position(files, index, op, "rename_symbol")
+if position < 0 {
+return no_function(files, index, op, "rename_symbol")
+}
+let job = new_job("local", p) with { from: from, to: to }
+let w = walk_function(job, function_at(target.items, position))
+return done(with_file(files, index, replace_at(target.items, position, .FunctionItem(w.function)), target.comments))
+}
+let kind = symbol_kind(target.items, from)
+if kind == "" {
+return refuse(files, "E0704", "`\(target.path)` declares no function, type, variant or field `\(from)`", "name a function or type (`area`, `Shape`), a variant or field as `Type.member`, or give `fn` to rename a local variable")
+}
+if kind == "variant" or kind == "field" {
+if length(keys(spans)) == 0 {
+return refuse(files, "E0705", "renaming `\(from)` needs a program that type-checks", "fix the errors first (`tessera1 check`), then rename")
+}
+let job = new_job("spans", p) with { to: to, spans: spans }
+var out = files
+for i in range(0, length(files)) {
+set out = with_file(out, i, walk_items(job, files[i].items), files[i].comments)
+}
+return done(out)
+}
+var out = files
+for i in range(0, length(files)) {
+let alias = if i == index or target.module_path == "" { "" } else { imports_module(files[i].items, target.module_path) }
+if i == index or alias != "" {
+let qualified = if alias == "" { [] } else { ["\(alias).\(from)"] }
+let aliases = if alias == "" { [] } else { [alias] }
+// In other modules only the qualified forms (`alias.from`) name this symbol; their own `from` is another one.
+let job = new_job("global", printer.Printer { file: files[i].file }) with { from: if i == index { from } else { "-" }, bare: from, to: to, what: kind, qualified: qualified, aliases: aliases }
+let walked_items = walk_items(job, files[i].items)
+set out = with_file(out, i, walked_items, files[i].comments)
+}
+}
+done(out)
+}
+
+note "Canonical type name, as the checker writes it: the module prefix and the name."
+fn canonical_type(module_path: Text, name: Text) -> Text = if module_path == "" { name } else { ast.module_prefix(module_path) + name }
+
+note "For a field or variant rename: the places in the type-checked program that name `Type.member`. The caller turns these into the `spans` of `apply`."
+pub fn typed_spans(typed: List[ast.Item], module_path: Text, from: Text, kind: Text, decl_files: List[EditFile], index: Int) -> Map[Text, Bool] {
+let parts = source.split_on(from, 46)
+let wanted = canonical_type(module_path, parts[0])
+var spans: Map[Text, Bool] = [:]
+for key_text in collect_items(typed, wanted, parts[1], kind) {
+set spans = put(spans, key_text, true)
+}
+let owner = find_item(decl_files[index].items, parts[0]) else return spans
+match owner {
+.EnumItem(e) => {
+for v in e.variants {
+if v.name == parts[1] {
+set spans = put(spans, span_key(v.span), true)
+}
+}
+}
+.RecordItem(r) => {
+for f in r.fields {
+if f.name == parts[1] {
+set spans = put(spans, span_key(f.span), true)
+}
+}
+}
+_ => {}
+}
+spans
+}
+
+fn named(ty: ast.Type, wanted: Text) -> Bool {
+match ty {
+.Named(name) => name == wanted
+_ => false
+}
+}
+
+fn collect_items(items: List[ast.Item], wanted: Text, member: Text, kind: Text) -> List[Text] {
+var out: List[Text] = []
+for item in items {
+match item {
+.FunctionItem(f) => set out = concat(out, collect(f.body, wanted, member, kind))
+.TestItem(_, _, body) => set out = concat(out, collect(body, wanted, member, kind))
+_ => {}
+}
+}
+out
+}
+
+fn collect_list(items: List[ast.Expr], wanted: Text, member: Text, kind: Text) -> List[Text] {
+var out: List[Text] = []
+for e in items {
+set out = concat(out, collect(e, wanted, member, kind))
+}
+out
+}
+
+fn collect_inits(fields: List[ast.FieldInit], owner: ast.Type, wanted: Text, member: Text, kind: Text) -> List[Text] {
+var out: List[Text] = []
+for f in fields {
+if kind == "field" and f.name == member and named(owner, wanted) {
+set out = append(out, span_key(f.span))
+}
+set out = concat(out, collect(f.value, wanted, member, kind))
+}
+out
+}
+
+fn collect_block(block: ast.Block, wanted: Text, member: Text, kind: Text) -> List[Text] {
+var out: List[Text] = []
+for s in block_statements(block) {
+let found = match s {
+.Let(_, _, _, value, _) => collect(value, wanted, member, kind)
+.Set(_, _, value) => collect(value, wanted, member, kind)
+.SetPlace(target, value) => concat(collect(target, wanted, member, kind), collect(value, wanted, member, kind))
+.For(_, _, iterable, body) => concat(collect(iterable, wanted, member, kind), collect_block(body, wanted, member, kind))
+.While(condition, body) => concat(collect(condition, wanted, member, kind), collect_block(body, wanted, member, kind))
+.ExprStatement(expr) => collect(expr, wanted, member, kind)
+}
+set out = concat(out, found)
+}
+out
+}
+
+fn collect(e: ast.Expr, wanted: Text, member: Text, kind: Text) -> List[Text] {
+match e.kind {
+.ListLiteral(items) => collect_list(items, wanted, member, kind)
+.MapLiteral(keys_list, values_list) => concat(collect_list(keys_list, wanted, member, kind), collect_list(values_list, wanted, member, kind))
+.Call(_, _, args) => collect_list(args, wanted, member, kind)
+.CallValue(callee, args) => concat(collect(callee, wanted, member, kind), collect_list(args, wanted, member, kind))
+.Index(target, index) => concat(collect(target, wanted, member, kind), collect(index, wanted, member, kind))
+.FieldAccess(target, name, name_span) => {
+let inner = collect(target, wanted, member, kind)
+if kind == "field" and name == member and named(target.ty, wanted) { append(inner, span_key(name_span)) } else { inner }
+}
+.RecordUpdate(target, fields) => concat(collect(target, wanted, member, kind), collect_inits(fields, target.ty, wanted, member, kind))
+.Unary(_, operand) => collect(operand, wanted, member, kind)
+.Try(operand) => collect(operand, wanted, member, kind)
+.Binary(_, _, left, right) => concat(collect(left, wanted, member, kind), collect(right, wanted, member, kind))
+.If(condition, then_block, else_branch) => {
+let base = concat(collect(condition, wanted, member, kind), collect_block(then_block, wanted, member, kind))
+match else_branch {
+.Some(other) => concat(base, collect(other, wanted, member, kind))
+.None => base
+}
+}
+.BlockExpr(block) => collect_block(block, wanted, member, kind)
+.Match(scrutinee, arms) => {
+var out = collect(scrutinee, wanted, member, kind)
+for arm in arms {
+match arm.pattern.kind {
+.VariantPattern(_, variant, _) => if kind == "variant" and variant == member and named(scrutinee.ty, wanted) {
+set out = append(out, span_key(arm.pattern.span))
+}
+_ => {}
+}
+set out = concat(out, collect(arm.body, wanted, member, kind))
+}
+out
+}
+.RecordLiteral(_, _, fields) => collect_inits(fields, e.ty, wanted, member, kind)
+.VariantLiteral(_, variant, variant_span, args) => {
+let inner = collect_list(args, wanted, member, kind)
+if kind == "variant" and variant == member and named(e.ty, wanted) { append(inner, span_key(variant_span)) } else { inner }
+}
+.Return(value) => match value {
+.Some(v) => collect(v, wanted, member, kind)
+.None => []
+}
+.OrElse(value, otherwise) => concat(collect(value, wanted, member, kind), collect(otherwise, wanted, member, kind))
+_ => []
+}
+}

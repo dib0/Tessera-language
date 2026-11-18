@@ -13,13 +13,29 @@ path: Text
 text: Text
 }
 
-note "Empty `label` or `help` means the diagnostic has none."
+note "A machine-applicable change: the text of `span` (end exclusive) becomes `replacement`; an empty span inserts. When `expect` is not empty the edit only applies if the span holds exactly that text, which guards the positions a fix assumes."
+pub type TextEdit {
+span: Span
+replacement: Text
+expect: Text
+}
+
+note "A repair for a diagnostic: applying all `edits` together removes the error (spec section 20.4)."
+pub type Fix {
+message: Text
+edits: List[TextEdit]
+}
+
+note "Empty `label`, `help`, `expected` or `actual` means the diagnostic has none. `expected` and `actual` name what the compiler wanted and what it found (types, counts or names)."
 pub type Diagnostic {
 code: Text
 message: Text
 span: Span
 label: Text
 help: Text
+expected: Text
+actual: Text
+fixes: List[Fix]
 }
 
 pub fn span_of(file: Int, line: Int, col: Int, end_col: Int) -> Span {
@@ -31,11 +47,210 @@ Span { file: start.file, line: start.line, col: start.col, end_line: finish.end_
 }
 
 pub fn error(code: Text, span: Span, message: Text) -> Diagnostic {
-Diagnostic { code: code, message: message, span: span, label: "", help: "" }
+Diagnostic { code: code, message: message, span: span, label: "", help: "", expected: "", actual: "", fixes: [] }
 }
 
 pub fn error_help(code: Text, span: Span, message: Text, help: Text) -> Diagnostic {
-Diagnostic { code: code, message: message, span: span, label: "", help: help }
+Diagnostic { code: code, message: message, span: span, label: "", help: help, expected: "", actual: "", fixes: [] }
+}
+
+pub fn with_fix(d: Diagnostic, message: Text, edits: List[TextEdit]) -> Diagnostic = d with { fixes: append(d.fixes, Fix { message: message, edits: edits }) }
+
+pub fn with_types(d: Diagnostic, expected: Text, actual: Text) -> Diagnostic = d with { expected: expected, actual: actual }
+
+pub fn replace_span(span: Span, replacement: Text) -> TextEdit = TextEdit { span: span, replacement: replacement, expect: "" }
+
+pub fn replace_expected(span: Span, old: Text, replacement: Text) -> TextEdit = TextEdit { span: span, replacement: replacement, expect: old }
+
+pub fn insert_at(file: Int, line: Int, col: Int, text: Text) -> TextEdit = TextEdit { span: Span { file: file, line: line, col: col, end_line: line, end_col: col }, replacement: text, expect: "" }
+
+note "Deletes whole lines `first` to `last`, with their line breaks."
+pub fn delete_lines(file: Int, first: Int, last: Int) -> TextEdit = TextEdit { span: Span { file: file, line: first, col: 1, end_line: last + 1, end_col: 1 }, replacement: "", expect: "" }
+
+pub fn start_of(span: Span) -> Span = Span { file: span.file, line: span.line, col: span.col, end_line: span.line, end_col: span.col }
+
+pub fn end_of(span: Span) -> Span = Span { file: span.file, line: span.end_line, col: span.end_col, end_line: span.end_line, end_col: span.end_col }
+
+// ---------- applying edits ----------
+
+note "Code-point offset of each line start; one more entry for the end of the text."
+fn line_starts(codes: List[Int]) -> List[Int] {
+var starts = [0]
+var index = 0
+while index < length(codes) {
+if codes[index] == 10 {
+set starts = append(starts, index + 1)
+}
+set index += 1
+}
+append(starts, length(codes))
+}
+
+note "Offset of a line and column, or -1 when it lies outside the text. Line `count + 1` column 1 is the end of the text."
+fn offset_of(starts: List[Int], total: Int, line: Int, col: Int) -> Int {
+let lines = length(starts) - 1
+if line < 1 or col < 1 or line > lines {
+if line == lines + 1 and col == 1 {
+return total
+}
+return -1
+}
+let begin = starts[line - 1]
+let next = if line < lines { starts[line] } else { total }
+let offset = begin + col - 1
+if offset > next { -1 } else { offset }
+}
+
+type EditRange {
+start: Int
+finish: Int
+replacement: Text
+expect: Text
+}
+
+note "Applies the edits for `file` to `text`, or gives an error when an edit is outside the text, overlaps another, or does not find the text it expects."
+pub fn apply_edits(text: Text, file: Int, edits: List[TextEdit]) -> Result[Text, Text] {
+let codes = code_points(text)
+let starts = line_starts(codes)
+var ranges: List[EditRange] = []
+for e in edits {
+if e.span.file != file {
+continue
+}
+let start = offset_of(starts, length(codes), e.span.line, e.span.col)
+let finish = offset_of(starts, length(codes), e.span.end_line, e.span.end_col)
+if start < 0 or finish < start {
+return .Error("edit outside the text")
+}
+if e.expect != "" and from_code_points(slice(codes, start, finish)) != e.expect {
+return .Error("the text is not `\(e.expect)`")
+}
+set ranges = append(ranges, EditRange { start: start, finish: finish, replacement: e.replacement, expect: e.expect })
+}
+let sorted = sort_ranges(ranges)
+var out: List[Text] = []
+var position = 0
+var previous_start = -1
+for r in sorted {
+// Two edits at the same place would depend on their order, so they count as overlapping too.
+if r.start < position or r.start == previous_start {
+return .Error("overlapping edits")
+}
+set previous_start = r.start
+set out = append(append(out, from_code_points(slice(codes, position, r.start))), r.replacement)
+set position = r.finish
+}
+set out = append(out, from_code_points(slice(codes, position, length(codes))))
+.Ok(join(out, ""))
+}
+
+fn sort_ranges(items: List[EditRange]) -> List[EditRange] {
+if length(items) <= 1 {
+return items
+}
+let middle = length(items) / 2
+let left = sort_ranges(slice(items, 0, middle))
+let right = sort_ranges(slice(items, middle, length(items)))
+var merged: List[EditRange] = []
+var i = 0
+var j = 0
+while i < length(left) and j < length(right) {
+if left[i].start <= right[j].start {
+set merged = append(merged, left[i])
+set i += 1
+} else {
+set merged = append(merged, right[j])
+set j += 1
+}
+}
+concat(concat(merged, slice(left, i, length(left))), slice(right, j, length(right)))
+}
+
+note "Keeps only the fixes that apply cleanly to the source, so every fix a diagnostic carries can be applied as it is."
+pub fn valid_fixes(diagnostics: List[Diagnostic], files: List[SourceFile]) -> List[Diagnostic] {
+var out: List[Diagnostic] = []
+for d in diagnostics {
+var kept: List[Fix] = []
+for f in d.fixes {
+if fix_applies(f, files) {
+set kept = append(kept, f)
+}
+}
+set out = append(out, d with { fixes: kept })
+}
+out
+}
+
+fn fix_applies(f: Fix, files: List[SourceFile]) -> Bool {
+if length(f.edits) == 0 {
+return false
+}
+for e in f.edits {
+if e.span.file < 0 or e.span.file >= length(files) or starts_with_text(files[e.span.file].path, "<") {
+return false
+}
+match apply_edits(files[e.span.file].text, e.span.file, f.edits) {
+.Ok(_) => {}
+.Error(_) => return false
+}
+}
+true
+}
+
+fn count_newlines(text: Text) -> Int {
+var count = 0
+for code in code_points(text) {
+if code == 10 {
+set count += 1
+}
+}
+count
+}
+
+fn deletes_lines(e: TextEdit) -> Bool = e.replacement == "" and e.span.col == 1 and e.span.end_col == 1 and e.span.end_line > e.span.line
+
+note "The lines a fix produces, numbered as in the fixed file (at most three); nothing when it only deletes lines."
+fn fix_preview(f: Fix, files: List[SourceFile]) -> Text {
+var only_deletes = true
+for e in f.edits {
+if not deletes_lines(e) {
+set only_deletes = false
+}
+}
+if only_deletes {
+return ""
+}
+let file = f.edits[0].span.file
+var first = f.edits[0].span.line
+var last = f.edits[0].span.end_line
+var delta = 0
+for e in f.edits {
+if e.span.file == file {
+if e.span.line < first {
+set first = e.span.line
+}
+if e.span.end_line > last {
+set last = e.span.end_line
+}
+set delta = delta + count_newlines(e.replacement) - (e.span.end_line - e.span.line)
+}
+}
+let fixed = match apply_edits(files[file].text, file, f.edits) {
+.Ok(text) => text
+.Error(_) => return ""
+}
+let lines = split_lines(fixed)
+var finish = last + delta
+if finish > first + 2 {
+set finish = first + 2
+}
+var out = ""
+var line = first
+while line <= finish and line <= length(lines) {
+set out = "\(out)  \(line) | \(lines[line - 1])\n"
+set line += 1
+}
+out
 }
 
 // ---------- character classes (code points) ----------
@@ -55,13 +270,7 @@ pub fn is_hex_digit(code: Int) -> Bool = is_digit(code) or (code >= 97 and code 
 pub fn is_control(code: Int) -> Bool = code < 32 or (code >= 127 and code < 160)
 
 pub fn hex_value(code: Int) -> Int {
-if is_digit(code) {
-code - 48
-} else if code >= 97 {
-code - 87
-} else {
-code - 55
-}
+if is_digit(code) { code - 48 } else if code >= 97 { code - 87 } else { code - 55 }
 }
 
 // ---------- text helpers ----------
@@ -70,8 +279,8 @@ pub fn repeat_text(text: Text, count: Int) -> Text {
 var out = ""
 var index = 0
 while index < count {
-set out = out + text
-set index = index + 1
+set out += text
+set index += 1
 }
 out
 }
@@ -119,7 +328,7 @@ if codes[index] == 10 {
 set lines = append(lines, from_code_points(slice(codes, start, index)))
 set start = index + 1
 }
-set index = index + 1
+set index += 1
 }
 if start < length(codes) {
 set lines = append(lines, from_code_points(slice(codes, start, length(codes))))
@@ -137,7 +346,7 @@ if codes[index] == separator {
 set parts = append(parts, from_code_points(slice(codes, start, index)))
 set start = index + 1
 }
-set index = index + 1
+set index += 1
 }
 append(parts, from_code_points(slice(codes, start, length(codes))))
 }
@@ -152,10 +361,10 @@ var index = 0
 while index + width <= length(codes) {
 if slice(codes, index, index + width) == sep {
 set parts = append(parts, from_code_points(slice(codes, start, index)))
-set index = index + width
+set index += width
 set start = index
 } else {
-set index = index + 1
+set index += 1
 }
 }
 append(parts, from_code_points(slice(codes, start, length(codes))))
@@ -176,7 +385,7 @@ var out: List[Int] = []
 var index = length(reversed) - 1
 while index >= 0 {
 set out = append(out, reversed[index])
-set index = index - 1
+set index -= 1
 }
 from_code_points(out)
 }
@@ -246,16 +455,37 @@ set out = "\(out)\(pad) |\n"
 if diagnostic.help != "" {
 set out = "\(out)help: \(diagnostic.help)\n"
 }
+for f in diagnostic.fixes {
+set out = "\(out)fix: \(f.message)\n\(fix_preview(f, files))"
+}
 out
 }
 
 fn json_or_null(text: Text) -> Text = if text == "" { "null" } else { json_string(text) }
 
+fn source_line(text: Text, line: Int) -> Text {
+let lines = split_lines(text)
+if line >= 1 and line <= length(lines) { lines[line - 1] } else { "" }
+}
+
+fn fixes_json(fixes: List[Fix], files: List[SourceFile]) -> Text {
+var parts: List[Text] = []
+for f in fixes {
+var edits: List[Text] = []
+for e in f.edits {
+let s = e.span
+set edits = append(edits, "{\"file\":\(json_string(files[s.file].path)),\"line\":\(s.line),\"column\":\(s.col),\"end_line\":\(s.end_line),\"end_column\":\(s.end_col),\"replacement\":\(json_string(e.replacement))}")
+}
+set parts = append(parts, "{\"message\":\(json_string(f.message)),\"edits\":[\(join(edits, ","))]}")
+}
+"[\(join(parts, ","))]"
+}
+
 pub fn render_json(diagnostics: List[Diagnostic], files: List[SourceFile]) -> Text {
 var parts: List[Text] = []
 for d in diagnostics {
 let s = d.span
-set parts = append(parts, "{\"severity\":\"error\",\"code\":\(json_string(d.code)),\"message\":\(json_string(d.message)),\"file\":\(json_string(files[s.file].path)),\"line\":\(s.line),\"column\":\(s.col),\"end_line\":\(s.end_line),\"end_column\":\(s.end_col),\"label\":\(json_or_null(d.label)),\"help\":\(json_or_null(d.help))}")
+set parts = append(parts, "{\"severity\":\"error\",\"code\":\(json_string(d.code)),\"message\":\(json_string(d.message)),\"file\":\(json_string(files[s.file].path)),\"line\":\(s.line),\"column\":\(s.col),\"end_line\":\(s.end_line),\"end_column\":\(s.end_col),\"label\":\(json_or_null(d.label)),\"help\":\(json_or_null(d.help)),\"expected\":\(json_or_null(d.expected)),\"actual\":\(json_or_null(d.actual)),\"source_line\":\(json_or_null(source_line(files[s.file].text, s.line))),\"fixes\":\(fixes_json(d.fixes, files))}")
 }
 "{\"diagnostics\":[\(join(parts, ","))]}"
 }
@@ -286,10 +516,10 @@ var j = 0
 while i < length(left) and j < length(right) {
 if comes_before(left[i], right[j]) {
 set merged = append(merged, left[i])
-set i = i + 1
+set i += 1
 } else {
 set merged = append(merged, right[j])
-set j = j + 1
+set j += 1
 }
 }
 concat(concat(merged, slice(left, i, length(left))), slice(right, j, length(right)))

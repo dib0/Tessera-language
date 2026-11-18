@@ -86,8 +86,7 @@ var textures: List[Picture] = []
 var texture_index: Map[Text, Int] = [:]
 for lump_name in ["TEXTURE1", "TEXTURE2"] {
 match wad.lump(w, lump_name) {
-.Some(data) => {
-for index in range(0, bytes.read_i32_le(data, 0)) {
+.Some(data) => for index in range(0, bytes.read_i32_le(data, 0)) {
 let at = bytes.read_i32_le(data, 4 + index * 4)
 let name = to_upper(bytes.read_ascii(data, at, 8))
 if contains(wanted, name) and not contains(texture_index, name) {
@@ -99,22 +98,17 @@ let entry = at + 22 + p * 10
 let patch_name = names[bytes.read_i16_le(data, entry + 4)]
 if not contains(patches, patch_name) {
 match wad.lump(w, patch_name) {
-.Some(patch_data) => {
-set patches = put(patches, patch_name, decode_picture(patch_name, patch_data))
-}
+.Some(patch_data) => set patches = put(patches, patch_name, decode_picture(patch_name, patch_data))
 .None => {}
 }
 }
 match get(patches, patch_name) {
-.Some(patch) => {
-set pixels = place(pixels, width, height, patch, bytes.read_i16_le(data, entry), bytes.read_i16_le(data, entry + 2))
-}
+.Some(patch) => set pixels = place(pixels, width, height, patch, bytes.read_i16_le(data, entry), bytes.read_i16_le(data, entry + 2))
 .None => {}
 }
 }
 set texture_index = put(texture_index, name, length(textures))
 set textures += [Picture { name: name, width: width, height: height, left: 0, top: 0, pixels: pixels }]
-}
 }
 }
 .None => {}

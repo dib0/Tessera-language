@@ -1,0 +1,1111 @@
+// The syntax tree as JSON (spec section 20.1): `tessera1 ast` writes it, `tessera1 render`
+// and every command that takes a `.json` file read it. The JSON follows the canonical text,
+// not the parser's internal form: `"a\(x)"` is an `interpolation` node, `set x += 1` keeps
+// its operator, and a block lists its final value as its last statement. Comments travel
+// with the node they stand above, so text -> JSON -> text gives the canonical text again.
+
+import source uses nothing
+import lexer uses nothing
+import ast uses nothing
+import printer uses nothing
+import std/json uses nothing
+
+// ---------- writing ----------
+
+fn object(marker: Text, fields: List[Text]) -> Text = "{\(marker)\(join(fields, ","))}"
+
+fn key(name: Text, value: Text) -> Text = "\"\(name)\":\(value)"
+
+fn str(text: Text) -> Text = source.json_string(text)
+
+fn texts(items: List[Text]) -> Text {
+var parts: List[Text] = []
+for item in items {
+set parts = append(parts, str(item))
+}
+"[\(join(parts, ","))]"
+}
+
+fn array(parts: List[Text]) -> Text = "[\(join(parts, ","))]"
+
+note "Comment placeholders, replaced by `attach_comments` once the whole file is written: `S` before a statement-like node, `T` before a declaration (blank lines kept), `E` at the end of a block, `F` at the end of the file."
+fn marker(kind: Text, line: Int) -> Text = "\(from_code_point(1))\(kind)\(line)\(from_code_point(1))"
+
+fn start_marker(p: printer.Printer, span: source.Span) -> Text = if span.file == p.file { marker("S", span.line) } else { "" }
+
+fn end_marker(p: printer.Printer, span: source.Span) -> Text = if span.file == p.file { marker("E", span.end_line) } else { "" }
+
+pub fn type_json(te: ast.TypeExpr) -> Text {
+if te.name == "fn" and length(te.args) >= 2 {
+let count = length(te.args)
+var params: List[Text] = []
+for a in slice(te.args, 0, count - 2) {
+set params = append(params, type_json(a))
+}
+var effects: List[Text] = []
+for e in te.args[count - 1].args {
+set effects = append(effects, e.name)
+}
+var fields = [key("name", str("fn")), key("params", array(params)), key("returns", type_json(te.args[count - 2]))]
+if length(effects) > 0 {
+set fields = append(fields, key("uses", texts(effects)))
+}
+return object("", fields)
+}
+if length(te.args) == 0 {
+return str(te.name)
+}
+var args: List[Text] = []
+for a in te.args {
+set args = append(args, type_json(a))
+}
+object("", [key("name", str(te.name)), key("args", array(args))])
+}
+
+fn exprs_json(p: printer.Printer, items: List[ast.Expr]) -> Text {
+var parts: List[Text] = []
+for e in items {
+set parts = append(parts, expr_json(p, e, ""))
+}
+array(parts)
+}
+
+fn field_inits_json(p: printer.Printer, fields: List[ast.FieldInit]) -> Text {
+var parts: List[Text] = []
+for f in fields {
+set parts = append(parts, object("", [key("name", str(f.name)), key("value", expr_json(p, f.value, ""))]))
+}
+array(parts)
+}
+
+fn unary_symbol(op: ast.UnaryOp) -> Text = if op == .Negate { "-" } else { "not" }
+
+pub fn expr_json(p: printer.Printer, e: ast.Expr, m: Text) -> Text {
+match e.kind {
+.IntLiteral(value) => object(m, [key("kind", str("int")), key("value", to_text(value))])
+.BoolLiteral(value) => object(m, [key("kind", str("bool")), key("value", if value { "true" } else { "false" })])
+.TextLiteral(value) => object(m, [key("kind", str("text")), key("value", str(value))])
+.DecimalLiteral(digits) => object(m, [key("kind", str("number")), key("text", str(digits))])
+.UnitLiteral => object(m, [key("kind", str("unit"))])
+.Name(name) => object(m, [key("kind", str("name")), key("name", str(name))])
+.FunctionRef(name) => object(m, [key("kind", str("name")), key("name", str(name))])
+.Break => object(m, [key("kind", str("break"))])
+.Continue => object(m, [key("kind", str("continue"))])
+.ListLiteral(items) => object(m, [key("kind", str("list")), key("items", exprs_json(p, items))])
+.MapLiteral(keys, values) => {
+var entries: List[Text] = []
+for i in range(0, length(keys)) {
+set entries = append(entries, object("", [key("key", expr_json(p, keys[i], "")), key("value", expr_json(p, values[i], ""))]))
+}
+object(m, [key("kind", str("map")), key("entries", array(entries))])
+}
+.Call(name, _, args) => object(m, [key("kind", str("call")), key("function", str(name)), key("args", exprs_json(p, args))])
+.CallValue(callee, args) => object(m, [key("kind", str("call_value")), key("callee", expr_json(p, callee, "")), key("args", exprs_json(p, args))])
+.Index(target, index) => object(m, [key("kind", str("index")), key("target", expr_json(p, target, "")), key("index", expr_json(p, index, ""))])
+.FieldAccess(target, name, _) => object(m, [key("kind", str("field")), key("target", expr_json(p, target, "")), key("name", str(name))])
+.RecordUpdate(target, fields) => object(m, [key("kind", str("with")), key("target", expr_json(p, target, "")), key("fields", field_inits_json(p, fields))])
+.Unary(op, operand) => object(m, [key("kind", str("unary")), key("op", str(unary_symbol(op))), key("operand", expr_json(p, operand, ""))])
+.Try(operand) => object(m, [key("kind", str("try")), key("operand", expr_json(p, operand, ""))])
+.Binary(op, _, left, right) => {
+if printer.interpolation(p, e) != "" {
+var parts: List[Text] = []
+for piece in printer.interpolation_pieces(e) {
+if printer.is_empty_text(piece) {
+continue
+}
+let part = match piece.kind {
+.TextLiteral(value) => str(value)
+.Call(_, _, args) => expr_json(p, args[0], "")
+_ => expr_json(p, piece, "")
+}
+set parts = append(parts, part)
+}
+return object(m, [key("kind", str("interpolation")), key("parts", array(parts))])
+}
+object(m, [key("kind", str("binary")), key("op", str(ast.binary_symbol(op))), key("left", expr_json(p, left, "")), key("right", expr_json(p, right, ""))])
+}
+.If(condition, then_block, else_branch) => {
+var fields = [key("kind", str("if")), key("condition", expr_json(p, condition, "")), key("then", block_json(p, then_block))]
+match else_branch {
+.Some(other) => set fields = append(fields, key("else", expr_json(p, other, "")))
+.None => {}
+}
+object(m, fields)
+}
+.BlockExpr(block) => block_json_marked(p, block, m)
+.Match(scrutinee, arms) => {
+var parts: List[Text] = []
+for arm in arms {
+set parts = append(parts, arm_json(p, arm))
+}
+"{\(m)\(key("kind", str("match"))),\(key("value", expr_json(p, scrutinee, ""))),\(key("arms", array(parts)))\(end_marker(p, e.span))}"
+}
+.RecordLiteral(type_name, _, fields) => object(m, [key("kind", str("record")), key("type", str(type_name)), key("fields", field_inits_json(p, fields))])
+.VariantLiteral(type_name, variant, _, args) => {
+var fields = [key("kind", str("variant"))]
+if type_name != "" {
+set fields = append(fields, key("type", str(type_name)))
+}
+set fields = append(fields, key("variant", str(variant)))
+if length(args) > 0 {
+set fields = append(fields, key("args", exprs_json(p, args)))
+}
+object(m, fields)
+}
+.Return(value) => match value {
+.Some(v) => object(m, [key("kind", str("return")), key("value", expr_json(p, v, ""))])
+.None => object(m, [key("kind", str("return"))])
+}
+.OrElse(value, otherwise) => object(m, [key("kind", str("or_else")), key("value", expr_json(p, value, "")), key("else", expr_json(p, otherwise, ""))])
+}
+}
+
+fn block_json(p: printer.Printer, block: ast.Block) -> Text = block_json_marked(p, block, "")
+
+fn block_json_marked(p: printer.Printer, block: ast.Block, m: Text) -> Text {
+var parts: List[Text] = []
+for s in block.statements {
+set parts = append(parts, statement_json(p, s))
+}
+match block.tail {
+.Some(tail) => set parts = append(parts, expr_json(p, tail, start_marker(p, tail.span)))
+.None => {}
+}
+"{\(m)\(key("kind", str("block"))),\(key("statements", array(parts)))\(end_marker(p, block.span))}"
+}
+
+fn arm_json(p: printer.Printer, arm: ast.Arm) -> Text {
+let body = match printer.arm_statement(arm.body) {
+.Some(statement) => statement_body_json(p, statement, "")
+.None => expr_json(p, arm.body, "")
+}
+object(start_marker(p, arm.pattern.span), [key("pattern", pattern_json(arm.pattern)), key("body", body)])
+}
+
+pub fn pattern_json(pattern: ast.Pattern) -> Text {
+match pattern.kind {
+.Wildcard => object("", [key("kind", str("wildcard"))])
+.IntPattern(value) => object("", [key("kind", str("int")), key("value", to_text(value))])
+.TextPattern(value) => object("", [key("kind", str("text")), key("value", str(value))])
+.BoolPattern(value) => object("", [key("kind", str("bool")), key("value", if value { "true" } else { "false" })])
+.VariantPattern(type_name, variant, bindings) => {
+var fields = [key("kind", str("variant"))]
+if type_name != "" {
+set fields = append(fields, key("type", str(type_name)))
+}
+set fields = append(fields, key("variant", str(variant)))
+if length(bindings) > 0 {
+var names: List[Text] = []
+for b in bindings {
+set names = append(names, b.name)
+}
+set fields = append(fields, key("bindings", texts(names)))
+}
+object("", fields)
+}
+}
+}
+
+pub fn statement_json(p: printer.Printer, s: ast.Statement) -> Text = statement_body_json(p, s, start_marker(p, printer.statement_span(s)))
+
+fn set_json(p: printer.Printer, m: Text, target: ast.Expr, value: ast.Expr) -> Text {
+let target_text = printer.flat(printer.print_expr(p, target, false))
+let op = printer.compound_operator(p, target_text, value)
+if op != "" {
+return object(m, [key("kind", str("set")), key("target", expr_json(p, target, "")), key("op", str(op)), key("value", expr_json(p, printer.compound_right(value), ""))])
+}
+object(m, [key("kind", str("set")), key("target", expr_json(p, target, "")), key("value", expr_json(p, value, ""))])
+}
+
+fn statement_body_json(p: printer.Printer, s: ast.Statement, m: Text) -> Text {
+match s {
+.Let(name, _, declared, value, mutable) => {
+var fields = [key("kind", str(if mutable { "var" } else { "let" })), key("name", str(name))]
+match declared {
+.Some(te) => set fields = append(fields, key("type", type_json(te)))
+.None => {}
+}
+match value.kind {
+.OrElse(inner, otherwise) => {
+set fields = append(fields, key("value", expr_json(p, inner, "")))
+set fields = append(fields, key("else", expr_json(p, otherwise, "")))
+}
+_ => set fields = append(fields, key("value", expr_json(p, value, "")))
+}
+object(m, fields)
+}
+.Set(name, name_span, value) => set_json(p, m, ast.make_expr(.Name(name), name_span), value)
+.SetPlace(target, value) => set_json(p, m, target, value)
+.For(variable, _, iterable, body) => object(m, [key("kind", str("for")), key("variable", str(variable)), key("iterable", expr_json(p, iterable, "")), key("body", block_json(p, body))])
+.While(condition, body) => object(m, [key("kind", str("while")), key("condition", expr_json(p, condition, "")), key("body", block_json(p, body))])
+.ExprStatement(expr) => expr_json(p, expr, m)
+}
+}
+
+fn notes_and_pub(notes: List[ast.Note], public: Bool) -> List[Text] {
+var fields: List[Text] = []
+if public {
+set fields = append(fields, key("pub", "true"))
+}
+if length(notes) > 0 {
+var texts_list: List[Text] = []
+for n in notes {
+set texts_list = append(texts_list, n.text)
+}
+set fields = append(fields, key("notes", texts(texts_list)))
+}
+fields
+}
+
+fn fields_json(p: printer.Printer, fields: List[ast.Field], marked: Bool) -> Text {
+var parts: List[Text] = []
+for f in fields {
+let m = if marked { start_marker(p, f.span) } else { "" }
+set parts = append(parts, object(m, [key("name", str(f.name)), key("type", type_json(f.type_expr))]))
+}
+array(parts)
+}
+
+fn item_marker(p: printer.Printer, notes: List[ast.Note], span: source.Span) -> Text {
+let first = if length(notes) > 0 { notes[0].span } else { span }
+if first.file == p.file { marker("T", first.line) } else { "" }
+}
+
+pub fn item_json(p: printer.Printer, item: ast.Item) -> Text {
+match item {
+.FunctionItem(f) => {
+var params: List[Text] = []
+for param in f.params {
+set params = append(params, object("", [key("name", str(param.name)), key("type", type_json(param.type_expr))]))
+}
+var fields = concat([key("kind", str("fn")), key("name", str(f.name))], notes_and_pub(f.notes, f.public))
+set fields = append(fields, key("params", array(params)))
+set fields = append(fields, key("returns", type_json(f.return_type)))
+if length(f.effects) > 0 {
+var effects: List[Text] = []
+for e in f.effects {
+set effects = append(effects, e.name)
+}
+set fields = append(fields, key("uses", texts(effects)))
+}
+set fields = append(fields, key("body", expr_json(p, f.body, "")))
+object(item_marker(p, f.notes, f.name_span), fields)
+}
+.RecordItem(r) => {
+let fields = concat(concat([key("kind", str("type")), key("name", str(r.name))], notes_and_pub(r.notes, r.public)), [key("fields", fields_json(p, r.fields, true))])
+object(item_marker(p, r.notes, r.name_span), fields)
+}
+.EnumItem(e) => {
+var variants: List[Text] = []
+for v in e.variants {
+var fields = [key("name", str(v.name))]
+if length(v.fields) > 0 {
+set fields = append(fields, key("fields", fields_json(p, v.fields, false)))
+}
+set variants = append(variants, object(start_marker(p, v.span), fields))
+}
+let fields = concat(concat([key("kind", str("enum")), key("name", str(e.name))], notes_and_pub(e.notes, e.public)), [key("variants", array(variants))])
+object(item_marker(p, e.notes, e.name_span), fields)
+}
+.ImportItem(i) => {
+var fields = [key("kind", str("import")), key("path", str(i.path))]
+if i.limited {
+set fields = append(fields, key("uses", texts(i.allowed)))
+}
+object(item_marker(p, [], i.span), fields)
+}
+.TestItem(name, span, body) => object(item_marker(p, [], span), [key("kind", str("test")), key("name", str(name)), key("body", expr_json(p, body, ""))])
+}
+}
+
+type Attach {
+comments: List[lexer.Comment]
+cursor: Int
+}
+
+fn comment_entries(group: List[lexer.Comment], keep_blanks: Bool, before: Int) -> List[Text] {
+var out: List[Text] = []
+var previous = -1
+for c in group {
+if keep_blanks and previous >= 0 and c.line > previous + 1 {
+set out = append(out, "")
+}
+set out = append(out, c.text)
+set previous = c.line
+}
+if keep_blanks and before > 0 and length(group) > 0 and before > group[length(group) - 1].line + 1 {
+set out = append(out, "")
+}
+out
+}
+
+fn marker_line(part: Text) -> Int {
+let codes = code_points(part)
+value_or(parse_int(from_code_points(slice(codes, 1, length(codes)))), 0)
+}
+
+note "Replaces the placeholders written by `marker` with the comments that belong to each node, by the same rule as the printer (`printer.comment_owners`)."
+fn attach_comments(text: Text, comments: List[lexer.Comment]) -> Text {
+let parts = source.split_on(text, 1)
+var lines: List[printer.Line] = []
+var index = 1
+while index < length(parts) {
+if not source.starts_with_text(parts[index], "F") {
+set lines = append(lines, printer.Line { text: "", anchor: marker_line(parts[index]), top: false })
+}
+set index = index + 2
+}
+var owners = printer.comment_owners(printer.anchor_lines(lines), comments)
+var out: List[Text] = []
+set index = 0
+while index < length(parts) {
+let part = parts[index]
+if index % 2 == 0 {
+set out = append(out, part)
+} else {
+let kind = from_code_point(code_points(part)[0])
+let line = if kind == "F" { 0 } else { marker_line(part) }
+match get(owners, line) {
+.Some(group) => {
+set owners = remove(owners, line)
+let entries = comment_entries(group, kind == "T" or kind == "F", line)
+if kind == "E" or kind == "F" {
+set out = append(out, ",\(key("end_comments", texts(entries)))")
+} else {
+set out = append(out, "\(key("comments", texts(entries))),")
+}
+}
+.None => {}
+}
+}
+set index = index + 1
+}
+join(out, "")
+}
+
+note "The JSON form of a file: one declaration per line."
+pub fn file_json(items: List[ast.Item], comments: List[lexer.Comment], file: Int) -> Text {
+let p = printer.Printer { file: file }
+var parts: List[Text] = []
+for item in items {
+set parts = append(parts, item_json(p, item))
+}
+let body = if length(parts) == 0 { "[]" } else { "[\n\(join(parts, ",\n"))\n]" }
+let text = "{\(key("tessera_ast", "1")),\(key("items", body))\(marker("F", 0))}\n"
+attach_comments(text, comments)
+}
+
+// ---------- reading ----------
+
+note "Reading state: the next synthetic line number, the comments read so far, and the first error. Every node that can carry comments gets a fresh line, so the printer places the comments exactly where they were attached."
+type Reader {
+file: Int
+line: Int
+comments: List[lexer.Comment]
+error: Text
+}
+
+type ExprRead {
+r: Reader
+expr: ast.Expr
+}
+
+type ExprsRead {
+r: Reader
+exprs: List[ast.Expr]
+}
+
+type BlockRead {
+r: Reader
+block: ast.Block
+}
+
+type StatementRead {
+r: Reader
+statement: ast.Statement
+}
+
+type ItemRead {
+r: Reader
+item: ast.Item
+}
+
+type ArmRead {
+r: Reader
+arm: ast.Arm
+}
+
+type TypeRead {
+r: Reader
+type_expr: ast.TypeExpr
+}
+
+type FieldsRead {
+r: Reader
+fields: List[ast.Field]
+}
+
+type InitsRead {
+r: Reader
+inits: List[ast.FieldInit]
+}
+
+note "A file read from JSON: its declarations and comments, or the first problem found (with the JSON path where it is)."
+pub type ReadFile {
+items: List[ast.Item]
+comments: List[lexer.Comment]
+error: Text
+}
+
+fn failed(r: Reader, path: Text, message: Text) -> Reader = if r.error != "" { r } else { r with { error: "\(path): \(message)" } }
+
+fn here(r: Reader) -> source.Span = source.Span { file: r.file, line: r.line, col: 1, end_line: r.line, end_col: 1 }
+
+fn next_line(r: Reader) -> Reader = r with { line: r.line + 1 }
+
+fn get_field(j: json.Json, name: Text) -> Option[json.Json] = json.field(j, name)
+
+fn text_of(r: Reader, j: json.Json, name: Text, path: Text) -> Text {
+match json.text_field(j, name) {
+.Some(value) => value
+.None => ""
+}
+}
+
+fn require_text(r: Reader, j: json.Json, name: Text, path: Text) -> Reader {
+match json.text_field(j, name) {
+.Some(_) => r
+.None => failed(r, path, "needs a text field `\(name)`")
+}
+}
+
+fn bool_of(j: json.Json, name: Text) -> Bool {
+match get_field(j, name) {
+.Some(value) => value_or(json.as_bool(value), false)
+.None => false
+}
+}
+
+fn list_of(j: json.Json, name: Text) -> List[json.Json] {
+match get_field(j, name) {
+.Some(value) => json.as_list(value)
+.None => []
+}
+}
+
+fn texts_of(j: json.Json, name: Text) -> List[Text] {
+var out: List[Text] = []
+for item in list_of(j, name) {
+set out = append(out, value_or(json.as_text(item), ""))
+}
+out
+}
+
+fn has(j: json.Json, name: Text) -> Bool = get_field(j, name) != .None
+
+fn is_object(j: json.Json) -> Bool {
+match j {
+.Object(_) => true
+_ => false
+}
+}
+
+note "Reads the `comments` (or `end_comments`) of a node: each text becomes a comment on its own line, an empty text a blank line."
+fn read_comments(start: Reader, j: json.Json, name: Text) -> Reader {
+var r = start
+for entry in list_of(j, name) {
+let text = value_or(json.as_text(entry), "")
+if text != "" {
+let line_text = if source.starts_with_text(text, "//") { text } else { "// \(text)" }
+set r = r with { comments: append(r.comments, lexer.Comment { text: line_text, line: r.line }) }
+}
+set r = next_line(r)
+}
+r
+}
+
+fn read_type(start: Reader, j: json.Json, path: Text) -> TypeRead {
+let span = here(start)
+match j {
+.String(name) => return TypeRead { r: start, type_expr: ast.TypeExpr { name: name, args: [], span: span } }
+_ => {}
+}
+let name = text_of(start, j, "name", path)
+var r = require_text(start, j, "name", path)
+if name == "fn" {
+var args: List[ast.TypeExpr] = []
+var index = 0
+for item in list_of(j, "params") {
+let read = read_type(r, item, "\(path).params[\(index)]")
+set r = read.r
+set args = append(args, read.type_expr)
+set index = index + 1
+}
+let result = match get_field(j, "returns") {
+.Some(value) => read_type(r, value, "\(path).returns")
+.None => TypeRead { r: failed(r, path, "a function type needs `returns`"), type_expr: ast.TypeExpr { name: "Unit", args: [], span: span } }
+}
+var effects: List[ast.TypeExpr] = []
+for effect in texts_of(j, "uses") {
+set effects = append(effects, ast.TypeExpr { name: effect, args: [], span: span })
+}
+set args = append(append(args, result.type_expr), ast.TypeExpr { name: "uses", args: effects, span: span })
+return TypeRead { r: result.r, type_expr: ast.TypeExpr { name: "fn", args: args, span: span } }
+}
+var args: List[ast.TypeExpr] = []
+var index = 0
+for item in list_of(j, "args") {
+let read = read_type(r, item, "\(path).args[\(index)]")
+set r = read.r
+set args = append(args, read.type_expr)
+set index = index + 1
+}
+TypeRead { r: r, type_expr: ast.TypeExpr { name: name, args: args, span: span } }
+}
+
+fn required_type(r: Reader, j: json.Json, name: Text, path: Text) -> TypeRead {
+match get_field(j, name) {
+.Some(value) => read_type(r, value, "\(path).\(name)")
+.None => TypeRead { r: failed(r, path, "needs a type `\(name)`"), type_expr: ast.TypeExpr { name: "Unit", args: [], span: here(r) } }
+}
+}
+
+fn read_exprs(start: Reader, items: List[json.Json], path: Text) -> ExprsRead {
+var r = start
+var out: List[ast.Expr] = []
+var index = 0
+for item in items {
+let read = read_expr(r, item, "\(path)[\(index)]")
+set r = read.r
+set out = append(out, read.expr)
+set index = index + 1
+}
+ExprsRead { r: r, exprs: out }
+}
+
+fn required_expr(r: Reader, j: json.Json, name: Text, path: Text) -> ExprRead {
+match get_field(j, name) {
+.Some(value) => read_expr(r, value, "\(path).\(name)")
+.None => ExprRead { r: failed(r, path, "needs an expression `\(name)`"), expr: ast.make_expr(.UnitLiteral, here(r)) }
+}
+}
+
+fn read_inits(start: Reader, items: List[json.Json], path: Text) -> InitsRead {
+var r = start
+var out: List[ast.FieldInit] = []
+var index = 0
+for item in items {
+let item_path = "\(path)[\(index)]"
+let name = text_of(r, item, "name", item_path)
+set r = require_text(r, item, "name", item_path)
+let value = required_expr(r, item, "value", item_path)
+set r = value.r
+set out = append(out, ast.FieldInit { name: name, span: here(r), value: value.expr })
+set index = index + 1
+}
+InitsRead { r: r, inits: out }
+}
+
+fn binary_op(symbol: Text) -> Option[ast.BinaryOp] {
+match symbol {
+"+" => .Some(.Add)
+"-" => .Some(.Subtract)
+"*" => .Some(.Multiply)
+"/" => .Some(.Divide)
+"%" => .Some(.Remainder)
+"==" => .Some(.Equal)
+"!=" => .Some(.NotEqual)
+"<" => .Some(.Less)
+"<=" => .Some(.LessEqual)
+">" => .Some(.Greater)
+">=" => .Some(.GreaterEqual)
+"and" => .Some(.And)
+"or" => .Some(.Or)
+_ => .None
+}
+}
+
+fn number_value(j: json.Json, name: Text) -> Int {
+match get_field(j, name) {
+.Some(value) => value_or(json.as_int(value), 0)
+.None => 0
+}
+}
+
+fn is_int(j: json.Json, name: Text) -> Bool {
+match get_field(j, name) {
+.Some(value) => json.as_int(value) != .None
+.None => false
+}
+}
+
+fn is_text(e: ast.Expr) -> Bool {
+match e.kind {
+.TextLiteral(_) => true
+_ => false
+}
+}
+
+fn add(left: ast.Expr, right: ast.Expr) -> ast.Expr = ast.make_expr(.Binary(.Add, left.span, left, right), left.span)
+
+note "`parts` of an interpolation: texts and expressions. Neighbouring texts are joined, empty texts dropped, and two expressions in a row get an empty text between them: exactly the pieces the lexer makes of the literal."
+fn read_interpolation(start: Reader, j: json.Json, path: Text) -> ExprRead {
+var r = start
+let span = here(r)
+var pieces: List[ast.Expr] = []
+var pending = ""
+var index = 0
+for part in list_of(j, "parts") {
+match part {
+.String(value) => set pending = pending + value
+_ => {
+if pending != "" {
+set pieces = append(pieces, ast.make_expr(.TextLiteral(pending), span))
+set pending = ""
+}
+let read = read_expr(r, part, "\(path).parts[\(index)]")
+set r = read.r
+let count = length(pieces)
+if count > 0 and not is_text(pieces[count - 1]) {
+set pieces = append(pieces, ast.make_expr(.TextLiteral(""), span))
+}
+set pieces = append(pieces, ast.make_expr(.Call("to_text", span, [read.expr]), span))
+}
+}
+set index = index + 1
+}
+if pending != "" {
+set pieces = append(pieces, ast.make_expr(.TextLiteral(pending), span))
+}
+if length(pieces) == 0 {
+return ExprRead { r: r, expr: ast.make_expr(.TextLiteral(""), span) }
+}
+var result = pieces[0]
+for piece in slice(pieces, 1, length(pieces)) {
+set result = add(result, piece)
+}
+ExprRead { r: r, expr: result }
+}
+
+fn read_expr(start: Reader, j: json.Json, path: Text) -> ExprRead {
+if not is_object(j) {
+return ExprRead { r: failed(start, path, "an expression must be an object with a `kind`"), expr: ast.make_expr(.UnitLiteral, here(start)) }
+}
+let kind = text_of(start, j, "kind", path)
+let span = here(start)
+let r = start
+let unit = ast.make_expr(.UnitLiteral, span)
+match kind {
+"int" => {
+if not is_int(j, "value") {
+return ExprRead { r: failed(r, path, "`int` needs a whole number `value`"), expr: unit }
+}
+ExprRead { r: r, expr: ast.make_expr(.IntLiteral(number_value(j, "value")), span) }
+}
+"number" => ExprRead { r: require_text(r, j, "text", path), expr: ast.make_expr(.DecimalLiteral(text_of(r, j, "text", path)), span) }
+"bool" => ExprRead { r: r, expr: ast.make_expr(.BoolLiteral(bool_of(j, "value")), span) }
+"text" => ExprRead { r: require_text(r, j, "value", path), expr: ast.make_expr(.TextLiteral(text_of(r, j, "value", path)), span) }
+"interpolation" => read_interpolation(r, j, path)
+"unit" => ExprRead { r: r, expr: unit }
+"name" => ExprRead { r: require_text(r, j, "name", path), expr: ast.make_expr(.Name(text_of(r, j, "name", path)), span) }
+"break" => ExprRead { r: r, expr: ast.make_expr(.Break, span) }
+"continue" => ExprRead { r: r, expr: ast.make_expr(.Continue, span) }
+"list" => {
+let items = read_exprs(r, list_of(j, "items"), "\(path).items")
+ExprRead { r: items.r, expr: ast.make_expr(.ListLiteral(items.exprs), span) }
+}
+"map" => {
+var q = r
+var keys: List[ast.Expr] = []
+var values: List[ast.Expr] = []
+var index = 0
+for entry in list_of(j, "entries") {
+let k = required_expr(q, entry, "key", "\(path).entries[\(index)]")
+let v = required_expr(k.r, entry, "value", "\(path).entries[\(index)]")
+set q = v.r
+set keys = append(keys, k.expr)
+set values = append(values, v.expr)
+set index = index + 1
+}
+ExprRead { r: q, expr: ast.make_expr(.MapLiteral(keys, values), span) }
+}
+"call" => {
+let args = read_exprs(require_text(r, j, "function", path), list_of(j, "args"), "\(path).args")
+ExprRead { r: args.r, expr: ast.make_expr(.Call(text_of(r, j, "function", path), span, args.exprs), span) }
+}
+"call_value" => {
+let callee = required_expr(r, j, "callee", path)
+let args = read_exprs(callee.r, list_of(j, "args"), "\(path).args")
+ExprRead { r: args.r, expr: ast.make_expr(.CallValue(callee.expr, args.exprs), span) }
+}
+"index" => {
+let target = required_expr(r, j, "target", path)
+let index = required_expr(target.r, j, "index", path)
+ExprRead { r: index.r, expr: ast.make_expr(.Index(target.expr, index.expr), span) }
+}
+"field" => {
+let target = required_expr(require_text(r, j, "name", path), j, "target", path)
+ExprRead { r: target.r, expr: ast.make_expr(.FieldAccess(target.expr, text_of(r, j, "name", path), span), span) }
+}
+"with" => {
+let target = required_expr(r, j, "target", path)
+let fields = read_inits(target.r, list_of(j, "fields"), "\(path).fields")
+let checked = if length(fields.inits) == 0 { failed(fields.r, path, "`with` needs at least one field") } else { fields.r }
+ExprRead { r: checked, expr: ast.make_expr(.RecordUpdate(target.expr, fields.inits), span) }
+}
+"unary" => {
+let op = text_of(r, j, "op", path)
+let operand = required_expr(r, j, "operand", path)
+if op != "-" and op != "not" {
+return ExprRead { r: failed(operand.r, path, "`unary` needs `op` `-` or `not`"), expr: unit }
+}
+ExprRead { r: operand.r, expr: ast.make_expr(.Unary(if op == "-" { ast.UnaryOp.Negate } else { ast.UnaryOp.Not }, operand.expr), span) }
+}
+"try" => {
+let operand = required_expr(r, j, "operand", path)
+ExprRead { r: operand.r, expr: ast.make_expr(.Try(operand.expr), span) }
+}
+"binary" => {
+let symbol = text_of(r, j, "op", path)
+let left = required_expr(r, j, "left", path)
+let right = required_expr(left.r, j, "right", path)
+match binary_op(symbol) {
+.Some(op) => ExprRead { r: right.r, expr: ast.make_expr(.Binary(op, span, left.expr, right.expr), span) }
+.None => ExprRead { r: failed(right.r, path, "unknown operator `\(symbol)`"), expr: unit }
+}
+}
+"if" => {
+let condition = required_expr(r, j, "condition", path)
+let then_block = required_block(condition.r, j, "then", path)
+match get_field(j, "else") {
+.Some(other) => {
+let else_read = read_else(then_block.r, other, "\(path).else")
+ExprRead { r: else_read.r, expr: ast.make_expr(.If(condition.expr, then_block.block, .Some(else_read.expr)), span) }
+}
+.None => ExprRead { r: then_block.r, expr: ast.make_expr(.If(condition.expr, then_block.block, .None), span) }
+}
+}
+"block" => {
+let block = read_block(r, j, path)
+ExprRead { r: block.r, expr: ast.make_expr(.BlockExpr(block.block), block.block.span) }
+}
+"match" => {
+let scrutinee = required_expr(r, j, "value", path)
+var q = scrutinee.r
+var arms: List[ast.Arm] = []
+var index = 0
+for arm in list_of(j, "arms") {
+let read = read_arm(q, arm, "\(path).arms[\(index)]")
+set q = read.r
+set arms = append(arms, read.arm)
+set index = index + 1
+}
+let closing = read_comments(q, j, "end_comments")
+let close = here(closing)
+ExprRead { r: next_line(closing), expr: ast.make_expr(.Match(scrutinee.expr, arms), source.span_to(span, close)) }
+}
+"record" => {
+let fields = read_inits(require_text(r, j, "type", path), list_of(j, "fields"), "\(path).fields")
+ExprRead { r: fields.r, expr: ast.make_expr(.RecordLiteral(text_of(r, j, "type", path), span, fields.inits), span) }
+}
+"variant" => {
+let args = read_exprs(require_text(r, j, "variant", path), list_of(j, "args"), "\(path).args")
+ExprRead { r: args.r, expr: ast.make_expr(.VariantLiteral(text_of(r, j, "type", path), text_of(r, j, "variant", path), span, args.exprs), span) }
+}
+"return" => match get_field(j, "value") {
+.Some(value) => {
+let read = read_expr(r, value, "\(path).value")
+ExprRead { r: read.r, expr: ast.make_expr(.Return(.Some(read.expr)), span) }
+}
+.None => ExprRead { r: r, expr: ast.make_expr(.Return(.None), span) }
+}
+_ => ExprRead { r: failed(r, path, "unknown expression kind `\(kind)`"), expr: unit }
+}
+}
+
+fn read_else(r: Reader, j: json.Json, path: Text) -> ExprRead {
+let kind = text_of(r, j, "kind", path)
+if kind != "if" and kind != "block" {
+return ExprRead { r: failed(r, path, "`else` must be a `block` or an `if`"), expr: ast.make_expr(.UnitLiteral, here(r)) }
+}
+read_expr(r, j, path)
+}
+
+fn required_block(r: Reader, j: json.Json, name: Text, path: Text) -> BlockRead {
+match get_field(j, name) {
+.Some(value) => {
+if text_of(r, value, "kind", path) != "block" {
+return BlockRead { r: failed(r, "\(path).\(name)", "must be a `block`"), block: ast.Block { statements: [], tail: .None, span: here(r) } }
+}
+read_block(r, value, "\(path).\(name)")
+}
+.None => BlockRead { r: failed(r, path, "needs a block `\(name)`"), block: ast.Block { statements: [], tail: .None, span: here(r) } }
+}
+}
+
+note "The last statement of a block becomes its value when it is an expression, as in the parser."
+pub fn make_block(statements: List[ast.Statement], span: source.Span) -> ast.Block {
+let count = length(statements)
+if count > 0 {
+match statements[count - 1] {
+.ExprStatement(last) => return ast.Block { statements: slice(statements, 0, count - 1), tail: .Some(last), span: span }
+_ => {}
+}
+}
+ast.Block { statements: statements, tail: .None, span: span }
+}
+
+fn read_block(start: Reader, j: json.Json, path: Text) -> BlockRead {
+let span = here(start)
+var r = next_line(start)
+var statements: List[ast.Statement] = []
+var index = 0
+for item in list_of(j, "statements") {
+let read = read_statement(r, item, "\(path).statements[\(index)]")
+set r = read.r
+set statements = append(statements, read.statement)
+set index = index + 1
+}
+let closing = read_comments(r, j, "end_comments")
+let close = here(closing)
+BlockRead { r: next_line(closing), block: make_block(statements, source.span_to(span, close)) }
+}
+
+fn read_arm(start: Reader, j: json.Json, path: Text) -> ArmRead {
+let r = read_comments(start, j, "comments")
+let span = here(r)
+let pattern = match get_field(j, "pattern") {
+.Some(value) => read_pattern(next_line(r), value, "\(path).pattern", span)
+.None => PatternRead { r: failed(next_line(r), path, "an arm needs a `pattern`"), pattern: ast.Pattern { kind: .Wildcard, span: span } }
+}
+let body_json = match get_field(j, "body") {
+.Some(value) => value
+.None => return ArmRead { r: failed(pattern.r, path, "an arm needs a `body`"), arm: ast.Arm { pattern: pattern.pattern, body: ast.make_expr(.UnitLiteral, span) } }
+}
+let kind = text_of(r, body_json, "kind", path)
+if kind == "let" or kind == "var" or kind == "set" or kind == "for" or kind == "while" {
+let statement = read_statement_body(pattern.r, body_json, "\(path).body")
+let block = ast.Block { statements: [statement.statement], tail: .None, span: span }
+return ArmRead { r: statement.r, arm: ast.Arm { pattern: pattern.pattern, body: ast.make_expr(.BlockExpr(block), span) } }
+}
+let body = read_expr(pattern.r, body_json, "\(path).body")
+ArmRead { r: body.r, arm: ast.Arm { pattern: pattern.pattern, body: body.expr } }
+}
+
+type PatternRead {
+r: Reader
+pattern: ast.Pattern
+}
+
+fn read_pattern(r: Reader, j: json.Json, path: Text, span: source.Span) -> PatternRead {
+let kind = text_of(r, j, "kind", path)
+let pattern_kind = match kind {
+"wildcard" => ast.PatternKind.Wildcard
+"int" => ast.PatternKind.IntPattern(number_value(j, "value"))
+"text" => ast.PatternKind.TextPattern(text_of(r, j, "value", path))
+"bool" => ast.PatternKind.BoolPattern(bool_of(j, "value"))
+"variant" => {
+var bindings: List[ast.Binding] = []
+for name in texts_of(j, "bindings") {
+set bindings = append(bindings, ast.Binding { name: name, span: span })
+}
+ast.PatternKind.VariantPattern(text_of(r, j, "type", path), text_of(r, j, "variant", path), bindings)
+}
+_ => return PatternRead { r: failed(r, path, "unknown pattern kind `\(kind)`"), pattern: ast.Pattern { kind: .Wildcard, span: span } }
+}
+PatternRead { r: r, pattern: ast.Pattern { kind: pattern_kind, span: span } }
+}
+
+fn read_statement(start: Reader, j: json.Json, path: Text) -> StatementRead {
+let r = read_comments(start, j, "comments")
+read_statement_body(r, j, path)
+}
+
+fn read_statement_body(start: Reader, j: json.Json, path: Text) -> StatementRead {
+let span = here(start)
+let r = next_line(start)
+let kind = text_of(r, j, "kind", path)
+if kind == "let" or kind == "var" {
+let name = text_of(r, j, "name", path)
+var q = require_text(r, j, "name", path)
+var declared: Option[ast.TypeExpr] = .None
+if has(j, "type") {
+let te = required_type(q, j, "type", path)
+set q = te.r
+set declared = .Some(te.type_expr)
+}
+let value = required_expr(q, j, "value", path)
+var final_value = value.expr
+set q = value.r
+if has(j, "else") {
+let otherwise = required_expr(q, j, "else", path)
+set q = otherwise.r
+set final_value = ast.make_expr(.OrElse(value.expr, otherwise.expr), span)
+}
+return StatementRead { r: q, statement: .Let(name, span, declared, final_value, kind == "var") }
+}
+if kind == "set" {
+let target = required_expr(r, j, "target", path)
+let value = required_expr(target.r, j, "value", path)
+let op = if has(j, "op") { text_of(r, j, "op", path) } else { "=" }
+var q = value.r
+var final_value = value.expr
+if op == "+=" or op == "-=" {
+let binary = if op == "+=" { ast.BinaryOp.Add } else { ast.BinaryOp.Subtract }
+set final_value = ast.make_expr(.Binary(binary, span, target.expr, value.expr), span)
+} else if op != "=" {
+set q = failed(q, path, "`op` must be `=`, `+=` or `-=`")
+}
+let statement = match target.expr.kind {
+.Name(name) => ast.Statement.Set(name, span, final_value)
+_ => ast.Statement.SetPlace(target.expr with { span: span }, final_value)
+}
+if not is_place(target.expr) {
+set q = failed(q, path, "the `target` of `set` must be a name followed by `field` and `index` steps")
+}
+return StatementRead { r: q, statement: statement }
+}
+if kind == "for" {
+let variable = text_of(r, j, "variable", path)
+let iterable = required_expr(require_text(r, j, "variable", path), j, "iterable", path)
+let body = required_block(iterable.r, j, "body", path)
+return StatementRead { r: body.r, statement: .For(variable, span, iterable.expr, body.block) }
+}
+if kind == "while" {
+let condition = required_expr(r, j, "condition", path)
+let body = required_block(condition.r, j, "body", path)
+return StatementRead { r: body.r, statement: .While(condition.expr with { span: span }, body.block) }
+}
+let expr = read_expr(start, j, path)
+let read = expr.expr
+let anchored = read with { span: source.Span { file: span.file, line: span.line, col: 1, end_line: read.span.end_line, end_col: 1 } }
+StatementRead { r: if expr.r.line == start.line { next_line(expr.r) } else { expr.r }, statement: .ExprStatement(anchored) }
+}
+
+fn is_place(e: ast.Expr) -> Bool {
+match e.kind {
+.Name(_) => true
+.FieldAccess(target, _, _) => is_place(target)
+.Index(target, _) => is_place(target)
+_ => false
+}
+}
+
+fn read_fields(start: Reader, items: List[json.Json], path: Text, marked: Bool) -> FieldsRead {
+var r = start
+var out: List[ast.Field] = []
+var index = 0
+for item in items {
+let item_path = "\(path)[\(index)]"
+if marked {
+set r = read_comments(r, item, "comments")
+}
+let span = here(r)
+if marked {
+set r = next_line(r)
+}
+let name = text_of(r, item, "name", item_path)
+set r = require_text(r, item, "name", item_path)
+let te = required_type(r, item, "type", item_path)
+set r = te.r
+set out = append(out, ast.Field { name: name, span: span, type_expr: te.type_expr })
+set index = index + 1
+}
+FieldsRead { r: r, fields: out }
+}
+
+fn read_notes(j: json.Json, span: source.Span) -> List[ast.Note] {
+var out: List[ast.Note] = []
+for text in texts_of(j, "notes") {
+set out = append(out, ast.Note { text: text, span: span })
+}
+out
+}
+
+fn read_item(start: Reader, j: json.Json, path: Text) -> ItemRead {
+let commented = read_comments(start, j, "comments")
+let span = here(commented)
+let r = next_line(commented)
+let kind = text_of(r, j, "kind", path)
+let dummy = ast.Item.RecordItem(ast.RecordDecl { notes: [], public: false, name: "", name_span: span, fields: [] })
+let name = text_of(r, j, "name", path)
+let notes = read_notes(j, span)
+let public = bool_of(j, "pub")
+match kind {
+"fn" => {
+var q = require_text(r, j, "name", path)
+var params: List[ast.Param] = []
+var index = 0
+for item in list_of(j, "params") {
+let param_path = "\(path).params[\(index)]"
+let te = required_type(require_text(q, item, "name", param_path), item, "type", param_path)
+set q = te.r
+set params = append(params, ast.Param { name: text_of(q, item, "name", param_path), span: span, type_expr: te.type_expr })
+set index = index + 1
+}
+let returns = required_type(q, j, "returns", path)
+var effects: List[ast.EffectName] = []
+for effect in texts_of(j, "uses") {
+set effects = append(effects, ast.EffectName { name: effect, span: span })
+}
+let body = required_expr(returns.r, j, "body", path)
+let f = ast.Function { notes: notes, public: public, name: name, name_span: span, params: params, return_type: returns.type_expr, effects: effects, body: body.expr }
+ItemRead { r: body.r, item: .FunctionItem(f) }
+}
+"type" => {
+let fields = read_fields(require_text(r, j, "name", path), list_of(j, "fields"), "\(path).fields", true)
+ItemRead { r: fields.r, item: .RecordItem(ast.RecordDecl { notes: notes, public: public, name: name, name_span: span, fields: fields.fields }) }
+}
+"enum" => {
+var q = require_text(r, j, "name", path)
+var variants: List[ast.VariantDecl] = []
+var index = 0
+for item in list_of(j, "variants") {
+let variant_path = "\(path).variants[\(index)]"
+set q = read_comments(q, item, "comments")
+let variant_span = here(q)
+let fields = read_fields(next_line(require_text(q, item, "name", variant_path)), list_of(item, "fields"), "\(variant_path).fields", false)
+set q = fields.r
+set variants = append(variants, ast.VariantDecl { name: text_of(q, item, "name", variant_path), span: variant_span, fields: fields.fields })
+set index = index + 1
+}
+ItemRead { r: q, item: .EnumItem(ast.EnumDecl { notes: notes, public: public, name: name, name_span: span, variants: variants }) }
+}
+"import" => {
+let module_path = text_of(r, j, "path", path)
+let segments = source.split_on(module_path, 47)
+let limited = has(j, "uses")
+let import_decl = ast.Import { path: module_path, alias: segments[length(segments) - 1], span: span, limited: limited, allowed: texts_of(j, "uses") }
+ItemRead { r: require_text(r, j, "path", path), item: .ImportItem(import_decl) }
+}
+"test" => {
+let body = required_block(require_text(r, j, "name", path), j, "body", path)
+ItemRead { r: body.r, item: .TestItem(name, span, ast.make_expr(.BlockExpr(body.block), body.block.span)) }
+}
+_ => ItemRead { r: failed(r, path, "unknown declaration kind `\(kind)`"), item: dummy }
+}
+}
+
+fn new_reader(file: Int) -> Reader = Reader { file: file, line: 1, comments: [], error: "" }
+
+note "Reads a whole file in the JSON form written by `file_json`."
+pub fn read_tree(text: Text, file: Int) -> ReadFile {
+let parsed = match json.parse(text) {
+.Ok(value) => value
+.Error(problem) => return ReadFile { items: [], comments: [], error: "not valid JSON: \(problem)" }
+}
+if json.int_field(parsed, "tessera_ast") != .Some(1) {
+return ReadFile { items: [], comments: [], error: "the top level must be an object with `\"tessera_ast\": 1` and `items`" }
+}
+var r = new_reader(file)
+var items: List[ast.Item] = []
+var index = 0
+for item in list_of(parsed, "items") {
+let read = read_item(r, item, "items[\(index)]")
+set r = read.r
+set items = append(items, read.item)
+set index = index + 1
+}
+let closing = read_comments(r, parsed, "end_comments")
+ReadFile { items: items, comments: closing.comments, error: closing.error }
+}

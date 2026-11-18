@@ -149,17 +149,7 @@ value
 fn escape_controls(text: Text) -> Text {
 var out = ""
 for code in code_points(text) {
-set out += if code == 10 {
-"\\n"
-} else if code == 13 {
-"\\r"
-} else if code == 9 {
-"\\t"
-} else if code < 32 or code == 127 {
-"\\u\(pad_left(hex_digits(code), 4, "0"))"
-} else {
-from_code_point(code)
-}
+set out += if code == 10 { "\\n" } else if code == 13 { "\\r" } else if code == 9 { "\\t" } else if code < 32 or code == 127 { "\\u\(pad_left(hex_digits(code), 4, "0"))" } else { from_code_point(code) }
 }
 out
 }

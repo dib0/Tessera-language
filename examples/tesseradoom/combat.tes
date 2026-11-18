@@ -69,7 +69,7 @@ match slot {
 0 => {
 let r = state.roll(w, 1, 10)
 set w.seed = r[1]
-set w = melee(w, trig, r[0] * 2 * (if w.stats.berserk { 10 } else { 1 }), "DSPUNCH")
+set w = melee(w, trig, r[0] * 2 * if w.stats.berserk { 10 } else { 1 }, "DSPUNCH")
 }
 7 => {
 let r = state.roll(w, 1, 10)

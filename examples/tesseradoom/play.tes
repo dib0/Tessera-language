@@ -27,13 +27,13 @@ let run = keys.held(k, "shift")
 let forward = if run { 50 } else { 25 }
 let side = if run { 40 } else { 24 }
 let turn = if run { 160 } else { 80 }
-let forward_move = (if keys.any_held(k, ["up", "w"]) { forward } else { 0 }) - (if keys.any_held(k, ["down", "s"]) { forward } else { 0 })
+let forward_move = if keys.any_held(k, ["up", "w"]) { forward } else { 0 } - if keys.any_held(k, ["down", "s"]) { forward } else { 0 }
 // With Alt held, Left and Right step sideways instead of turning.
 let strafe = keys.held(k, "alt")
 let step_right = keys.any_held(k, ["d", "."]) or (strafe and keys.held(k, "right"))
 let step_left = keys.any_held(k, ["a", ","]) or (strafe and keys.held(k, "left"))
-let side_move = (if step_right { side } else { 0 }) - (if step_left { side } else { 0 })
-let turning = if strafe { 0 } else { (if keys.held(k, "left") { turn } else { 0 }) - (if keys.held(k, "right") { turn } else { 0 }) }
+let side_move = if step_right { side } else { 0 } - if step_left { side } else { 0 }
+let turning = if strafe { 0 } else { if keys.held(k, "left") { turn } else { 0 } - if keys.held(k, "right") { turn } else { 0 } }
 state.no_input() with { forward_move: forward_move, side_move: side_move, turn: turning, use: keys.any_held(k, [" ", "e"]), fire: keys.any_held(k, ["control", "f"]) }
 }
 
@@ -382,7 +382,7 @@ compose(view, interface)
 fn menu_frame(app: App, a: Assets, tic: Int, descriptions: List[Text]) -> raster.Image {
 let background = if app.in_game { raster.remap(game_frame(app, a), a.shades[18]) } else { full(a, raster.remap(picture_at(black(a), a, "TITLEPIC", 0, 0), a.shades[if app.screen == "level" { 24 } else { 14 }])) }
 var pixels = layer()
-let skull = if (tic / 8) % 2 == 0 { "M_SKULL1" } else { "M_SKULL2" }
+let skull = if tic / 8 % 2 == 0 { "M_SKULL1" } else { "M_SKULL2" }
 let items = menu_items(app.screen)
 match app.screen {
 "main" => {

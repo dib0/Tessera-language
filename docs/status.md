@@ -165,3 +165,17 @@ Measured on Linux x86-64, rustc 1.99.1, on 2026-11-15.
 | `bin/tessera1 test tests/std/logging_test.tes` | 6 passed: level filtering, `parse_level`, field order, quoting and escaping (a newline in a value cannot forge a line), JSON lines, writing at every level |
 | `bin/tessera1 test tests/std/config_test.tes` | 9 passed: sections, comments and quoted values, typed getters, error messages with key and origin, parse errors with line numbers, defaults and `merge`, `section`, environment overrides, `encode` round-trip, a missing file |
 | `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |
+
+## Draft 0.24: Model First Programming
+
+Measured on Linux x86-64, rustc 1.99.1, on 2026-11-18.
+
+| | Result |
+|---|---|
+| `./build.sh` | succeeds, fixpoint reached |
+| `cd compiler && cargo test --release` | **25 + 8 passed, 0 failed**, including six new tests: `canonical_text_and_json_tree_round_trip`, `programs_build_from_a_json_tree`, `edit_operations_change_the_tree_and_keep_the_program_valid`, `edit_operations_report_each_problem`, `fix_applies_the_machine_applicable_fixes`, `exported_grammars_accept_the_canonical_files` |
+| Round trip text, tree, text | lossless for all 314 parseable `.tes` files in the repository; the compiler's own source in canonical form generates the same Rust apart from source positions |
+| `harness/tools/check_grammar.py` | 252 canonical files: every tree validates against the recursive schema and the schema unrolled to depth 24; the GBNF grammar accepts every canonical file up to 12 KB except the tests that must fail (larger files checked separately); no `$ref` cycle in the unrolled schema |
+| `tessera1 fix tests/mfp/fix/broken.tes` | 12 of 13 errors fixed in two rounds; the one left needs a choice |
+| `bin/tessera1 format --check` | `stage1/`, `std/`, `examples/` (except `valid/` and `invalid/`, see CLAUDE.md) and `tools/` are canonical |
+| `harness.py dry-run --variants baseline` | 25/25 reference solutions pass with the updated reference |

@@ -319,7 +319,7 @@ return c
 let picture = view.scene.art.textures[texture]
 let pixels = picture.pixels
 let h = picture.height
-let column = ((u % picture.width) + picture.width) % picture.width * h
+let column = (u % picture.width + picture.width) % picture.width * h
 let colormap = view.scene.art.colormap
 let shade = light * 256
 let width = view.screen.width
@@ -329,7 +329,7 @@ let step = distance / focal
 var v = texture_top - (view.camera.z + (2 * (view.screen.height / 2 - from) - 1) * distance / (2 * focal))
 var at = from * width + x
 for _ in range(from, to + 1) {
-let row = ((shift_right(v, 16) % h) + h) % h
+let row = (shift_right(v, 16) % h + h) % h
 let texel = pixels[column + row]
 if texel >= 0 {
 set c.pixels[at] = colormap[shade + texel]
@@ -366,7 +366,7 @@ let wx = shift_right(cam.x + shift_right(ray_x * distance, 16), 16)
 let wy = shift_right(cam.y + shift_right(ray_y * distance, 16), 16)
 let texel = texels[(63 - bit_and(wy, 63)) * 64 + bit_and(wx, 63)]
 let shade = base_light + shift_right(distance, 16) / 96
-set c.pixels[at] = colormap[(if shade > 31 { 31 } else { shade }) * 256 + texel]
+set c.pixels[at] = colormap[if shade > 31 { 31 } else { shade } * 256 + texel]
 set c.depth[at] = distance
 }
 set at += width
@@ -448,9 +448,7 @@ let entry: Option[Int] = match rotated {
 .None => get(sprites.frames, t.sprite + t.frame + "0")
 }
 match entry {
-.Some(e) => {
-set projected += [Projected { depth: depth, center: center, z: t.z, picture: e / 2, flipped: e % 2 == 1, light: t.light, front: depth - fixed.from_int(t.radius) }]
-}
+.Some(e) => set projected += [Projected { depth: depth, center: center, z: t.z, picture: e / 2, flipped: e % 2 == 1, light: t.light, front: depth - fixed.from_int(t.radius) }]
 .None => {}
 }
 }

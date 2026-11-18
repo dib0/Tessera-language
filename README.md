@@ -6,7 +6,7 @@
 
 The Tessera language aims to make it easy for language models to create, review, and maintain software without sacrificing clear behavior or safety. Models write the code and models review it, so the syntax is designed to be as token-friendly as possible: compact, regular, and without layout that only a human reader would need. Design rationale is preserved alongside code. **This is for humans that care about functionality of software, not about the code.**
 
-> **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.23). Tessera source files use the extension `.tes`.
+> **Status:** Working proof of concept. The compiler is self-hosting: it is written in Tessera and compiles itself. The language is not yet stable; see [`language-design.md`](language-design.md) for the current specification (draft 0.24). Tessera source files use the extension `.tes`.
 
 ## Design goals
 
@@ -16,6 +16,7 @@ The Tessera language aims to make it easy for language models to create, review,
 - **Preserved rationale:** Attach design notes to declarations and preserve them through compiler tooling.
 - **Portable native software:** The long-term goal is to compile for Linux, Windows, and macOS, with libraries for scripts, web applications, and desktop applications.
 - **Self-hosting:** The Tessera compiler is written in Tessera and compiles itself; a Rust seed bootstraps it (see [Compiler bootstrap](#compiler-bootstrap)).
+- **Model First Programming:** The program is a syntax tree that models change through typed operations, checked by the compiler, with an exported grammar for constrained decoding and errors that carry their own repair (see [Model First Programming](#model-first-programming)).
 
 These are design goals, not guarantees of the current prototype.
 
@@ -36,6 +37,24 @@ fn main() -> Unit uses io = print(label("Ada", 20))
 The `note` form records design intent and is preserved by the compiler. `uses io` declares that a function performs I/O; a function without `uses` cannot act on the outside world, and the compiler checks this. Mutation is explicit (`var` and `set`), there are no implicit conversions, and `match` must handle every case. Code has no indentation: Tessera is written and read mainly by models, and braces carry the structure (leaving indentation out saves about 12% of tokens).
 
 The original compact sketch (`fn adult(age:i64)->bool`, `!{io}`) was replaced by this more readable form; the reasons are in section 3 of the specification.
+
+## Model First Programming
+
+Tessera introduces **Model First Programming (MFP)**: a way of programming in which the tools are built for the model that writes and repairs the code, not for a person at an editor. The program is a structured object; text is its one canonical view. Four steps are implemented (specification, section 20):
+
+1. **The syntax tree is the source of truth.** `tessera1 ast` writes a program as a JSON syntax tree and `tessera1 render` prints a tree as text; every command accepts either. There is exactly one textual form per program (`tessera1 format` prints it from the tree), and text and tree convert into each other without loss, comments included.
+2. **Edit operations instead of text diffs.** `tessera1 edit` applies typed operations such as `add_fn`, `rename_symbol`, `add_match_arm`, `set_effect` and `insert_stmt_after`. The whole program is checked before anything is written, and a rename follows the types across modules.
+3. **Validity during generation.** `tessera1 grammar` exports the canonical text as a GBNF grammar and the tree and the edit operations as JSON Schemas, for grammar-constrained decoding. The tree schema can be unrolled to a fixed depth for decoders without recursive schemas, such as Claude's structured outputs.
+4. **Machine-actionable diagnostics.** Errors carry what was expected, what was found, and machine-applicable fixes where one change is clearly right. `tessera1 fix` applies them all.
+
+```sh
+bin/tessera1 edit app.tes --op '{"op": "rename_symbol", "from": "Shape.Square", "to": "Box"}'
+bin/tessera1 fix app.tes                       # apply every certain fix, report what is left
+bin/tessera1 ast app.tes > app.json            # the tree; `bin/tessera1 build app.json -o app` works too
+bin/tessera1 grammar --format ast-schema --depth 12
+```
+
+The order follows from measurement: the [harness](#measuring-language-changes) came first, and the remaining steps (a machine-readable specification generated from the compiler, contracts or property tests per function, and a source map from tree nodes to runtime traces) wait until the effect of these four is measured.
 
 ## Example: Tesseradoom
 
@@ -80,6 +99,7 @@ Requires Rust (`rustc` and `cargo`, from https://rustup.rs). Linux and Windows a
 bin/tessera1 build examples/tictactoe/tictactoe.tes -o bin/tictactoe
 bin/tictactoe
 bin/tessera1 check examples/invalid/E0301-undeclared-effect.tes
+bin/tessera1 fix examples/invalid/E0301-undeclared-effect.tes --dry-run   # what `fix` would repair
 (cd compiler && cargo test --release)         # tests for all compilers
 ```
 

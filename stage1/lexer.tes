@@ -70,9 +70,16 @@ text: Text
 span: source.Span
 }
 
+note "A `//` comment: its text from `//` on, without trailing spaces, and its line. The parser ignores comments; the canonical printer puts them back (spec section 14)."
+pub type Comment {
+text: Text
+line: Int
+}
+
 pub type LexResult {
 tokens: List[Token]
 diagnostics: List[source.Diagnostic]
+comments: List[Comment]
 }
 
 note "`expansion` replaces `token` when not empty (text literals with `\\(...)` interpolation)."
@@ -253,7 +260,7 @@ set diagnostics = append(diagnostics, non_ascii_letter(code, source.span_of(file
 } else {
 set name = append(name, code)
 }
-set index = index + 1
+set index += 1
 }
 let word = from_code_points(name)
 let span = source.span_of(file, line, col, col + index - start)
@@ -284,15 +291,15 @@ while index < length(codes) and (source.is_digit(codes[index]) or codes[index] =
 if codes[index] != 95 {
 set digits = append(digits, codes[index])
 }
-set index = index + 1
+set index += 1
 }
 var fraction: List[Int] = []
 let is_decimal = index + 1 < length(codes) and codes[index] == 46 and source.is_digit(codes[index + 1])
 if is_decimal {
-set index = index + 1
+set index += 1
 while index < length(codes) and source.is_digit(codes[index]) {
 set fraction = append(fraction, codes[index])
-set index = index + 1
+set index += 1
 }
 }
 // An exponent (`1e-9`, `2.5E+3`) makes the number a `Float` literal (draft 0.17).
@@ -302,21 +309,21 @@ var after = index + 1
 var sign: List[Int] = []
 if after < length(codes) and (codes[after] == 43 or codes[after] == 45) {
 set sign = [codes[after]]
-set after = after + 1
+set after += 1
 }
 if after < length(codes) and source.is_digit(codes[after]) {
 set exponent = [101] + sign
 set index = after
 while index < length(codes) and source.is_digit(codes[index]) {
 set exponent += [codes[index]]
-set index = index + 1
+set index += 1
 }
 }
 }
 var bad_suffix = false
 while index < length(codes) and (source.is_alphanumeric(codes[index]) or codes[index] >= 128) {
 set bad_suffix = true
-set index = index + 1
+set index += 1
 }
 let raw_codes = slice(codes, start, index)
 let raw = from_code_points(raw_codes)
@@ -369,14 +376,14 @@ return -1
 continue
 }
 if code == 40 {
-set depth = depth + 1
+set depth += 1
 } else if code == 41 {
-set depth = depth - 1
+set depth -= 1
 if depth == 0 {
 return index
 }
 }
-set index = index + 1
+set index += 1
 }
 -1
 }
@@ -399,9 +406,9 @@ return -1
 }
 set index = close + 1
 } else if code == 92 {
-set index = index + 2
+set index += 2
 } else {
-set index = index + 1
+set index += 1
 }
 }
 -1
@@ -425,7 +432,7 @@ break
 let code = codes[index]
 let here = col + index - start
 if code == 34 {
-set index = index + 1
+set index += 1
 set closed = true
 } else if code == 92 and index + 1 < length(codes) and codes[index + 1] == 40 {
 let here_span = source.span_of(file, line, here, here + 2)
@@ -454,7 +461,7 @@ set segment_col = col + index - start
 } else if code == 92 {
 let escape_span = source.span_of(file, line, here, here + 1)
 let next = if index + 1 < length(codes) { codes[index + 1] } else { -1 }
-set index = index + 2
+set index += 2
 if next == 110 {
 set value = append(value, 10)
 } else if next == 116 {
@@ -468,14 +475,14 @@ if index >= length(codes) or codes[index] != 123 {
 set diagnostics = append(diagnostics, source.error_help("E0109", escape_span, "invalid unicode escape", "write unicode escapes as `\\u{1F600}`"))
 continue
 }
-set index = index + 1
+set index += 1
 var hex: List[Int] = []
 while index < length(codes) and codes[index] != 125 and codes[index] != 34 and codes[index] != 10 {
 set hex = append(hex, codes[index])
-set index = index + 1
+set index += 1
 }
 if index < length(codes) and codes[index] == 125 {
-set index = index + 1
+set index += 1
 }
 var valid = length(hex) >= 1 and length(hex) <= 6
 var scalar = 0
@@ -497,16 +504,16 @@ set diagnostics = append(diagnostics, source.error("E0109", escape_span, "`\\u{\
 } else {
 let shown = if next < 0 or next == 10 { "" } else { from_code_point(next) }
 if next == 10 {
-set index = index - 1
+set index -= 1
 }
 set diagnostics = append(diagnostics, source.error_help("E0109", escape_span, "unknown escape `\\\(shown)`", "valid escapes are `\\n`, `\\t`, `\\\\`, `\\\"` and `\\u{...}`"))
 }
 } else if source.is_control(code) {
 set diagnostics = append(diagnostics, source.error_help("E0109", source.span_of(file, line, here, here + 1), "control character inside a text literal", "use an escape such as `\\t` or `\\u{...}`"))
-set index = index + 1
+set index += 1
 } else {
 set value = append(value, code)
-set index = index + 1
+set index += 1
 }
 }
 let span = source.span_of(file, line, col, col + index - start)
@@ -530,25 +537,7 @@ if length(pieces) == 0 { pieces } else { append(pieces, token(.Plus, "", span)) 
 fn add_piece(pieces: List[Token], piece: Token) -> List[Token] = append(add_plus(pieces, piece.span), piece)
 
 fn two_char_kind(first: Int, second: Int) -> TokenKind {
-if first == 45 and second == 62 {
-.Arrow
-} else if first == 61 and second == 62 {
-.FatArrow
-} else if first == 61 and second == 61 {
-.EqEq
-} else if first == 33 and second == 61 {
-.NotEq
-} else if first == 60 and second == 61 {
-.LtEq
-} else if first == 62 and second == 61 {
-.GtEq
-} else if first == 43 and second == 61 {
-.PlusAssign
-} else if first == 45 and second == 61 {
-.MinusAssign
-} else {
-.Eof
-}
+if first == 45 and second == 62 { .Arrow } else if first == 61 and second == 62 { .FatArrow } else if first == 61 and second == 61 { .EqEq } else if first == 33 and second == 61 { .NotEq } else if first == 60 and second == 61 { .LtEq } else if first == 62 and second == 61 { .GtEq } else if first == 43 and second == 61 { .PlusAssign } else if first == 45 and second == 61 { .MinusAssign } else { .Eof }
 }
 
 fn one_char_kind(code: Int) -> TokenKind {
@@ -617,9 +606,12 @@ fn is_opening(kind: TokenKind) -> Bool = kind == .LParen or kind == .LBracket or
 
 fn is_closing(kind: TokenKind) -> Bool = kind == .RParen or kind == .RBracket or kind == .RBrace
 
-pub fn tokenize(text: Text, file: Int) -> LexResult {
+pub fn tokenize(text: Text, file: Int) -> LexResult = tokenize_from(text, file, 1)
+
+note "As `tokenize`, with the first line numbered `first_line` (snippets of an edit operation are numbered after their file)."
+pub fn tokenize_from(text: Text, file: Int, first_line: Int) -> LexResult {
 let codes = code_points(text)
-tokenize_range(codes, 0, length(codes), file, 1, 1, false)
+tokenize_range(codes, 0, length(codes), file, first_line, 1, false)
 }
 
 note "Tokenizes `codes[start..end]`. `nested` is true for the code inside a text interpolation: no end-of-file tokens then."
@@ -629,6 +621,7 @@ var tokens: List[Token] = []
 var diagnostics: List[source.Diagnostic] = []
 var open_kinds: List[Int] = []
 var open_spans: List[source.Span] = []
+var comments: List[Comment] = []
 var index = start
 var line = first_line
 var col = first_col
@@ -644,69 +637,80 @@ if code == 10 {
 if newline_allowed(tokens, open_kinds) {
 set tokens = append(tokens, token(.Newline, "", here))
 }
-set index = index + 1
-set line = line + 1
+set index += 1
+set line += 1
 set col = 1
 continue
 }
 if code == 32 {
-set index = index + 1
-set col = col + 1
+set index += 1
+set col += 1
 continue
 }
 if code == 9 {
-set diagnostics = append(diagnostics, source.error_help("E0101", here, "tab characters are not allowed", "indent with 4 spaces; write `\\t` inside text literals"))
-set index = index + 1
-set col = col + 1
+set diagnostics = append(diagnostics, source.with_fix(source.error_help("E0101", here, "tab characters are not allowed", "write a space instead (the canonical form has no indentation); write `\\t` inside text literals"), "replace the tab with a space", [source.replace_expected(here, "\t", " ")]))
+set index += 1
+set col += 1
 continue
 }
 if code == 13 {
-set diagnostics = append(diagnostics, source.error_help("E0101", here, "carriage return characters are not allowed", "use Unix line endings (LF)"))
-set index = index + 1
-set col = col + 1
+set diagnostics = append(diagnostics, source.with_fix(source.error_help("E0101", here, "carriage return characters are not allowed", "use Unix line endings (LF)"), "remove the carriage return", [source.replace_expected(here, "\u{d}", "")]))
+set index += 1
+set col += 1
 continue
 }
 if code == 47 and index + 1 < count and codes[index + 1] == 47 {
+let comment_start = index
 while index < count and codes[index] != 10 {
 if codes[index] == 13 or codes[index] == 9 {
 set diagnostics = append(diagnostics, source.error("E0101", source.span_of(file, line, col, col + 1), "tab or carriage return characters are not allowed"))
 }
-set index = index + 1
-set col = col + 1
+set index += 1
+set col += 1
 }
+var comment_end = index
+while comment_end > comment_start and codes[comment_end - 1] == 32 {
+set comment_end -= 1
+}
+set comments = append(comments, Comment { text: from_code_points(slice(codes, comment_start, comment_end)), line: line })
 continue
 }
 if code == 95 and not (index + 1 < count and (source.is_alphanumeric(codes[index + 1]) or codes[index + 1] == 95)) {
 set tokens = append(tokens, token(.Underscore, "", here))
-set index = index + 1
-set col = col + 1
+set index += 1
+set col += 1
 continue
 }
 if code == 95 {
-set diagnostics = append(diagnostics, source.error_help("E0103", here, "names must start with a letter", "for an unused binding write `_` alone, e.g. `for _ in range(0, n)`"))
-set index = index + 1
-set col = col + 1
+var underscores = 0
+while index + underscores < count and codes[index + underscores] == 95 {
+set underscores += 1
+}
+var name_end = index + underscores
+while name_end < count and (source.is_alphanumeric(codes[name_end]) or codes[name_end] == 95) {
+set name_end += 1
+}
+var d = source.error_help("E0103", here, "names must start with a letter", "for an unused binding write `_` alone, e.g. `for _ in range(0, n)`")
+if name_end > index + underscores and source.is_letter(codes[index + underscores]) {
+let bare = from_code_points(slice(codes, index + underscores, name_end))
+set d = source.with_fix(d, "drop the leading `_`: `\(bare)`", [source.replace_expected(source.span_of(file, line, col, col + underscores), source.repeat_text("_", underscores), "")])
+}
+set diagnostics = append(diagnostics, d)
+set index += 1
+set col += 1
 while index < count and (source.is_alphanumeric(codes[index]) or codes[index] == 95) {
-set index = index + 1
-set col = col + 1
+set index += 1
+set col += 1
 }
 continue
 }
 if code >= 128 {
 set diagnostics = append(diagnostics, source.error_help("E0103", here, "unexpected character `\(from_code_point(code))`", "names use ASCII letters, digits and `_` only; text belongs inside double quotes"))
-set index = index + 1
-set col = col + 1
+set index += 1
+set col += 1
 continue
 }
-let scan = if code == 34 {
-scan_text(codes, index, file, line, col)
-} else if source.is_digit(code) {
-scan_number(codes, index, file, line, col)
-} else if source.is_letter(code) {
-scan_word(codes, index, file, line, col)
-} else {
-scan_symbol(codes, index, file, line, col)
-}
+let scan = if code == 34 { scan_text(codes, index, file, line, col) } else if source.is_digit(code) { scan_number(codes, index, file, line, col) } else if source.is_letter(code) { scan_word(codes, index, file, line, col) } else { scan_symbol(codes, index, file, line, col) }
 set diagnostics = concat(diagnostics, scan.diagnostics)
 set col = col + scan.end - index
 set index = scan.end
@@ -742,13 +746,13 @@ set tokens = append(tokens, scan.token)
 }
 let end_span = source.span_of(file, line, col, col + 1)
 if nested {
-return LexResult { tokens: tokens, diagnostics: diagnostics }
+return LexResult { tokens: tokens, diagnostics: diagnostics, comments: comments }
 }
 var remaining = length(open_kinds) - 1
 while remaining >= 0 {
 let d = source.error("E0102", open_spans[remaining], "`\(from_code_point(open_kinds[remaining]))` is never closed")
 set diagnostics = append(diagnostics, d with { label: "opened here" })
-set remaining = remaining - 1
+set remaining -= 1
 }
 if newline_allowed(tokens, []) {
 set tokens = append(tokens, token(.Newline, "", end_span))
@@ -758,5 +762,5 @@ if token_count > 0 and tokens[token_count - 1].kind != .Newline {
 set tokens = append(tokens, token(.Newline, "", end_span))
 }
 set tokens = append(tokens, token(.Eof, "", end_span))
-LexResult { tokens: tokens, diagnostics: diagnostics }
+LexResult { tokens: tokens, diagnostics: diagnostics, comments: comments }
 }

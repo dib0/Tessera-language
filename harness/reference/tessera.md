@@ -400,12 +400,15 @@ tessera1 check main.tes [--json]
 tessera1 build main.tes -o program [--opt 3] [--library]
 tessera1 test main.tes
 tessera1 format files... [--check]
+tessera1 fix main.tes
+tessera1 edit main.tes --op '{"op": "rename_symbol", "from": "area", "to": "surface"}'
+tessera1 ast file.tes / tessera1 render file.json
 ```
 
-`build` keeps the generated Rust as `program.rs`. Compiler exit codes: 0 ok, 1 compile errors, 2 usage error.
+`build` keeps the generated Rust as `program.rs`. Compiler exit codes: 0 ok, 1 compile errors, 2 usage error. `format` writes the one canonical text of a program. `fix` applies every fix the diagnostics carry (see below). `edit` applies typed changes and writes nothing unless the whole program still checks; operations: `add_fn`/`add_item` (`source`, `after`), `replace_fn` (`name`, `source`), `remove_fn` (`name`), `rename_symbol` (`from`, `to`; `Type.variant` or `Type.field`, or a local with `fn`), `set_effect` (`fn`, `uses`), `add_match_arm` (`fn`, `match`, `arm`), `insert_stmt_after`/`insert_stmt_before`/`replace_stmt` (`fn`, `anchor`: the statement's canonical first line, `source`), `remove_stmt`; `"file"` selects a module.
 
 Runtime errors (`R001` index out of bounds, `R002` overflow, `R003` division by zero, `R004` argument out of range, `R010` `fail`, `R019` `assert`, ...) cannot be caught: the program prints `runtime error R001: ...` with the location to standard error and exits with code 70. Expected failures are `Result` values.
 
 ## Diagnostics
 
-The compiler reports errors as `error[CODE]: message` with a location and usually a `help:` line. Common codes: E0110 syntax error, E0111 `else` not on the line of `}`, E0202 unknown name, E0203 unknown function, E0204 name already defined (no shadowing), E0205 `set` on a non-`var`, E0206 `var` never changed, E0207 naming style, E0211 built-in function redefined, E0301 missing effect, E0302 unused effect, E0501 type mismatch, E0503 operator on wrong types (e.g. `Int` with `Decimal`), E0505 type of `[]`/`.None`/`Result` unknown, E0506 branches differ, E0508 unused value, E0509 match not exhaustive, E0518 variant type not known, E0607 private declaration used, E0610 unused import.
+The compiler reports errors as `error[CODE]: message` with a location and usually a `help:` line. A `fix:` line shows a repair that is certainly right, as the line it produces; apply it as shown (or run `tessera1 fix`). Without a `fix:` line, decide from the `help:` line. Common codes: E0110 syntax error, E0111 `else` not on the line of `}`, E0202 unknown name, E0203 unknown function, E0204 name already defined (no shadowing), E0205 `set` on a non-`var`, E0206 `var` never changed, E0207 naming style, E0211 built-in function redefined, E0301 missing effect, E0302 unused effect, E0501 type mismatch, E0503 operator on wrong types (e.g. `Int` with `Decimal`), E0505 type of `[]`/`.None`/`Result` unknown, E0506 branches differ, E0508 unused value, E0509 match not exhaustive, E0518 variant type not known, E0607 private declaration used, E0610 unused import.

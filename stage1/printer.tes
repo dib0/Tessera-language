@@ -1,0 +1,844 @@
+// Canonical printer (spec section 14): renders a syntax tree as the one textual form of a
+// program. Parsing the output gives the same tree again, so text and tree carry the same
+// program; `format`, `render` and the edit operations all write through this module.
+
+import source uses nothing
+import lexer uses nothing
+import ast uses nothing
+
+note "One output line. `anchor` is the source line the printed line comes from (0 for none); comments of the printed file that stand before that line are placed above it. `top` marks the first line of a top-level declaration, where blank lines around comments are kept."
+pub type Line {
+text: Text
+anchor: Int
+top: Bool
+}
+
+note "`file` is the index of the source file whose comments are printed; nodes from other files (snippets of an edit operation) never move comments."
+pub type Printer {
+file: Int
+}
+
+// ---------- lines ----------
+
+fn plain(text: Text) -> List[Line] = [Line { text: text, anchor: 0, top: false }]
+
+fn anchored(text: Text, anchor: Int) -> List[Line] = [Line { text: text, anchor: anchor, top: false }]
+
+note "Joins two pieces: the first line of `b` continues the last line of `a`."
+fn cat(a: List[Line], b: List[Line]) -> List[Line] {
+let count = length(a)
+if count == 0 {
+return b
+}
+if length(b) == 0 {
+return a
+}
+let last = a[count - 1]
+let joined = last with { text: last.text + b[0].text }
+concat(append(slice(a, 0, count - 1), joined), slice(b, 1, length(b)))
+}
+
+fn cat_text(a: List[Line], text: Text) -> List[Line] = cat(a, plain(text))
+
+fn text_cat(text: Text, b: List[Line]) -> List[Line] = cat(plain(text), b)
+
+note "Only for pieces known to be one line."
+pub fn flat(lines: List[Line]) -> Text {
+var parts: List[Text] = []
+for l in lines {
+set parts = append(parts, l.text)
+}
+join(parts, "\n")
+}
+
+fn is_single(lines: List[Line]) -> Bool = length(lines) == 1
+
+fn anchor_of(p: Printer, span: source.Span) -> Int = if span.file == p.file { span.line } else { 0 }
+
+note "Pieces separated by `, ` (a piece may span several lines)."
+fn comma_list(pieces: List[List[Line]]) -> List[Line] {
+var out: List[Line] = []
+var first = true
+for piece in pieces {
+if first {
+set out = piece
+set first = false
+} else {
+set out = cat(cat_text(out, ", "), piece)
+}
+}
+if first {
+return plain("")
+}
+out
+}
+
+// ---------- literals ----------
+
+fn hex_digits(value: Int) -> Text {
+if value == 0 {
+return "0"
+}
+let digits = code_points("0123456789abcdef")
+var remaining = value
+var reversed: List[Int] = []
+while remaining > 0 {
+set reversed = append(reversed, digits[remaining % 16])
+set remaining = remaining / 16
+}
+var out: List[Int] = []
+var index = length(reversed) - 1
+while index >= 0 {
+set out = append(out, reversed[index])
+set index = index - 1
+}
+from_code_points(out)
+}
+
+note "The inside of a text literal: the escapes the lexer reads back to the same value."
+pub fn escape_text(value: Text) -> Text {
+var out: List[Text] = []
+for code in code_points(value) {
+let piece = match code {
+34 => "\\\""
+92 => "\\\\"
+10 => "\\n"
+9 => "\\t"
+_ => if source.is_control(code) { "\\u{\(hex_digits(code))}" } else { from_code_point(code) }
+}
+set out = append(out, piece)
+}
+join(out, "")
+}
+
+pub fn quote(value: Text) -> Text = "\"\(escape_text(value))\""
+
+// ---------- types ----------
+
+pub fn type_expr_text(te: ast.TypeExpr) -> Text {
+if te.name == "fn" and length(te.args) >= 2 {
+let count = length(te.args)
+var params: List[Text] = []
+for a in slice(te.args, 0, count - 2) {
+set params = append(params, type_expr_text(a))
+}
+var effects: List[Text] = []
+for e in te.args[count - 1].args {
+set effects = append(effects, e.name)
+}
+let uses_text = if length(effects) == 0 { "" } else { " uses \(join(effects, ", "))" }
+return "fn(\(join(params, ", "))) -> \(type_expr_text(te.args[count - 2]))\(uses_text)"
+}
+if length(te.args) == 0 {
+return te.name
+}
+var args: List[Text] = []
+for a in te.args {
+set args = append(args, type_expr_text(a))
+}
+"\(te.name)[\(join(args, ", "))]"
+}
+
+// ---------- expressions ----------
+
+note "Binding strength: 1 `and`/`or`, 2 comparisons, 3 `+ -`, 4 `* / %`, 5 prefix operators, 6 postfix forms, 7 atoms; 0 for `return value`, which takes everything to its right."
+fn precedence(e: ast.Expr) -> Int {
+match e.kind {
+.Binary(op, _, _, _) => binary_precedence(op)
+.Unary(_, _) => 5
+.Try(_) => 5
+.IntLiteral(value) => if value < 0 { 5 } else { 7 }
+.Call(_, _, _) => 6
+.CallValue(_, _) => 6
+.Index(_, _) => 6
+.FieldAccess(_, _, _) => 6
+.RecordUpdate(_, _) => 6
+.Return(value) => if value == .None { 7 } else { 0 }
+.OrElse(_, _) => 0
+_ => 7
+}
+}
+
+fn binary_precedence(op: ast.BinaryOp) -> Int {
+match op {
+.And => 1
+.Or => 1
+.Equal => 2
+.NotEqual => 2
+.Less => 2
+.LessEqual => 2
+.Greater => 2
+.GreaterEqual => 2
+.Add => 3
+.Subtract => 3
+_ => 4
+}
+}
+
+fn parenthesized(p: Printer, e: ast.Expr) -> List[Line] = cat_text(text_cat("(", print_expr(p, e, false)), ")")
+
+note "An expression printed where `{` would start a body (`if`, `while`, `for` and `match` headers): a block or record literal there needs parentheses."
+fn needs_header_parens(e: ast.Expr) -> Bool {
+match e.kind {
+.BlockExpr(_) => true
+.RecordLiteral(_, _, _) => true
+_ => false
+}
+}
+
+fn print_operand(p: Printer, e: ast.Expr, header: Bool, wrap: Bool) -> List[Line] {
+if wrap or (header and needs_header_parens(e)) {
+return parenthesized(p, e)
+}
+print_expr(p, e, header)
+}
+
+fn postfix_target(p: Printer, e: ast.Expr, header: Bool) -> List[Line] = print_operand(p, e, header, precedence(e) < 6)
+
+fn print_args(p: Printer, args: List[ast.Expr]) -> List[Line] {
+var pieces: List[List[Line]] = []
+for a in args {
+set pieces = append(pieces, print_expr(p, a, false))
+}
+comma_list(pieces)
+}
+
+fn print_field_inits(p: Printer, fields: List[ast.FieldInit]) -> List[Line] {
+if length(fields) == 0 {
+return plain("{}")
+}
+var pieces: List[List[Line]] = []
+for f in fields {
+set pieces = append(pieces, text_cat("\(f.name): ", print_expr(p, f.value, false)))
+}
+cat_text(text_cat("{ ", comma_list(pieces)), " }")
+}
+
+pub fn print_expr(p: Printer, e: ast.Expr, header: Bool) -> List[Line] {
+match e.kind {
+.IntLiteral(value) => plain(to_text(value))
+.BoolLiteral(value) => plain(if value { "true" } else { "false" })
+.TextLiteral(value) => plain(quote(value))
+.UnitLiteral => plain("()")
+.Name(name) => plain(name)
+.FunctionRef(name) => plain(name)
+.DecimalLiteral(digits) => plain(digits)
+.Break => plain("break")
+.Continue => plain("continue")
+.ListLiteral(items) => cat_text(text_cat("[", print_args(p, items)), "]")
+.MapLiteral(keys, values) => print_map(p, keys, values)
+.Call(name, _, args) => cat_text(text_cat("\(name)(", print_args(p, args)), ")")
+.CallValue(callee, args) => cat_text(cat(cat_text(postfix_target(p, callee, header), "("), print_args(p, args)), ")")
+.Index(target, index) => cat_text(cat(cat_text(postfix_target(p, target, header), "["), print_expr(p, index, false)), "]")
+.FieldAccess(target, name, _) => cat_text(postfix_target(p, target, header), ".\(name)")
+.RecordUpdate(target, fields) => cat(cat_text(postfix_target(p, target, header), " with "), print_field_inits(p, fields))
+.Unary(op, operand) => print_unary(p, op, operand, header)
+.Try(operand) => text_cat("try ", print_operand(p, operand, header, precedence(operand) < 5))
+.Binary(op, _, left, right) => print_binary(p, e, op, left, right, header)
+.If(_, _, _) => print_if(p, e)
+.BlockExpr(block) => print_block(p, block)
+.Match(scrutinee, arms) => print_match(p, e, scrutinee, arms)
+.RecordLiteral(type_name, _, fields) => text_cat("\(type_name) ", print_field_inits(p, fields))
+.VariantLiteral(type_name, variant, _, args) => {
+let head = "\(type_name).\(variant)"
+if length(args) == 0 { plain(head) } else { cat_text(text_cat("\(head)(", print_args(p, args)), ")") }
+}
+.Return(value) => match value {
+.None => plain("return")
+.Some(v) => text_cat("return ", print_expr(p, v, header))
+}
+.OrElse(value, otherwise) => cat(cat_text(print_or_else_value(p, value), " else "), print_expr(p, otherwise, false))
+}
+}
+
+note "In `let x = value else other` an `if` without `else` would take the `else`."
+fn print_or_else_value(p: Printer, value: ast.Expr) -> List[Line] {
+match value.kind {
+.If(_, _, otherwise) => if otherwise == .None { parenthesized(p, value) } else { print_expr(p, value, false) }
+_ => print_expr(p, value, false)
+}
+}
+
+fn print_map(p: Printer, keys: List[ast.Expr], values: List[ast.Expr]) -> List[Line] {
+if length(keys) == 0 {
+return plain("[:]")
+}
+var pieces: List[List[Line]] = []
+for i in range(0, length(keys)) {
+set pieces = append(pieces, cat(cat_text(print_expr(p, keys[i], false), ": "), print_expr(p, values[i], false)))
+}
+cat_text(text_cat("[", comma_list(pieces)), "]")
+}
+
+fn print_unary(p: Printer, op: ast.UnaryOp, operand: ast.Expr, header: Bool) -> List[Line] {
+match op {
+.Not => text_cat("not ", print_operand(p, operand, header, precedence(operand) < 5))
+.Negate => {
+// `-5` is read as one literal and `--x` is not an operator, so these keep parentheses.
+let literal = match operand.kind {
+.IntLiteral(_) => true
+.Unary(inner, _) => inner == .Negate
+_ => false
+}
+text_cat("-", print_operand(p, operand, header, literal or precedence(operand) < 5))
+}
+}
+}
+
+fn starts_with_not(lines: List[Line]) -> Bool = length(lines) > 0 and source.starts_with_text(lines[0].text, "not ")
+
+fn print_binary(p: Printer, e: ast.Expr, op: ast.BinaryOp, left: ast.Expr, right: ast.Expr, header: Bool) -> List[Line] {
+let interpolated = interpolation(p, e)
+if interpolated != "" {
+return plain(interpolated)
+}
+let strength = binary_precedence(op)
+let left_strength = precedence(left)
+var wrap_left = left_strength < strength or (strength == 2 and left_strength == 2)
+if strength == 1 and left_strength == 1 {
+set wrap_left = not same_logical(op, left)
+}
+var left_lines = print_operand(p, left, header, wrap_left)
+if strength == 2 and not wrap_left and starts_with_not(left_lines) {
+set left_lines = parenthesized(p, left)
+}
+let right_lines = print_operand(p, right, header, precedence(right) <= strength)
+cat(cat_text(left_lines, " \(ast.binary_symbol(op)) "), right_lines)
+}
+
+fn same_logical(op: ast.BinaryOp, e: ast.Expr) -> Bool {
+match e.kind {
+.Binary(inner, _, _, _) => inner == op
+_ => false
+}
+}
+
+// ---------- text interpolation ----------
+
+note "A piece of an interpolated text: a text literal, or `to_text(x)` with `x` on one line (`\\(x)`); empty text when it is neither. A text literal gives its escaped text, which may be empty, so the caller tells the two apart with `is_text_literal`."
+fn interpolation_piece(p: Printer, e: ast.Expr) -> Text {
+match e.kind {
+.TextLiteral(value) => escape_text(value)
+.Call(name, _, args) => {
+if name != "to_text" or length(args) != 1 {
+return ""
+}
+let inner = print_expr(p, args[0], false)
+if is_single(inner) { "\\(\(inner[0].text))" } else { "" }
+}
+_ => ""
+}
+}
+
+fn is_text_literal(e: ast.Expr) -> Bool {
+match e.kind {
+.TextLiteral(_) => true
+_ => false
+}
+}
+
+pub fn is_empty_text(e: ast.Expr) -> Bool {
+match e.kind {
+.TextLiteral(value) => value == ""
+_ => false
+}
+}
+
+note "The pieces of `a + b + c` from left to right, or an empty list when the chain is not made of `+` alone."
+pub fn interpolation_pieces(e: ast.Expr) -> List[ast.Expr] {
+match e.kind {
+.Binary(op, _, left, right) => {
+if op != .Add {
+return []
+}
+let before = interpolation_pieces(left)
+if length(before) == 0 { [] } else { append(before, right) }
+}
+_ => [e]
+}
+}
+
+note "The lexer reads `\"a\\(x)b\\(y)\\(z)\"` as `\"a\" + to_text(x) + \"b\" + to_text(y) + \"\" + to_text(z)`: text and `to_text` calls alternate, an empty text stands only between two calls, and no other text is empty. A chain of exactly that shape is printed back as the literal; any other chain (`\"a\" + \"b\"`, `to_text(x) + to_text(y)`) stays as written, since the literal would read back as a different tree. Empty text when the chain is not of that shape."
+pub fn interpolation(p: Printer, e: ast.Expr) -> Text {
+let pieces = interpolation_pieces(e)
+let count = length(pieces)
+if count < 2 {
+return ""
+}
+var out: List[Text] = []
+var calls = 0
+for i in range(0, count) {
+let piece = pieces[i]
+let text = interpolation_piece(p, piece)
+let literal = is_text_literal(piece)
+if not literal and text == "" {
+return ""
+}
+if literal {
+if i > 0 and is_text_literal(pieces[i - 1]) {
+return ""
+}
+let between_calls = i > 0 and i < count - 1 and not is_text_literal(pieces[i - 1]) and not is_text_literal(pieces[i + 1])
+if is_empty_text(piece) and not between_calls {
+return ""
+}
+} else {
+set calls = calls + 1
+if i > 0 and not is_text_literal(pieces[i - 1]) {
+return ""
+}
+}
+set out = append(out, text)
+}
+if calls == 0 {
+return ""
+}
+"\"\(join(out, ""))\""
+}
+
+// ---------- if, match, blocks ----------
+
+type IfBranch {
+condition: ast.Expr
+block: ast.Block
+}
+
+type IfChain {
+branches: List[IfBranch]
+otherwise: Option[ast.Block]
+}
+
+fn if_chain(e: ast.Expr) -> IfChain {
+var branches: List[IfBranch] = []
+var current = e
+while true {
+match current.kind {
+.If(condition, then_block, else_branch) => {
+set branches = append(branches, IfBranch { condition: condition, block: then_block })
+match else_branch {
+.None => return IfChain { branches: branches, otherwise: .None }
+.Some(next) => match next.kind {
+.If(_, _, _) => set current = next
+.BlockExpr(block) => return IfChain { branches: branches, otherwise: .Some(block) }
+_ => return IfChain { branches: branches, otherwise: .Some(ast.Block { statements: [], tail: .Some(next), span: next.span }) }
+}
+}
+}
+_ => return IfChain { branches: branches, otherwise: .None }
+}
+}
+IfChain { branches: branches, otherwise: .None }
+}
+
+note "A block that fits on the line of its `if`: no statements, and a one-line value that is not a jump."
+fn inline_value(p: Printer, block: ast.Block) -> Text {
+if length(block.statements) > 0 {
+return ""
+}
+let tail = block.tail else return ""
+match tail.kind {
+.Return(_) => return ""
+.Break => return ""
+.Continue => return ""
+_ => {}
+}
+let lines = print_expr(p, tail, false)
+if is_single(lines) { lines[0].text } else { "" }
+}
+
+fn print_if(p: Printer, e: ast.Expr) -> List[Line] {
+let chain = if_chain(e)
+match chain.otherwise {
+.Some(last) => {
+var parts: List[Text] = []
+var inline = true
+for b in chain.branches {
+let condition = print_operand(p, b.condition, true, false)
+let value = inline_value(p, b.block)
+if value == "" or not is_single(condition) {
+set inline = false
+} else {
+set parts = append(parts, "if \(condition[0].text) { \(value) }")
+}
+}
+let last_value = inline_value(p, last)
+if inline and last_value != "" {
+return plain("\(join(parts, " else ")) else { \(last_value) }")
+}
+}
+.None => {}
+}
+var out: List[Line] = []
+var first = true
+for b in chain.branches {
+let head = if first { "if " } else { " else if " }
+set out = cat(cat_text(cat(cat_text(out, head), print_operand(p, b.condition, true, false)), " "), print_block(p, b.block))
+set first = false
+}
+match chain.otherwise {
+.Some(last) => set out = cat(cat_text(out, " else "), print_block(p, last))
+.None => {}
+}
+out
+}
+
+pub fn print_block(p: Printer, block: ast.Block) -> List[Line] {
+if length(block.statements) == 0 and block.tail == .None {
+return plain("{}")
+}
+var out = plain("{")
+for s in block.statements {
+set out = concat(out, print_statement(p, s))
+}
+match block.tail {
+.Some(tail) => set out = concat(out, anchor_first(print_expr(p, tail, false), anchor_of(p, tail.span)))
+.None => {}
+}
+append(out, Line { text: "}", anchor: anchor_of(p, source.Span { file: block.span.file, line: block.span.end_line, col: 1, end_line: block.span.end_line, end_col: 1 }), top: false })
+}
+
+fn anchor_first(lines: List[Line], anchor: Int) -> List[Line] {
+if length(lines) == 0 {
+return lines
+}
+replace_at(lines, 0, lines[0] with { anchor: anchor })
+}
+
+fn print_match(p: Printer, e: ast.Expr, scrutinee: ast.Expr, arms: List[ast.Arm]) -> List[Line] {
+var out = cat_text(text_cat("match ", print_operand(p, scrutinee, true, false)), " {")
+for arm in arms {
+set out = concat(out, anchor_first(print_arm(p, arm), anchor_of(p, arm.pattern.span)))
+}
+append(out, Line { text: "}", anchor: anchor_of(p, source.Span { file: e.span.file, line: e.span.end_line, col: 1, end_line: e.span.end_line, end_col: 1 }), top: false })
+}
+
+pub fn print_arm(p: Printer, arm: ast.Arm) -> List[Line] = text_cat("\(pattern_text(arm.pattern)) => ", print_arm_body(p, arm.body))
+
+note "An arm whose body is a block holding one `set`, `let`, `for` or `while` is written without braces (spec section 7.5)."
+pub fn arm_statement(body: ast.Expr) -> Option[ast.Statement] {
+match body.kind {
+.BlockExpr(block) => {
+if length(block.statements) != 1 or block.tail != .None {
+return .None
+}
+match block.statements[0] {
+.ExprStatement(_) => .None
+_ => .Some(block.statements[0])
+}
+}
+_ => .None
+}
+}
+
+fn print_arm_body(p: Printer, body: ast.Expr) -> List[Line] {
+match arm_statement(body) {
+.Some(statement) => anchor_first(print_statement(p, statement), 0)
+.None => print_expr(p, body, false)
+}
+}
+
+pub fn pattern_text(pattern: ast.Pattern) -> Text {
+match pattern.kind {
+.Wildcard => "_"
+.IntPattern(value) => to_text(value)
+.TextPattern(value) => quote(value)
+.BoolPattern(value) => if value { "true" } else { "false" }
+.VariantPattern(type_name, variant, bindings) => {
+let head = "\(type_name).\(variant)"
+if length(bindings) == 0 {
+return head
+}
+var names: List[Text] = []
+for b in bindings {
+set names = append(names, b.name)
+}
+"\(head)(\(join(names, ", ")))"
+}
+}
+}
+
+// ---------- statements ----------
+
+pub fn statement_span(s: ast.Statement) -> source.Span {
+match s {
+.Let(_, name_span, _, _, _) => name_span
+.Set(_, name_span, _) => name_span
+.SetPlace(target, _) => target.span
+.For(_, variable_span, _, _) => variable_span
+.While(condition, _) => condition.span
+.ExprStatement(expr) => expr.span
+}
+}
+
+note "The last source line of a statement, for dropping the comments inside it when it is replaced."
+pub fn statement_end_line(s: ast.Statement) -> Int {
+match s {
+.Let(_, _, _, value, _) => value.span.end_line
+.Set(_, _, value) => value.span.end_line
+.SetPlace(_, value) => value.span.end_line
+.For(_, _, _, body) => body.span.end_line
+.While(_, body) => body.span.end_line
+.ExprStatement(expr) => expr.span.end_line
+}
+}
+
+pub fn compound_operator(p: Printer, target: Text, value: ast.Expr) -> Text {
+match value.kind {
+.Binary(op, _, left, _) => {
+if op != .Add and op != .Subtract {
+return ""
+}
+let left_lines = print_expr(p, left, false)
+if not is_single(left_lines) or left_lines[0].text != target or interpolation(p, value) != "" {
+return ""
+}
+if op == .Add { "+=" } else { "-=" }
+}
+_ => ""
+}
+}
+
+pub fn compound_right(value: ast.Expr) -> ast.Expr {
+match value.kind {
+.Binary(_, _, _, right) => right
+_ => value
+}
+}
+
+fn print_set(p: Printer, target: Text, value: ast.Expr) -> List[Line] {
+let op = compound_operator(p, target, value)
+if op != "" {
+return text_cat("set \(target) \(op) ", print_expr(p, compound_right(value), false))
+}
+text_cat("set \(target) = ", print_expr(p, value, false))
+}
+
+pub fn print_statement(p: Printer, s: ast.Statement) -> List[Line] {
+let lines = match s {
+.Let(name, _, declared, value, mutable) => {
+let keyword = if mutable { "var" } else { "let" }
+let annotation = match declared {
+.Some(te) => ": \(type_expr_text(te))"
+.None => ""
+}
+text_cat("\(keyword) \(name)\(annotation) = ", print_expr(p, value, false))
+}
+.Set(name, _, value) => print_set(p, name, value)
+.SetPlace(target, value) => print_set(p, flat(print_expr(p, target, false)), value)
+.For(variable, _, iterable, body) => cat(cat_text(text_cat("for \(variable) in ", print_operand(p, iterable, true, false)), " "), print_block(p, body))
+.While(condition, body) => cat(cat_text(text_cat("while ", print_operand(p, condition, true, false)), " "), print_block(p, body))
+.ExprStatement(expr) => print_expr(p, expr, false)
+}
+anchor_first(lines, anchor_of(p, statement_span(s)))
+}
+
+// ---------- declarations ----------
+
+fn notes_lines(p: Printer, notes: List[ast.Note]) -> List[Line] {
+var out: List[Line] = []
+for n in notes {
+set out = append(out, Line { text: "note \(quote(n.text))", anchor: anchor_of(p, n.span), top: false })
+}
+out
+}
+
+fn pub_prefix(public: Bool) -> Text = if public { "pub " } else { "" }
+
+fn fields_text(fields: List[ast.Field]) -> Text {
+var parts: List[Text] = []
+for f in fields {
+set parts = append(parts, "\(f.name): \(type_expr_text(f.type_expr))")
+}
+join(parts, ", ")
+}
+
+pub fn function_header(f: ast.Function) -> Text {
+var params: List[Text] = []
+for param in f.params {
+set params = append(params, "\(param.name): \(type_expr_text(param.type_expr))")
+}
+var effects: List[Text] = []
+for effect in f.effects {
+set effects = append(effects, effect.name)
+}
+let uses_text = if length(effects) == 0 { "" } else { " uses \(join(effects, ", "))" }
+"\(pub_prefix(f.public))fn \(f.name)(\(join(params, ", "))) -> \(type_expr_text(f.return_type))\(uses_text)"
+}
+
+fn print_function(p: Printer, f: ast.Function) -> List[Line] {
+let header = anchored(function_header(f), anchor_of(p, f.name_span))
+let body = match f.body.kind {
+.BlockExpr(block) => cat(cat_text(header, " "), print_block(p, block))
+_ => cat(cat_text(header, " = "), print_expr(p, f.body, false))
+}
+concat(notes_lines(p, f.notes), body)
+}
+
+pub fn import_text(i: ast.Import) -> Text {
+if not i.limited {
+return "import \(i.path)"
+}
+let allowed = if length(i.allowed) == 0 { "nothing" } else { join(i.allowed, ", ") }
+"import \(i.path) uses \(allowed)"
+}
+
+pub fn print_item(p: Printer, item: ast.Item) -> List[Line] {
+let lines = match item {
+.FunctionItem(f) => print_function(p, f)
+.RecordItem(r) => {
+var out = concat(notes_lines(p, r.notes), anchored("\(pub_prefix(r.public))type \(r.name) {", anchor_of(p, r.name_span)))
+if length(r.fields) == 0 {
+set out = cat_text(out, "}")
+} else {
+for f in r.fields {
+set out = concat(out, anchored("\(f.name): \(type_expr_text(f.type_expr))", anchor_of(p, f.span)))
+}
+set out = concat(out, plain("}"))
+}
+out
+}
+.EnumItem(e) => {
+var out = concat(notes_lines(p, e.notes), anchored("\(pub_prefix(e.public))enum \(e.name) {", anchor_of(p, e.name_span)))
+for v in e.variants {
+let fields = if length(v.fields) == 0 { "" } else { "(\(fields_text(v.fields)))" }
+set out = concat(out, anchored("\(v.name)\(fields)", anchor_of(p, v.span)))
+}
+concat(out, plain("}"))
+}
+.ImportItem(i) => anchored(import_text(i), anchor_of(p, i.span))
+.TestItem(name, span, body) => {
+let block = match body.kind {
+.BlockExpr(b) => print_block(p, b)
+_ => text_cat("{ ", cat_text(print_expr(p, body, false), " }"))
+}
+cat(anchored("test \(quote(name)) ", anchor_of(p, span)), block)
+}
+}
+if length(lines) == 0 {
+return lines
+}
+replace_at(lines, 0, lines[0] with { top: true })
+}
+
+pub fn is_import(item: ast.Item) -> Bool {
+match item {
+.ImportItem(_) => true
+_ => false
+}
+}
+
+note "All declarations of a file: one blank line between them, none between imports."
+pub fn print_items(p: Printer, items: List[ast.Item]) -> List[Line] {
+var out: List[Line] = []
+var previous_import = false
+var first = true
+for item in items {
+let current_import = is_import(item)
+if not first and not (previous_import and current_import) {
+set out = append(out, Line { text: "", anchor: 0, top: false })
+}
+set out = concat(out, print_item(p, item))
+set previous_import = current_import
+set first = false
+}
+out
+}
+
+// ---------- comments ----------
+
+fn emit_group(out: List[Text], group: List[lexer.Comment], keep_blanks: Bool) -> List[Text] {
+var result = out
+var previous = -1
+for c in group {
+if keep_blanks and previous >= 0 and c.line > previous + 1 {
+set result = append(result, "")
+}
+set result = append(result, c.text)
+set previous = c.line
+}
+result
+}
+
+note "Sorted source lines of the printed lines, without repeats."
+pub fn anchor_lines(lines: List[Line]) -> List[Int] {
+var anchors: List[Int] = []
+for l in lines {
+if l.anchor > 0 {
+set anchors = append(anchors, l.anchor)
+}
+}
+let sorted = sort(anchors)
+var unique: List[Int] = []
+for a in sorted {
+let count = length(unique)
+if count == 0 or unique[count - 1] != a {
+set unique = append(unique, a)
+}
+}
+unique
+}
+
+note "The smallest anchor after `line`, or 0 when there is none (binary search in sorted anchors)."
+fn owner_of(anchors: List[Int], line: Int) -> Int {
+var low = 0
+var high = length(anchors)
+while low < high {
+let middle = (low + high) / 2
+if anchors[middle] > line {
+set high = middle
+} else {
+set low = middle + 1
+}
+}
+if low < length(anchors) { anchors[low] } else { 0 }
+}
+
+note "Each comment belongs to the nearest node after it: the smallest anchor greater than its line. Edits can leave anchors out of order (inserted nodes are numbered after the file), so ownership is decided by line, not by printing order. Comments without an owner go to the end of the file."
+pub fn comment_owners(anchors: List[Int], comments: List[lexer.Comment]) -> Map[Int, List[lexer.Comment]] {
+var owners: Map[Int, List[lexer.Comment]] = [:]
+for c in comments {
+let owner = owner_of(anchors, c.line)
+set owners = put(owners, owner, append(value_or(get(owners, owner), []), c))
+}
+owners
+}
+
+note "Puts each comment above the line of the node that owns it. At the top level the blank lines between a comment group and its declaration are kept; inside bodies there are none."
+pub fn place_comments(lines: List[Line], comments: List[lexer.Comment]) -> Text {
+var owners = comment_owners(anchor_lines(lines), comments)
+var out: List[Text] = []
+for l in lines {
+if l.anchor > 0 {
+match get(owners, l.anchor) {
+.Some(group) => {
+set out = emit_group(out, group, l.top)
+if l.top and l.anchor > group[length(group) - 1].line + 1 {
+set out = append(out, "")
+}
+set owners = remove(owners, l.anchor)
+}
+.None => {}
+}
+}
+set out = append(out, l.text)
+}
+match get(owners, 0) {
+.Some(rest) => {
+if length(out) > 0 and out[length(out) - 1] != "" {
+set out = append(out, "")
+}
+set out = emit_group(out, rest, true)
+}
+.None => {}
+}
+if length(out) == 0 {
+return ""
+}
+join(out, "\n") + "\n"
+}
+
+note "The canonical text of a file: its declarations and its comments."
+pub fn render_file(items: List[ast.Item], comments: List[lexer.Comment], file: Int) -> Text {
+let p = Printer { file: file }
+place_comments(print_items(p, items), comments)
+}

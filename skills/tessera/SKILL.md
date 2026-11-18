@@ -22,12 +22,16 @@ The compiler is `tessera1`. Find it with `command -v tessera1`, otherwise use `b
 tessera1 check main.tes            # type and effect check; fast, use after every edit
 tessera1 build main.tes -o prog    # native executable (also writes prog.rs)
 tessera1 test main.tes             # runs `test "name" { assert(...) }` blocks
-tessera1 format --check files...   # canonical layout
+tessera1 format files...           # rewrite in the one canonical text (--check only reports)
+tessera1 fix main.tes              # apply every `fix:` the diagnostics carry, then report what is left
+tessera1 edit main.tes --op JSON   # typed change (rename, add_fn, insert_stmt_after, ...), checked before writing
 ```
 
 Give only the entry file; imported modules are found from its directory. Compiler exit codes: 0 ok, 1 compile errors, 2 usage error. A compiled program exits with 70 on a runtime error.
 
-Loop: write, `check`, read every diagnostic (each has a code and usually a `help:` line that says exactly what to change), fix all of them, repeat; then `build` or `test` and run it. The compiler reports all errors in one pass, so fix them together.
+Loop: write, `check`, read every diagnostic (each has a code and usually a `help:` line that says exactly what to change), fix all of them, repeat; then `build` or `test` and run it. The compiler reports all errors in one pass, so fix them together. A `fix:` line under a diagnostic is a repair the compiler is sure of: `tessera1 fix main.tes` applies all of them at once and leaves only the errors that need a decision.
+
+Model First Programming (spec section 20): prefer `tessera1 edit` over text edits for renames (it follows types, shorthand variants and module aliases across files) and for inserting statements or match arms; the operations and their fields are in `reference.md` under Tools. `tessera1 ast`/`render` convert a file to and from its JSON syntax tree; `tessera1 grammar` exports the GBNF grammar and JSON Schemas for constrained decoding.
 
 ## Canonical style
 

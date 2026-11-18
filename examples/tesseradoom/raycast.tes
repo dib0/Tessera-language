@@ -54,7 +54,7 @@ let c = columns[x]
 for y in range(0, geometry.screen_height()) {
 var color = if y < geometry.screen_height() / 2 { 5 } else { 108 }
 if c.line >= 0 and y >= c.top and y <= c.bottom {
-let base = 80 + (c.line * 7) % 24
+let base = 80 + c.line * 7 % 24
 let light = math.clamp(fixed.floor_int(c.distance) / 64, 0, 31)
 set color = colormap[light * 256 + base]
 }

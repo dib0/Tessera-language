@@ -47,9 +47,9 @@ rules.Outcome.Draw => "Draw"
 
 // ---------- drawing ----------
 
-fn cell_center_x(cell: Int) -> Int = board_left() + (cell % 3) * cell_size() + cell_size() / 2
+fn cell_center_x(cell: Int) -> Int = board_left() + cell % 3 * cell_size() + cell_size() / 2
 
-fn cell_center_y(cell: Int) -> Int = board_top() + (cell / 3) * cell_size() + cell_size() / 2
+fn cell_center_y(cell: Int) -> Int = board_top() + cell / 3 * cell_size() + cell_size() / 2
 
 fn draw_centered_text(y: Int, text: Text, color: Int) -> Unit uses ui {
 draw_text((window_width() - text_width(text)) / 2, y, text, color)

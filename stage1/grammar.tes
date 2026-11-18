@@ -1,0 +1,185 @@
+// Grammar export (spec section 20.3): JSON Schemas for the syntax tree (section 20.1) and the
+// edit operations (section 20.2), for decoders that constrain a model's output to valid
+// programs. The text grammar (GBNF) is kept in grammar/tessera.gbnf and embedded by build.sh.
+//
+// A syntax tree nests without limit, so its natural schema is recursive. Some decoders,
+// among them Claude's structured outputs, accept no recursion: `depth` > 0 unrolls the
+// schema into levels (`expr_0`, `expr_1`, ...) whose last level has only leaf expressions.
+
+import edit uses nothing
+
+fn q(text: Text) -> Text = "\"\(text)\""
+
+fn obj(fields: List[Text]) -> Text = "{\(join(fields, ","))}"
+
+fn kv(name: Text, value: Text) -> Text = "\(q(name)):\(value)"
+
+fn str_schema() -> Text = obj([kv("type", q("string"))])
+
+fn list_schema(items: Text) -> Text = obj([kv("type", q("array")), kv("items", items)])
+
+fn enum_schema(values: List[Text]) -> Text {
+var quoted: List[Text] = []
+for v in values {
+set quoted = append(quoted, q(v))
+}
+obj([kv("type", q("string")), kv("enum", "[\(join(quoted, ","))]")])
+}
+
+fn const_schema(value: Text) -> Text = obj([kv("type", q("string")), kv("const", q(value))])
+
+fn ref(name: Text) -> Text = obj([kv("$ref", q("#/$defs/\(name)"))])
+
+fn any_of(options: List[Text]) -> Text = obj([kv("anyOf", "[\(join(options, ","))]")])
+
+note "A field of a node: its name, schema and whether it must be present."
+type Field {
+name: Text
+schema: Text
+required: Bool
+}
+
+fn need(name: Text, schema: Text) -> Field = Field { name: name, schema: schema, required: true }
+
+fn may(name: Text, schema: Text) -> Field = Field { name: name, schema: schema, required: false }
+
+fn object_schema(fields: List[Field]) -> Text {
+var properties: List[Text] = []
+var required: List[Text] = []
+for f in fields {
+set properties = append(properties, kv(f.name, f.schema))
+if f.required {
+set required = append(required, q(f.name))
+}
+}
+obj([kv("type", q("object")), kv("properties", obj(properties)), kv("required", "[\(join(required, ","))]"), kv("additionalProperties", "false")])
+}
+
+note "A node with a `kind`. Any node that stands as a statement or declaration can carry `comments`, so every node allows them."
+fn node(kind: Text, fields: List[Field]) -> Text {
+var all = [need("kind", const_schema(kind))]
+for f in fields {
+if f.name != "comments" {
+set all = append(all, f)
+}
+}
+object_schema(append(all, comments()))
+}
+
+fn comments() -> Field = may("comments", list_schema(str_schema()))
+
+fn end_comments() -> Field = may("end_comments", list_schema(str_schema()))
+
+fn binary_ops() -> List[Text] = ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or"]
+
+note "Names of the definitions at one level. With `depth` 0 there is one level without suffix that refers to itself."
+type Level {
+suffix: Text
+next: Text
+last: Bool
+}
+
+fn level(depth: Int, k: Int) -> Level {
+if depth == 0 {
+return Level { suffix: "", next: "", last: false }
+}
+Level { suffix: "_\(k)", next: "_\(k + 1)", last: k == depth }
+}
+
+fn leaf_expressions() -> List[Text] {
+[node("int", [need("value", obj([kv("type", q("integer"))]))]), node("number", [need("text", str_schema())]), node("bool", [need("value", obj([kv("type", q("boolean"))]))]), node("text", [need("value", str_schema())]), node("unit", []), node("name", [need("name", str_schema())]), node("break", []), node("continue", []), node("return", []), node("variant", [may("type", str_schema()), need("variant", str_schema())])]
+}
+
+fn expr_schema(l: Level) -> Text {
+if l.last {
+return any_of(leaf_expressions())
+}
+let e = ref("expr\(l.next)")
+let b = ref("block\(l.next)")
+let s = ref("stmt\(l.next)")
+let exprs = list_schema(e)
+let inits = list_schema(object_schema([need("name", str_schema()), need("value", e)]))
+let leaves = slice(leaf_expressions(), 0, 8)
+let compound = [node("interpolation", [need("parts", list_schema(any_of([str_schema(), e])))]), node("list", [need("items", exprs)]), node("map", [need("entries", list_schema(object_schema([need("key", e), need("value", e)])))]), node("call", [need("function", str_schema()), need("args", exprs)]), node("call_value", [need("callee", e), need("args", exprs)]), node("index", [need("target", e), need("index", e)]), node("field", [need("target", e), need("name", str_schema())]), node("with", [need("target", e), need("fields", inits)]), node("unary", [need("op", enum_schema(["-", "not"])), need("operand", e)]), node("try", [need("operand", e)]), node("binary", [need("op", enum_schema(binary_ops())), need("left", e), need("right", e)]), node("if", [need("condition", e), need("then", b), may("else", e)]), node("block", [need("statements", list_schema(s)), end_comments()]), node("match", [need("value", e), need("arms", list_schema(object_schema([comments(), need("pattern", ref("pattern")), need("body", s)]))), end_comments()]), node("record", [need("type", str_schema()), need("fields", inits)]), node("variant", [may("type", str_schema()), need("variant", str_schema()), may("args", exprs)]), node("return", [may("value", e)])]
+any_of(concat(leaves, compound))
+}
+
+note "A statement is a binding, `set`, a loop, or an expression; at this level its parts are one level deeper."
+fn stmt_schema(l: Level) -> Text {
+if l.last {
+return ref("expr\(l.suffix)")
+}
+let e = ref("expr\(l.next)")
+let b = ref("block\(l.next)")
+let t = if l.suffix == "" { ref("type") } else { ref("type_0") }
+let binding = [comments(), need("name", str_schema()), may("type", t), need("value", e), may("else", e)]
+any_of([node("let", binding), node("var", binding), node("set", [comments(), need("target", e), may("op", enum_schema(["=", "+=", "-="])), need("value", e)]), node("for", [comments(), need("variable", str_schema()), need("iterable", e), need("body", b)]), node("while", [comments(), need("condition", e), need("body", b)]), ref("expr\(l.suffix)")])
+}
+
+fn block_schema(l: Level) -> Text = node("block", [need("statements", list_schema(ref("stmt\(l.suffix)"))), end_comments()])
+
+fn type_schema(depth: Int, k: Int) -> Text {
+let name = str_schema()
+if depth > 0 and k >= 3 {
+return name
+}
+let inner = if depth == 0 { ref("type") } else { ref("type_\(k + 1)") }
+any_of([name, object_schema([need("name", str_schema()), need("args", list_schema(inner))]), object_schema([need("name", const_schema("fn")), need("params", list_schema(inner)), need("returns", inner), may("uses", list_schema(str_schema()))])])
+}
+
+fn pattern_schema() -> Text {
+any_of([node("wildcard", []), node("int", [need("value", obj([kv("type", q("integer"))]))]), node("text", [need("value", str_schema())]), node("bool", [need("value", obj([kv("type", q("boolean"))]))]), node("variant", [may("type", str_schema()), need("variant", str_schema()), may("bindings", list_schema(str_schema()))])])
+}
+
+fn item_schema(depth: Int) -> Text {
+let top = if depth == 0 { "" } else { "_0" }
+let t = if depth == 0 { ref("type") } else { ref("type_0") }
+let strings = list_schema(str_schema())
+let typed_fields = list_schema(object_schema([comments(), need("name", str_schema()), need("type", t)]))
+let common = [comments(), need("name", str_schema()), may("pub", obj([kv("type", q("boolean"))])), may("notes", strings)]
+any_of([node("fn", concat(common, [need("params", list_schema(object_schema([need("name", str_schema()), need("type", t)]))), need("returns", t), may("uses", strings), need("body", ref("expr\(top)"))])), node("type", concat(common, [need("fields", typed_fields)])), node("enum", concat(common, [need("variants", list_schema(object_schema([comments(), need("name", str_schema()), may("fields", typed_fields)])))])), node("import", [comments(), need("path", str_schema()), may("uses", strings)]), node("test", [comments(), need("name", str_schema()), need("body", ref("block\(top)"))])])
+}
+
+note "The JSON Schema of a file in the form `tessera1 ast` writes. `depth` 0 gives the recursive schema; a positive depth the unrolled one."
+pub fn ast_schema(depth: Int) -> Text {
+var defs: List[Text] = []
+if depth == 0 {
+let l = level(0, 0)
+set defs = [kv("expr", expr_schema(l)), kv("stmt", stmt_schema(l)), kv("block", block_schema(l)), kv("type", type_schema(0, 0))]
+} else {
+for k in range(0, depth + 1) {
+let l = level(depth, k)
+set defs = append(append(append(defs, kv("expr\(l.suffix)", expr_schema(l))), kv("stmt\(l.suffix)", stmt_schema(l))), kv("block\(l.suffix)", block_schema(l)))
+}
+for k in range(0, 4) {
+set defs = append(defs, kv("type_\(k)", type_schema(depth, k)))
+}
+}
+set defs = append(append(defs, kv("pattern", pattern_schema())), kv("item", item_schema(depth)))
+let root = object_schema([need("tessera_ast", obj([kv("type", q("integer")), kv("enum", "[1]")])), need("items", list_schema(ref("item"))), end_comments()])
+let body = slice(code_points(root), 1, length(code_points(root)))
+"{\(kv("$schema", q("https://json-schema.org/draft/2020-12/schema"))),\(kv("title", q("Tessera syntax tree (spec section 20.1)"))),\(kv("$defs", obj(defs))),\(from_code_points(body))\n"
+}
+
+fn op_schema(name: Text, fields: List[Field]) -> Text = object_schema(concat([need("op", const_schema(name)), may("file", str_schema())], fields))
+
+note "One schema per operation, in the order of `edit.operation_names`; also usable as the input schemas of separate tools."
+pub fn operation_schemas() -> List[Text] {
+let s = str_schema()
+let source_text = need("source", s)
+[op_schema("add_fn", [source_text, may("after", s), may("before", s)]), op_schema("add_item", [source_text, may("after", s), may("before", s)]), op_schema("replace_fn", [need("name", s), source_text]), op_schema("replace_item", [need("name", s), source_text]), op_schema("remove_fn", [need("name", s)]), op_schema("remove_item", [need("name", s)]), op_schema("rename_symbol", [need("from", s), need("to", s), may("fn", s)]), op_schema("set_effect", [need("fn", s), need("uses", list_schema(enum_schema(["io", "fs", "env", "process", "ui", "time", "random", "log", "db", "net", "audio"])))]), op_schema("add_match_arm", [need("fn", s), need("match", s), need("arm", s), may("after", s)]), op_schema("insert_stmt_before", [need("fn", s), need("anchor", s), source_text]), op_schema("insert_stmt_after", [need("fn", s), need("anchor", s), source_text]), op_schema("replace_stmt", [need("fn", s), need("anchor", s), source_text]), op_schema("remove_stmt", [need("fn", s), need("anchor", s)])]
+}
+
+note "The JSON Schema of the input of `tessera1 edit`: one operation or a list of them."
+pub fn edit_schema() -> Text {
+let names = edit.operation_names()
+let schemas = operation_schemas()
+var defs: List[Text] = []
+var refs: List[Text] = []
+for i in range(0, length(names)) {
+set defs = append(defs, kv(names[i], schemas[i]))
+set refs = append(refs, ref(names[i]))
+}
+let one = any_of(refs)
+"{\(kv("$schema", q("https://json-schema.org/draft/2020-12/schema"))),\(kv("title", q("Tessera edit operations (spec section 20.2)"))),\(kv("$defs", obj(defs))),\(kv("anyOf", "[\(one),\(list_schema(one))]"))}\n"
+}

@@ -78,21 +78,7 @@ let digits = split("0123456789abcdef", "")
 pub fn quote(text: Text) -> Text {
 var out = "\""
 for code in code_points(text) {
-set out += if code == 34 {
-"\\\""
-} else if code == 92 {
-"\\\\"
-} else if code == 10 {
-"\\n"
-} else if code == 13 {
-"\\r"
-} else if code == 9 {
-"\\t"
-} else if code < 32 {
-"\\u\(hex4(code))"
-} else {
-from_code_point(code)
-}
+set out += if code == 34 { "\\\"" } else if code == 92 { "\\\\" } else if code == 10 { "\\n" } else if code == 13 { "\\r" } else if code == 9 { "\\t" } else if code < 32 { "\\u\(hex4(code))" } else { from_code_point(code) }
 }
 out + "\""
 }

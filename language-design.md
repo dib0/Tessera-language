@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.23. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), TLS and the crypto built-ins of draft 0.22, and the standard modules `std/logging` and `std/config` of draft 0.23. Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
+**Status:** Draft 0.24. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), TLS and the crypto built-ins of draft 0.22, the standard modules `std/logging` and `std/config` of draft 0.23, and the Model First Programming tools of draft 0.24 (section 20). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -283,6 +283,25 @@ Decided against, with the reasons:
 - **Reading every environment variable with a prefix.** There is no built-in to list the environment, and reading only the keys that have a default means a typo in a variable name is not silently a new setting.
 - **Getters with a default argument** (`get_int(c, key, 8080)`). Defaults would be spread over the code; with `from_map` and `merge` they sit in one place, and a missing key is an error that names it.
 
+From draft 0.23 to 0.24, **Model First Programming** (section 20): the tools around the language are built for a model that writes and repairs code, not for a person at an editor. The language itself (syntax, types, semantics) did not change.
+
+| Added | Why |
+|---|---|
+| The syntax tree is the program; its canonical text is printed from it (sections 14 and 20.1). `tessera1 format` is now a full printer, `tessera1 ast` writes the tree as JSON, `tessera1 render` prints JSON as text, and every command accepts a `.json` tree | Exactly one textual form per program: no formatting variance between models or runs, and diffs show only real changes. Text and tree convert into each other without loss, comments included, which every file in the repository is tested for. |
+| Edit operations (`tessera1 edit`, section 20.2): `add_fn`, `add_item`, `replace_fn`, `replace_item`, `remove_fn`, `remove_item`, `rename_symbol`, `set_effect`, `add_match_arm`, `insert_stmt_before`, `insert_stmt_after`, `replace_stmt`, `remove_stmt` | Small typed changes instead of find-and-replace on text. Each operation finds its target in the tree, the changed files are printed canonically, and the whole program is checked before a file is written: a batch applies completely or not at all. `rename_symbol` follows the program's types, so it renames a field or variant also where it is used through a `.Variant` shorthand or a module alias. |
+| The grammar is exported (`tessera1 grammar`, section 20.3): GBNF for the canonical text, a JSON Schema for the tree (recursive, or unrolled to a fixed depth with `--depth`), and a JSON Schema for the edit operations | Grammar-constrained decoding: a decoder that follows the grammar cannot produce a syntax error. Claude's structured outputs accept no recursive schema, which is why the tree schema can be unrolled. |
+| Diagnostics carry `expected`, `actual` and machine-applicable `fixes` (section 20.4); `tessera1 fix` applies them | The repair is in the error. The text output shows each fix as the line it produces; `fix` applies every unambiguous fix and repeats until none is left. |
+| New codes E0701 to E0706 for invalid trees and refused edit operations (section 13) | Every refusal has a stable code and a concrete help line, like any other diagnostic. |
+
+Decided against, with the reasons:
+
+- **Keeping text as the source of truth with a lenient formatter.** The old `format` only removed indentation, so two programs with the same tree could still differ in spacing, parentheses, `x = x + 1` against `x += 1`, or `"a" + to_text(n)` against `"a\(n)"`. With the tree as the truth each of those has one written form.
+- **Comments as tree nodes in the language.** Comments stay outside the grammar of expressions; the lexer collects them and the printer puts each one back above the node it belongs to. In the JSON tree they are a `comments` list on that node. A comment that stood at the end of a code line moves to its own line above the next statement.
+- **Line-based edits (`replace lines 10 to 14`).** Line numbers change with every edit and are exactly what models get wrong; anchors are the canonical first line of a statement, which a model can quote and which is unique or refused.
+- **Applying edits that do not check.** An edit operation that leaves an error refuses the whole batch and reports the error in the would-be text, so a program on disk always checks after an edit.
+- **Fixes for every diagnostic.** A fix is only given where one change is clearly right (`let` to `var`, a missing `uses io`, `len` to `length`, `float(n)`). Where a choice is needed (`p.z` when both `x` and `y` exist, a non-exhaustive `match`) the diagnostic keeps its help text and offers no fix, so `tessera1 fix` never guesses.
+- **A machine-readable specification generated from the compiler, contracts and property tests** (steps 5 and 6 of the MFP plan) are deferred until the tools above are measured (section 18).
+
 ## 4. Source files and lexical structure
 
 ### 4.1 Files
@@ -300,7 +319,7 @@ Decided against, with the reasons:
 note "A note records design intent. Notes are part of the program's metadata."
 ```
 
-The difference is deliberate: comments are for reading, notes are for tooling. See section 11.
+The difference is deliberate: comments are for reading, notes are for tooling. See section 11. Comments are kept by every tool that rewrites a file (section 14): each one stays above the statement or declaration it stands above, and a comment at the end of a line moves to its own line.
 
 There are no block comments (`/* */`). Nesting rules and unterminated comments are a known source of parser bugs and confusing diffs.
 
@@ -1236,7 +1255,7 @@ help: add `uses io` to the signature of `format_report`, or move the call to a f
 Rules:
 
 - Every diagnostic has a stable code, a file, a line, a column, and a one-line message.
-- Every error suggests a concrete fix where one exists.
+- Every error suggests a concrete fix where one exists. Where exactly one change is clearly right, the diagnostic also carries it as a machine-applicable fix (section 20.4).
 - Error codes are never reused for a different meaning.
 - `tessera check --json` emits the same diagnostics as JSON for tools and agents.
 - The compiler reports all errors it can find in one pass. Type checking runs only when the whole program parsed cleanly, and a value whose type is already wrong does not cause follow-up errors.
@@ -1301,17 +1320,27 @@ Rules:
 | E0609 | Public declaration exposes a private type |
 | E0610 | Unused import |
 | E0611 | `main` outside the entry file |
+| E0701 | Invalid JSON syntax tree (section 20.1) |
+| E0702 | Unknown edit operation, a field missing, or operations that are not valid JSON (section 20.2) |
+| E0703 | An edit operation names a file that is not part of the program |
+| E0704 | The target of an edit operation is not found (declaration, function, anchor or `match`) |
+| E0705 | The target of an edit operation is ambiguous, or a declaration of that name already exists |
+| E0706 | The source text of an edit operation does not parse as what the operation needs |
 
 ## 14. Canonical formatting
 
-`tessera1 format <files...>` applies the layout rules that do not need a full pretty printer: no indentation, no trailing spaces, at most one blank line in a row and exactly one final newline; `--check` only reports files that would change. Because text literals cannot span lines, this never changes the meaning of a program. The remaining rules below (spacing inside lines, line length) are *not implemented yet*:
+Every program has exactly one textual form, its **canonical text**, which the compiler prints from the syntax tree (section 20.1). `tessera1 format <files...>` replaces each file by its canonical text; `--check` only reports the files that would change. Formatting never changes the program: the tree of the canonical text is the tree of the original (tested for every file in the repository), and formatting twice gives the same result as formatting once. The canonical text uses the short forms below, which the frozen stage 0 compiler does not read, so the programs shared with stage 0 (`examples/valid/` and the shared tests) are kept in its syntax.
 
 - No indentation: every line starts in the first column. Indentation has no meaning in Tessera, which is written and read mainly by models; braces carry the structure. Leaving it out saves about 12% of the tokens of a program (section 19). Tabs are never allowed.
-- One space around binary operators and after commas and colons: `fn f(a: Int, b: Int) -> Int`.
-- Opening brace on the same line.
-- Maximum line length 100; longer expressions break after an operator.
-- One blank line between declarations. Notes sit directly above their declaration.
-- Formatting twice gives the same result as formatting once; comments and notes are preserved.
+- One space around binary operators, after commas and colons, and inside `{ ... }` of record literals and `with`: `fn f(a: Int, b: Int) -> Int`, `Point { x: 1, y: 2 }`.
+- Opening brace on the same line; `} else {` on one line.
+- One statement per line, and each expression on the line of its statement: there is no line length limit. Blocks, `match` arms and declarations with fields or variants span lines; nothing else does.
+- `if c { a } else { b }` stays on one line when every branch is a single value without statements, `return`, `break` or `continue`; otherwise each branch is a block over several lines.
+- A `match` arm whose body is one `set`, `let`, `for` or `while` is written without braces (section 7.5).
+- Parentheses only where the grammar needs them: around an operand that binds less tightly than its operator, around a comparison inside a comparison, around `and` inside `or` (and the reverse), and around a block or record literal in an `if`, `while`, `for` or `match` header.
+- The short forms: `set x += e` and `set x -= e` for `set x = x + e` and `set x = x - e` (also on places), and `"a\(x)b"` for `"a" + to_text(x) + "b"`. A lone `to_text(x)` is written as the call, not as `"\(x)"`, which is the same tree.
+- One blank line between declarations, none between imports and none inside bodies. Notes sit directly above their declaration. A comment group keeps its blank lines at the top level.
+- Text literals use the escapes `\n`, `\t`, `\\`, `\"` and `\u{...}` for other control characters.
 
 ## 15. Grammar (EBNF)
 
@@ -1412,7 +1441,14 @@ tessera1 emit-rust <entry.tes> [-o <file.rs>]
 tessera1 notes <entry.tes>
 tessera1 test <entry.tes> [-o <test binary>]
 tessera1 format <files...> [--check]
+tessera1 ast <file.tes>
+tessera1 render <file.json> [-o <file.tes>]
+tessera1 edit <entry.tes> (--ops <ops.json> | --op <json>) [--dry-run] [--json]
+tessera1 fix <entry.tes> [--dry-run] [--json]
+tessera1 grammar [--format gbnf|ast-schema|edit-schema] [--depth N]
 ```
+
+Every command that reads a source file also accepts a JSON syntax tree (`.json`, section 20.1) in its place.
 
 Imported modules are found automatically; only the entry file is given.
 
@@ -1453,11 +1489,12 @@ On Windows:
 
 ## 18. Deferred, in expected order
 
-1. The rest of the formatter (section 14) and typed IR export with notes.
-2. User-defined generics (typed JSON decoding, generic containers).
-3. Closures, nested patterns, `Set`, constants.
-4. A native SQLite or PostgreSQL client, which needs a decision on runtime dependencies (TLS was added without any in draft 0.22).
-5. Notes on statements.
+1. Typed IR export with notes. (The formatter of section 14 is complete since draft 0.24.)
+2. Model First Programming steps 5 to 7 (section 20.5): a machine-readable specification generated from the compiler, contracts or property tests per function, and a source map from tree nodes to runtime traces.
+3. User-defined generics (typed JSON decoding, generic containers).
+4. Closures, nested patterns, `Set`, constants.
+5. A native SQLite or PostgreSQL client, which needs a decision on runtime dependencies (TLS was added without any in draft 0.22).
+6. Notes on statements.
 
 What complete applications, web applications and nginx/Apache hosting need beyond this list is analysed in [`application-roadmap.md`](application-roadmap.md), with a proposed order and the decisions that have to be made first.
 
@@ -1571,3 +1608,102 @@ Review of the language after Tesseradoom's sound, weapons, menus and saving (dra
 - **Nested patterns** (`.Error(.NotFound)`). Rewritten with `==` each time; cheap to work around, but the most common pattern request.
 - **Tuples or small anonymous records.** `std/rng.roll` returns `[value, seed]` as a `List[Int]`, as do several Tesseradoom helpers; a pair type would say what each element is.
 - **Last use everywhere.** Draft 0.20 moves values at returns and in branches; a full liveness analysis would also cover `let y = f(x)` when `x` is not used again.
+
+Findings from building the Model First Programming tools (draft 0.24, section 20):
+
+- **The parser was lossy in four places**: comments, parentheses, text interpolation (expanded by the lexer) and `+=` (expanded by the parser). The printer recovers the last three by rule, which is what defines the canonical form; comments are now collected by the lexer. The compiler's own source, formatted canonically, generates the same Rust as before apart from source positions.
+- **Claude's structured outputs accept no recursive JSON Schema.** A syntax tree is recursive, so grammar-constrained generation of whole trees with Claude needs the unrolled schema (`--depth`), whose size grows linearly with the depth (about 95 KB at depth 12). Edit operations are not recursive and fit strict tool use directly. Which of the two helps more is to be measured.
+- **The 13 typical mistakes of `tests/mfp/fix/broken.tes` need one `fix` run.** Twelve are fixed automatically in two rounds (a removed import and an added one would overlap in the first); the remaining one (`p.z` on a record with `x` and `y`) has no single right answer and is left to the model.
+
+## 20. Model First Programming
+
+Tessera is written, reviewed and repaired mainly by models. **Model First Programming (MFP)** is the paradigm that follows from that: the program is a structured object that models change through typed operations, a model can be kept from writing invalid syntax at all, and every error the compiler finds says how to repair it. Text remains, as the one canonical view of the program for reading and review. Draft 0.24 implements the first four steps; the order follows from measurement (`harness/`), which comes first:
+
+1. The syntax tree is the source of truth (20.1).
+2. Semantic edit operations instead of text diffs (20.2).
+3. Validity during generation: an exported grammar for constrained decoding (20.3).
+4. Machine-actionable diagnostics (20.4).
+5. A machine-first specification, generated from the compiler (deferred, 20.5).
+6. Correctness checkable by machines: contracts or property tests per function, effects and capabilities as hard gates (deferred).
+7. A debugging path: stable node ids and a source map from tree nodes to runtime traces (deferred).
+
+### 20.1 The syntax tree as the program
+
+`tessera1 ast <file.tes>` writes the syntax tree of one file as JSON; `tessera1 render <file.json>` prints the canonical text of a tree (section 14); every command that reads source files (`check`, `build`, `test`, `emit-rust`, `notes`, `edit`, `fix`) accepts a `.json` tree in place of a `.tes` file and reads it as its canonical text, so diagnostics point into that text. Converting is lossless: text to tree to text gives the canonical text, and the canonical text gives the same tree, comments included. Every file in the repository is tested for both.
+
+The JSON follows the canonical text, not the compiler's internal form. A file is `{"tessera_ast": 1, "items": [...]}`, with one declaration per line. Every node is an object with a `kind`:
+
+| Node | Kinds and fields |
+|---|---|
+| Declarations | `fn` (`name`, `params` [`{name, type}`], `returns`, optional `pub`, `notes`, `uses`, and `body`: a `block` or, for `= value`, an expression); `type` (`fields` [`{name, type}`]); `enum` (`variants` [`{name, fields?}`]); `import` (`path`, `uses` when limited, `[]` for `uses nothing`); `test` (`name`, `body`) |
+| Types | a name (`"Int"`, `"shapes.Shape"`), `{"name": "List", "args": [...]}`, or `{"name": "fn", "params": [...], "returns": ..., "uses": [...]}` |
+| Statements | `let` and `var` (`name`, optional `type`, `value`, optional `else` for `let ... else`); `set` (`target`: a name with `field` and `index` steps, optional `op` `+=` or `-=`, `value`); `for` (`variable`, `iterable`, `body`); `while` (`condition`, `body`); or any expression |
+| Expressions | `int` (`value`), `number` (`text`: a `Decimal` or `Float` literal), `bool`, `text` (`value`), `interpolation` (`parts`: texts and expressions), `unit`, `name`, `list` (`items`), `map` (`entries` [`{key, value}`]), `call` (`function`, `args`), `index`, `field` (`target`, `name`), `with` (`target`, `fields`), `unary` (`op` `-` or `not`, `operand`), `try`, `binary` (`op`, `left`, `right`), `if` (`condition`, `then`, optional `else`: a `block` or an `if`), `block` (`statements`, the last one being the block's value when it is an expression), `match` (`value`, `arms` [`{pattern, body}`]), `record` (`type`, `fields`), `variant` (optional `type`, `variant`, optional `args`), `return` (optional `value`), `break`, `continue` |
+| Patterns | `wildcard`, `int`, `text`, `bool`, `variant` (optional `type`, `variant`, optional `bindings`) |
+
+A node that stands on its own line (a declaration, statement, `match` arm, field or variant) may carry `comments`, the comment lines above it; at the top level an empty string stands for a blank line. Blocks, `match` and the file may carry `end_comments`, the comments before their closing brace or at the end. There are no positions in the tree: positions belong to the canonical text.
+
+Choices that keep one form: `set x = x + e` is written `{"kind": "set", "op": "+=", ...}`, and a chain `"a" + to_text(x)` is an `interpolation`, because those are their canonical texts. Reading a tree joins neighbouring texts in an interpolation and drops empty ones, as the lexer does.
+
+An invalid tree is E0701, with the JSON path of the first problem (`items[3].body.statements[0]: unknown expression kind ...`).
+
+### 20.2 Edit operations
+
+`tessera1 edit <entry.tes> --ops <ops.json>` (or `--op '<json>'`) applies one operation or a list of them to the program whose entry file is given. Operations apply in order to the trees of the program's files; after each one the changed files are printed and read again. When all have applied, the whole program is checked with the changed texts. Only if it checks are the files written, each in its canonical form (a `.json` file as a tree again). Otherwise nothing is written and the diagnostics, pointing into the would-be text, are reported. `--dry-run` checks without writing; `--json` reports in JSON.
+
+Every operation has an `op` and an optional `file` (default: the entry file; a module as `path/to/module.tes`, the way the compiler finds it):
+
+| Operation | Fields | Effect |
+|---|---|---|
+| `add_fn` | `source`, optional `after` or `before` | Adds one function (with its notes) after or before the named declaration, or at the end |
+| `add_item` | `source`, optional `after` or `before` | The same for any declarations, also several; an `import` goes after the last import |
+| `replace_fn`, `replace_item` | `name`, `source` | Replaces the named declaration. Without notes in `source` the old notes are kept; comments above it stay |
+| `remove_fn`, `remove_item` | `name` | Removes the declaration (an import by its path) and the comments directly above it |
+| `rename_symbol` | `from`, `to`, optional `fn` | With `fn`: a parameter or local variable of that function. Otherwise the function or type `from` of `file`, also in the modules that use it as `alias.from`; or `Type.variant` / `Type.field`, renamed wherever the type checker finds that variant or field, so also through a `.Variant` shorthand, a pattern or a module alias (this needs a program that checks) |
+| `set_effect` | `fn`, `uses` | Sets the `uses` list of a function |
+| `add_match_arm` | `fn`, `match`, `arm`, optional `after` | Adds `pattern => body` to the `match` whose value is written `match` in canonical form: after the arm with pattern `after`, else before a final `_` arm, else at the end |
+| `insert_stmt_before`, `insert_stmt_after` | `fn`, `anchor`, `source` | Inserts statements before or after the statement whose canonical first line is `anchor` |
+| `replace_stmt`, `remove_stmt` | `fn`, `anchor`, `source` / — | Replaces or removes that statement (a compound statement with its body) |
+
+`source` is canonical Tessera text, the way it would stand in the file; comments in it are kept. An anchor is the first line of a statement as `tessera1 format` writes it, for example `set total += shapes.area(s)` or `while index < count {`; it must match exactly one statement of the function, searched in every nested block. A function with an `= value` body becomes a block when a statement is inserted.
+
+Refusals: E0702 (unknown operation or missing field, or the operations are not valid JSON), E0703 (the file is not part of the program), E0704 (the target is not found), E0705 (the target is ambiguous, a declaration of that name exists already, or a field or variant rename on a program that does not check), E0706 (`source` does not parse as what the operation needs). They point into the operations and name the operation by its position.
+
+### 20.3 Grammar export
+
+`tessera1 grammar --format <format>` writes:
+
+- `gbnf` (the default): the canonical text in GBNF, the grammar format of llama.cpp, which XGrammar and similar decoders also read. It is stricter than the parser: it accepts only the canonical layout (no indentation, single spaces) and encodes the naming rules (`snake_case` names, `PascalCase` types), so text decoded with it is canonical. Type and effect errors are still the compiler's to find. The file is `grammar/tessera.gbnf`.
+- `ast-schema`: the JSON Schema (draft 2020-12) of the tree of section 20.1. A tree nests without limit, so the schema is recursive. With `--depth N` (1 to 64) it is unrolled into N levels (`expr_0` to `expr_N`, the last with only leaf expressions), because some constrained decoders, among them Claude's structured outputs, accept no recursive schema. Every object has `additionalProperties: false`.
+- `edit-schema`: the JSON Schema of the operations of section 20.2, one definition per operation; each also serves as the input schema of a separate tool (strict tool use).
+
+`harness/tools/check_grammar.py` checks the export independently and without dependencies: every canonical file in the repository is accepted by the GBNF grammar (with an Earley recognizer) and its tree validates against both forms of the schema; the unrolled schema has no `$ref` cycle.
+
+### 20.4 Machine-actionable diagnostics
+
+Besides its code, position, message, label and help (section 13), a diagnostic can carry:
+
+- `expected` and `actual`: what the compiler wanted and what it found, such as two types (`Option[Int]`, `Int`) or two argument counts.
+- `fixes`: repairs, each a `message` and a list of `edits` (file, line, column, end line, end column, `replacement`; an empty range inserts). All edits of one fix belong together. A fix is offered only where one change is clearly right, and the compiler checks before reporting it that it applies to the source.
+
+`check --json` includes them, together with `source_line`, the text of the line the diagnostic points at. The text output shows each fix with the line it produces:
+
+```
+error[E0205]: `label` cannot be changed
+  --> app.tes:25:5
+   |
+25 | set label = label + "!"
+   |     ^^^^^
+   |
+help: declare it with `var` instead of `let` (line 24); parameters can never be changed
+fix: declare `label` with `var`
+  24 | var label = "point"
+```
+
+Diagnostics with fixes in draft 0.24: tabs and carriage returns (E0101), `_name` (E0103), a comma where a line break belongs and an assignment without `set` (E0110), a method call `xs.length()` (E0110, E0606: `length(xs)`), `else` on its own line (E0111), a blank line after a note (E0401), unknown names, functions, types, fields, variants and effects close to a known one or written as in another language (`len`, `str`, `push`, `String`, ...; E0202, E0203, E0208, E0209, E0303), `let` changed by `set` and `var` never changed (E0205, E0206), a missing or unused effect (E0301, E0302), a value of the wrong type with one obvious conversion (`float(...)`, `decimal(...)`, `.0` after a literal, `to_text(...)`, `.Some(...)`, `.Ok(...)`; E0501, E0503), a value that is not used (E0508: `let _ = ...`), `try` on a value that is no `Result` or `Option` (E0515), an unused or repeated import (E0610, E0604) and a standard module used without its import (E0606).
+
+`tessera1 fix <entry.tes>` applies, per round, every fix of a diagnostic that has exactly one fix and does not overlap another, then checks again, for at most 10 rounds (one fix can uncover the next error). It writes the files in canonical form and reports what is left; `--dry-run` and `--json` as for `edit`. A diagnostic whose repair needs a choice keeps its help text and no fix, so `fix` never guesses.
+
+### 20.5 Deferred
+
+Steps 5 to 7 wait until the effect of steps 1 to 4 on fix rounds and tokens has been measured with the harness. The candidate design: a typed reference (grammar, type rules, effect rules, built-in signatures) generated by `tessera1` itself, so it cannot drift from the implementation; contracts (`requires`/`ensures`) or `test` declarations required per public function and run by the compiler; and stable node ids carried through code generation into runtime error locations.

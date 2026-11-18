@@ -99,7 +99,7 @@ fn unexpected(p: Parser, expected: Text) -> Parser {
 let found = current(p)
 var d = source.error("E0110", found.span, "expected \(expected), found \(lexer.describe_token(found))")
 if found.kind == .Comma {
-set d = d with { help: "separate items here with a line break instead of a comma" }
+set d = source.with_fix(d with { help: "separate items here with a line break instead of a comma" }, "put a line break in place of the comma", [source.replace_expected(found.span, ",", "\n")])
 }
 fail_parse(p, d)
 }
@@ -202,9 +202,9 @@ var depth = 0
 while not at(p, .Eof) {
 let kind = peek(p)
 if kind == .LBrace {
-set depth = depth + 1
+set depth += 1
 } else if kind == .RBrace {
-set depth = depth - 1
+set depth -= 1
 } else if kind == .Newline and depth <= 0 and is_declaration_start(peek_at(p, 1)) {
 return advance(p)
 }
@@ -234,7 +234,8 @@ if p.failed {
 return dummy_item(p)
 }
 if not at(p, .Eof) and current_span(p).line > text_token.span.line + 1 {
-let d = source.error_help("E0401", source.span_to(note_start, text_token.span), "a note must be directly above the declaration it describes", "remove the blank line between the note and the declaration")
+let blank = source.delete_lines(text_token.span.file, text_token.span.line + 1, current_span(p).line - 1)
+let d = source.with_fix(source.error_help("E0401", source.span_to(note_start, text_token.span), "a note must be directly above the declaration it describes", "remove the blank line between the note and the declaration"), "remove the blank line", [blank])
 return dummy_item(fail_parse(p, d))
 }
 }
@@ -682,7 +683,7 @@ let body = parse_block(condition.parser)
 return StatementResult { parser: body.parser, statement: .While(condition.expr, body.block) }
 }
 if kind == .Ident and (peek_at(p, 1) == .Assign or peek_at(p, 1) == .PlusAssign or peek_at(p, 1) == .MinusAssign) {
-let d = source.error_help("E0110", current_span(p), "assignment needs `set`", "declare the variable with `var` and change it with `set name = value`")
+let d = source.with_fix(source.error_help("E0110", current_span(p), "assignment needs `set`", "declare the variable with `var` and change it with `set name = value`"), "write `set` before the assignment", [source.replace_span(source.start_of(current_span(p)), "set ")])
 return dummy_statement(fail_parse(p, d))
 }
 let expr = parse_expr(p, true)
@@ -924,13 +925,18 @@ return failed_expr(fail_parse(update.parser, d))
 }
 set result = expr_result(update.parser, .RecordUpdate(result.expr, update.fields), source.span_to(result.expr.span, update.close))
 } else if at(p, .Dot) {
+let dot_span = current_span(p)
 let field = identifier(advance(p), "a field name")
 if field.parser.failed {
 return failed_expr(field.parser)
 }
 if at(field.parser, .LParen) {
-let d = source.error_help("E0110", current_span(field.parser), "Tessera has no method calls", "call the function with the value as first argument, e.g. `\(field.name)(value, ...)`")
-return failed_expr(fail_parse(field.parser, d))
+let paren = current_span(field.parser)
+let no_args = peek_at(field.parser, 1) == .RParen
+let joint = source.Span { file: dot_span.file, line: dot_span.line, col: dot_span.col, end_line: paren.end_line, end_col: paren.end_col }
+let edits = [source.replace_span(source.start_of(result.expr.span), "\(field.name)("), source.replace_span(joint, if no_args { "" } else { ", " })]
+let d = source.error_help("E0110", paren, "Tessera has no method calls", "call the function with the value as first argument, e.g. `\(field.name)(value, ...)`")
+return failed_expr(fail_parse(field.parser, source.with_fix(d, "call `\(field.name)` with the value as first argument", edits)))
 }
 set result = expr_result(field.parser, .FieldAccess(result.expr, field.name, field.span), source.span_to(result.expr.span, field.span))
 } else {
@@ -1262,7 +1268,10 @@ let kind = ast.ExprKind.If(condition.expr, then_block.block, Option.Some(else_br
 return expr_result(else_branch.parser, kind, source.span_to(start, else_branch.expr.span))
 }
 if at(after, .Newline) and peek_at(after, 1) == .Else {
-let d = source.error_help("E0111", after.tokens[after.pos + 1].span, "`else` must be on the same line as the closing `}`", "write `} else {`")
+let else_span = after.tokens[after.pos + 1].span
+let close = then_block.block.span
+let gap = source.Span { file: close.file, line: close.end_line, col: close.end_col, end_line: else_span.line, end_col: else_span.col }
+let d = source.with_fix(source.error_help("E0111", else_span, "`else` must be on the same line as the closing `}`", "write `} else {`"), "join the lines: `} else`", [source.replace_span(gap, " ")])
 return failed_expr(fail_parse(after, d))
 }
 expr_result(after, .If(condition.expr, then_block.block, .None), source.span_to(start, then_block.block.span))

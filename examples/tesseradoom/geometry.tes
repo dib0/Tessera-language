@@ -33,7 +33,7 @@ cosine: List[Int]
 
 pub fn make_trig() -> Trig = Trig { sine: fixed.sine_table(fine_angles()), cosine: fixed.cosine_table(fine_angles()) }
 
-pub fn wrap_angle(angle: Int) -> Int = ((angle % fine_angles()) + fine_angles()) % fine_angles()
+pub fn wrap_angle(angle: Int) -> Int = (angle % fine_angles() + fine_angles()) % fine_angles()
 
 note "Converts a THINGS angle in degrees to a fine angle."
 pub fn degrees_to_fine(degrees: Int) -> Int = wrap_angle(degrees * fine_angles() / 360)

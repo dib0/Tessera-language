@@ -6,32 +6,15 @@ import ast uses nothing
 import parser uses nothing
 import checker uses nothing
 import codegen uses nothing
+import printer uses nothing
+import astjson uses nothing
+import edit uses nothing
+import grammar uses nothing
+import std/json uses nothing
 import runtime_text uses nothing
 
 fn usage() -> Text {
-join([
-"Tessera stage 1 compiler (written in Tessera)",
-"",
-"Usage:",
-"  tessera1 check <files...> [--json]           Check for errors without generating code",
-"  tessera1 build <files...> -o <output>        Compile to a native executable",
-"        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)",
-"        [--library]                             A web application as a shared library for the",
-"                                                nginx, Apache and IIS modules (see hosts/README.md)",
-"  tessera1 test <files...>                     Run the `test` declarations of the entry module",
-"  tessera1 format <files...> [--check]         Rewrite files in the canonical layout",
-"  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code",
-"  tessera1 notes <files...>                    Export notes as JSON",
-"",
-"The first file is the entry module (with `main`, or `handle` for a web application);",
-"imported modules are found relative to its directory; `std/...` modules are built in.",
-"A web application built as an executable runs as CGI, `app serve --port N`,",
-"`app fastcgi --port N` or `app request GET /path`.",
-"Further files given on the command line are part of the entry module.",
-"Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.",
-"On Windows an output name without an extension is written with `.exe` added.",
-"Set TESSERA_RUSTC to choose the rustc binary.",
-], "\n")
+join(["Tessera stage 1 compiler (written in Tessera)", "", "Usage:", "  tessera1 check <files...> [--json]           Check for errors without generating code", "  tessera1 build <files...> -o <output>        Compile to a native executable", "        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)", "        [--library]                             A web application as a shared library for the", "                                                nginx, Apache and IIS modules (see hosts/README.md)", "  tessera1 test <files...>                     Run the `test` declarations of the entry module", "  tessera1 format <files...> [--check]         Rewrite files in their canonical form", "  tessera1 ast <file.tes>                      Write the syntax tree as JSON (spec section 20.1)", "  tessera1 render <file.json> [-o <file.tes>]  Write the canonical text of a JSON syntax tree", "  tessera1 fix <files...> [--dry-run] [--json] Apply the fixes the diagnostics carry (spec section 20.4)", "  tessera1 grammar [--format <f>] [--depth N]  Export the grammar (spec section 20.3): `gbnf` (the", "                                                text), `ast-schema` (JSON trees; `--depth N` unrolls", "                                                it for decoders without recursion), `edit-schema`", "  tessera1 edit <files...> --ops <ops.json>    Apply edit operations (spec section 20.2); the", "        [--op <json>] [--dry-run] [--json]      program is checked before any file is written", "  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code", "  tessera1 notes <files...>                    Export notes as JSON", "", "Every command that reads source files also accepts a JSON syntax tree (`.json`).", "The first file is the entry module (with `main`, or `handle` for a web application);", "imported modules are found relative to its directory; `std/...` modules are built in.", "A web application built as an executable runs as CGI, `app serve --port N`,", "`app fastcgi --port N` or `app request GET /path`.", "Further files given on the command line are part of the entry module.", "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.", "On Windows an output name without an extension is written with `.exe` added.", "Set TESSERA_RUSTC to choose the rustc binary."], "\n")
 }
 
 type Options {
@@ -42,6 +25,11 @@ json: Bool
 opt: Text
 library: Bool
 check: Bool
+ops: Text
+op: Text
+dry_run: Bool
+format: Text
+depth: Int
 }
 
 fn value_after(arguments: List[Text], index: Int) -> Result[Text, Text] {
@@ -56,7 +44,7 @@ fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
 if length(arguments) == 0 {
 return .Error("missing command")
 }
-var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, check: false }
+var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, check: false, ops: "", op: "", dry_run: false, format: "gbnf", depth: 0 }
 if options.command == "help" or options.command == "--help" {
 return .Ok(options)
 }
@@ -65,31 +53,51 @@ while index < length(arguments) {
 let argument = arguments[index]
 if argument == "-o" {
 set options = options with { output: try value_after(arguments, index) }
-set index = index + 2
+set index += 2
 } else if argument == "--opt" {
 let level = try value_after(arguments, index)
 if not source.contains_text(["0", "1", "2", "3"], level) {
 return .Error("invalid optimization level `\(level)`")
 }
 set options = options with { opt: level }
-set index = index + 2
+set index += 2
 } else if argument == "--json" {
 set options = options with { json: true }
-set index = index + 1
+set index += 1
 } else if argument == "--library" {
 set options = options with { library: true }
-set index = index + 1
+set index += 1
 } else if argument == "--check" {
 set options = options with { check: true }
-set index = index + 1
+set index += 1
+} else if argument == "--ops" {
+set options = options with { ops: try value_after(arguments, index) }
+set index += 2
+} else if argument == "--op" {
+set options = options with { op: try value_after(arguments, index) }
+set index += 2
+} else if argument == "--format" {
+set options = options with { format: try value_after(arguments, index) }
+set index += 2
+} else if argument == "--depth" {
+let depth_text = try value_after(arguments, index)
+let depth = parse_int(depth_text) else return .Error("`--depth` needs a number from 1 to 64, found `\(depth_text)`")
+if depth < 1 or depth > 64 {
+return .Error("`--depth` needs a number from 1 to 64, found `\(depth_text)`")
+}
+set options = options with { depth: depth }
+set index += 2
+} else if argument == "--dry-run" {
+set options = options with { dry_run: true }
+set index += 1
 } else if source.starts_with_text(argument, "-") {
 return .Error("unknown option `\(argument)`")
 } else {
 set options = options with { files: append(options.files, argument) }
-set index = index + 1
+set index += 1
 }
 }
-if length(options.files) == 0 {
+if length(options.files) == 0 and options.command != "grammar" {
 return .Error("no source files given")
 }
 .Ok(options)
@@ -101,8 +109,10 @@ program: checker.CheckedProgram
 diagnostics: List[source.Diagnostic]
 }
 
+note "`module_paths` gives the import path of each file in `files` (empty for the entry files)."
 type Loaded {
 files: List[source.SourceFile]
+module_paths: List[Text]
 modules: List[ast.Module]
 diagnostics: List[source.Diagnostic]
 }
@@ -110,15 +120,16 @@ diagnostics: List[source.Diagnostic]
 type ParsedSource {
 items: List[ast.Item]
 diagnostics: List[source.Diagnostic]
+comments: List[lexer.Comment]
 }
 
 fn parse_source(text: Text, file: Int) -> ParsedSource {
 let lexed = lexer.tokenize(text, file)
 if length(lexed.diagnostics) > 0 {
-return ParsedSource { items: [], diagnostics: lexed.diagnostics }
+return ParsedSource { items: [], diagnostics: lexed.diagnostics, comments: lexed.comments }
 }
 let parsed = parser.parse_file(lexed.tokens)
-ParsedSource { items: parsed.items, diagnostics: parsed.diagnostics }
+ParsedSource { items: parsed.items, diagnostics: parsed.diagnostics, comments: lexed.comments }
 }
 
 note "True on Windows, where `OS` is set to `Windows_NT` by the system itself (not by a shell)."
@@ -151,7 +162,7 @@ while index >= 0 {
 if codes[index] == 47 {
 return from_code_points(slice(codes, 0, index))
 }
-set index = index - 1
+set index -= 1
 }
 "."
 }
@@ -175,9 +186,6 @@ return false
 }
 true
 }
-
-note "Every standard module, for the help of E0601. Keep it in step with `standard_module`; compiler/tests/stage1.rs checks that the help names every file in std/."
-fn standard_module_names() -> List[Text] = ["std/bytes", "std/config", "std/crypto", "std/fixed", "std/html", "std/http", "std/json", "std/keys", "std/logging", "std/math", "std/palette", "std/plane", "std/ppm", "std/raster", "std/rng", "std/sound", "std/url"]
 
 note "The source of a standard module (embedded in the compiler), or empty text."
 fn standard_module(path: Text) -> Text {
@@ -235,17 +243,47 @@ return runtime_text.std_rng()
 ""
 }
 
+type SourceText {
+text: Text
+diagnostics: List[source.Diagnostic]
+}
+
+note "The text of a source file. A `.json` file holds a syntax tree (spec section 20.1); its canonical text is what the rest of the compiler reads, so diagnostics point into that text."
+fn source_text(path: Text, file: Int, overrides: Map[Text, Text]) -> SourceText uses fs {
+match get(overrides, path) {
+.Some(changed) => return SourceText { text: changed, diagnostics: [] }
+.None => {}
+}
+let text = read_file(path)
+if not source.ends_with_text(path, ".json") {
+return SourceText { text: text, diagnostics: [] }
+}
+let read = astjson.read_tree(text, file)
+if read.error != "" {
+return SourceText { text: "", diagnostics: [json_error(file, read.error)] }
+}
+SourceText { text: printer.render_file(read.items, read.comments, file), diagnostics: [] }
+}
+
+fn json_error(file: Int, problem: Text) -> source.Diagnostic {
+source.error_help("E0701", source.span_of(file, 1, 1, 2), "invalid syntax tree: \(problem)", "the JSON form is described in spec section 20.1 and by `tessera1 grammar --format ast-schema`")
+}
+
 note "Loads the entry files and, following `import`s, every module they need. Module files are found relative to the directory of the first entry file."
-fn load_program(entry_paths: List[Text], windows: Bool) -> Loaded uses fs {
+fn load_program(entry_paths: List[Text], windows: Bool, overrides: Map[Text, Text]) -> Loaded uses fs {
 let root = directory_of(entry_paths[0], windows)
 var files: List[source.SourceFile] = []
+var module_paths: List[Text] = []
 var diagnostics: List[source.Diagnostic] = []
 var entry_items: List[ast.Item] = []
 var entry_files: List[Text] = []
 for path in entry_paths {
 let file = length(files)
-let text = read_file(path)
+let read = source_text(path, file, overrides)
+let text = read.text
+set diagnostics = concat(diagnostics, read.diagnostics)
 set files = append(files, source.SourceFile { path: path, text: text })
+set module_paths = append(module_paths, "")
 set entry_files = append(entry_files, join_path(directory_of(path, windows), base_name(path, windows)))
 let parsed = parse_source(text, file)
 set diagnostics = concat(diagnostics, parsed.diagnostics)
@@ -264,13 +302,14 @@ let standard = standard_module(i.path)
 if standard != "" {
 let file = length(files)
 set files = append(files, source.SourceFile { path: "<\(i.path).tes>", text: standard })
+set module_paths = append(module_paths, i.path)
 let parsed = parse_source(standard, file)
 set diagnostics = concat(diagnostics, parsed.diagnostics)
 set modules = append(modules, ast.Module { path: i.path, prefix: ast.module_prefix(i.path), items: parsed.items, is_entry: false })
 continue
 }
 if source.starts_with_text(i.path, "std/") {
-set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "there is no standard module `\(i.path)`", "the standard modules are \(join(standard_module_names(), ", "))"))
+set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "there is no standard module `\(i.path)`", "the standard modules are \(join(checker.standard_module_names(), ", "))"))
 continue
 }
 let file_path = join_path(root, "\(i.path).tes")
@@ -278,20 +317,21 @@ if source.contains_text(entry_files, file_path) {
 set diagnostics = append(diagnostics, source.error_help("E0603", i.span, "`\(i.path)` is the entry module and cannot be imported", "move the shared code into its own module"))
 continue
 }
-if not file_exists(file_path) {
+if not file_exists(file_path) and get(overrides, file_path) == .None {
 set diagnostics = append(diagnostics, source.error_help("E0601", i.span, "cannot find module `\(i.path)`", "expected the file `\(file_path)`"))
 continue
 }
 let file = length(files)
-let text = read_file(file_path)
+let text = source_text(file_path, file, overrides).text
 set files = append(files, source.SourceFile { path: file_path, text: text })
+set module_paths = append(module_paths, i.path)
 let parsed = parse_source(text, file)
 set diagnostics = concat(diagnostics, parsed.diagnostics)
 set modules = append(modules, ast.Module { path: i.path, prefix: ast.module_prefix(i.path), items: parsed.items, is_entry: false })
 }
-set next = next + 1
+set next += 1
 }
-Loaded { files: files, modules: modules, diagnostics: concat(diagnostics, find_cycles(modules)) }
+Loaded { files: files, module_paths: module_paths, modules: modules, diagnostics: concat(diagnostics, find_cycles(modules)) }
 }
 
 type Visit {
@@ -350,30 +390,26 @@ set states = append(states, 0)
 visit_module(0, modules, Visit { states: states, diagnostics: [] }, []).diagnostics
 }
 
-fn run_frontend(entry_paths: List[Text], tests: Bool, windows: Bool) -> Frontend uses fs {
-let loaded = load_program(entry_paths, windows)
+fn run_frontend(entry_paths: List[Text], tests: Bool, windows: Bool, overrides: Map[Text, Text]) -> Frontend uses fs {
+let loaded = load_program(entry_paths, windows, overrides)
 var diagnostics = loaded.diagnostics
 var program = checker.CheckedProgram { items: [], type_defs: [], diagnostics: [], uses_ui: false, uses_audio: false, entry: "" }
 if length(diagnostics) == 0 {
 set program = checker.check_program(loaded.modules, tests)
 set diagnostics = program.diagnostics
 }
-Frontend { files: loaded.files, program: program, diagnostics: source.dedup_diagnostics(source.sort_diagnostics(diagnostics)) }
+Frontend { files: loaded.files, program: program, diagnostics: source.valid_fixes(source.dedup_diagnostics(source.sort_diagnostics(diagnostics)), loaded.files) }
 }
 
-fn report_diagnostics(diagnostics: List[source.Diagnostic], files: List[source.SourceFile], json: Bool, summary: Text) -> Unit uses io {
-if json {
+fn report_diagnostics(diagnostics: List[source.Diagnostic], files: List[source.SourceFile], as_json: Bool, summary: Text) -> Unit uses io {
+if as_json {
 print(source.render_json(diagnostics, files))
 return
 }
 for d in diagnostics {
 print_error(source.render(d, files))
 }
-if length(diagnostics) == 0 {
-print_error("ok: no errors")
-} else {
-print_error("\(length(diagnostics)) error(s)\(summary)")
-}
+if length(diagnostics) == 0 { print_error("ok: no errors") } else { print_error("\(length(diagnostics)) error(s)\(summary)") }
 }
 
 fn paths_of(files: List[source.SourceFile]) -> List[Text] {
@@ -431,51 +467,28 @@ return from_code_points(slice(codes, 0, count - 4))
 path
 }
 
-note "The canonical layout (spec section 14): no indentation, no trailing spaces, at most one blank line in a row, one final newline. Text literals cannot span lines, so this never changes the meaning of a program."
-fn format_text(text: Text) -> Text {
-var lines: List[Text] = []
-var current: List[Int] = []
-var blank_run = 0
-var started = false
-for code in append(code_points(text), 10) {
-if code != 10 {
-set current = append(current, code)
-continue
+note "The canonical text of a source file (spec section 14), or its syntax errors."
+fn canonical_text(text: Text) -> Result[Text, List[source.Diagnostic]] {
+let parsed = parse_source(text, 0)
+if length(parsed.diagnostics) > 0 {
+return .Error(parsed.diagnostics)
 }
-var first = 0
-while first < length(current) and current[first] == 32 {
-set first = first + 1
-}
-var last = length(current)
-while last > first and (current[last - 1] == 32 or current[last - 1] == 13) {
-set last = last - 1
-}
-let line = from_code_points(slice(current, first, last))
-set current = []
-if line == "" {
-set blank_run = blank_run + 1
-} else {
-if blank_run > 0 and started {
-set lines = append(lines, "")
-}
-set blank_run = 0
-set started = true
-set lines = append(lines, line)
-}
-}
-if length(lines) == 0 {
-return ""
-}
-join(lines, "\n") + "\n"
+.Ok(printer.render_file(parsed.items, parsed.comments, 0))
 }
 
 fn format_files(paths: List[Text], check: Bool) -> Int uses io, fs {
 var changed = 0
+var failed = false
 for path in paths {
 let text = read_file(path)
-let formatted = format_text(text)
+match canonical_text(text) {
+.Error(diagnostics) => {
+report_diagnostics(diagnostics, [source.SourceFile { path: path, text: text }], false, "; the file was not formatted")
+set failed = true
+}
+.Ok(formatted) => {
 if formatted != text {
-set changed = changed + 1
+set changed += 1
 if check {
 print("would reformat \(path)")
 } else {
@@ -484,7 +497,268 @@ print("formatted \(path)")
 }
 }
 }
-if check and changed > 0 { 1 } else { 0 }
+}
+}
+if failed { 1 } else if check and changed > 0 { 1 } else { 0 }
+}
+
+// ---------- fixes (spec section 20.4) ----------
+
+type FixRound {
+texts: Map[Text, Text]
+applied: List[Text]
+}
+
+note "One round: for each file, the fixes of diagnostics that carry exactly one fix and do not overlap an earlier one. A diagnostic with several fixes needs a choice, so it is left to the reader."
+fn fix_round(diagnostics: List[source.Diagnostic], files: List[source.SourceFile], start: Map[Text, Text]) -> FixRound {
+var texts = start
+var applied: List[Text] = []
+for k in range(0, length(files)) {
+let f = files[k]
+if source.starts_with_text(f.path, "<") or source.ends_with_text(f.path, ".json") {
+continue
+}
+var edits: List[source.TextEdit] = []
+var messages: List[Text] = []
+for d in diagnostics {
+if length(d.fixes) != 1 or d.fixes[0].edits[0].span.file != k {
+continue
+}
+let candidate = concat(edits, d.fixes[0].edits)
+match source.apply_edits(f.text, k, candidate) {
+.Ok(_) => {
+set edits = candidate
+set messages = append(messages, "\(f.path):\(d.span.line): \(d.code) \(d.fixes[0].message)")
+}
+.Error(_) => {}
+}
+}
+if length(edits) > 0 {
+match source.apply_edits(f.text, k, edits) {
+.Ok(fixed) => {
+set texts = put(texts, f.path, fixed)
+set applied = concat(applied, messages)
+}
+.Error(_) => {}
+}
+}
+}
+FixRound { texts: texts, applied: applied }
+}
+
+note "Applies fixes until none is left (at most 10 rounds, since one fix can uncover the next error), then writes the files and reports what remains."
+fn run_fix(options: Options, windows: Bool) -> Int uses io, fs {
+var texts: Map[Text, Text] = [:]
+var applied: List[Text] = []
+var frontend = run_frontend(options.files, false, windows, texts)
+var round = 0
+while round < 10 and length(frontend.diagnostics) > 0 {
+let result = fix_round(frontend.diagnostics, frontend.files, texts)
+if length(result.applied) == 0 {
+break
+}
+set texts = result.texts
+set applied = concat(applied, result.applied)
+set frontend = run_frontend(options.files, false, windows, texts)
+set round += 1
+}
+// The fixed files are written in their canonical form, when they parse.
+for path in keys(texts) {
+let fixed = value_or(get(texts, path), "")
+match canonical_text(fixed) {
+.Ok(canonical) => set texts = put(texts, path, canonical)
+.Error(_) => {}
+}
+}
+set frontend = run_frontend(options.files, false, windows, texts)
+if not options.dry_run {
+for path in keys(texts) {
+write_file(path, value_or(get(texts, path), ""))
+}
+}
+if options.json {
+var quoted: List[Text] = []
+for line in applied {
+set quoted = append(quoted, source.json_string(line))
+}
+let report = source.render_json(frontend.diagnostics, frontend.files)
+print("{\"applied\":[\(join(quoted, ","))],\"written\":\(if options.dry_run { "false" } else { "true" }),\"remaining\":\(report)}")
+} else {
+for line in applied {
+print(if options.dry_run { "would fix \(line)" } else { "fixed \(line)" })
+}
+if length(frontend.diagnostics) > 0 {
+report_diagnostics(frontend.diagnostics, frontend.files, false, " left")
+}
+}
+if length(frontend.diagnostics) == 0 { 0 } else { 1 }
+}
+
+// ---------- edit operations (spec section 20.2) ----------
+
+note "Reports a refused operation. The operations themselves are the source of this diagnostic: it points into the JSON that holds them."
+fn operation_error(code: Text, message: Text, help: Text, ops_text: Text, options: Options) -> Int uses io {
+let ops_file = source.SourceFile { path: if options.op != "" { "<--op>" } else { options.ops }, text: ops_text }
+report_diagnostics([source.error_help(code, source.span_of(0, 1, 1, 2), message, help)], [ops_file], options.json, "; no file was changed")
+1
+}
+
+fn changed_texts(files: List[edit.EditFile]) -> Map[Text, Text] {
+var texts: Map[Text, Text] = [:]
+for f in files {
+if f.changed {
+set texts = put(texts, f.path, printer.render_file(f.items, f.comments, f.file))
+}
+}
+texts
+}
+
+note "After each operation the changed files are printed and read again, so every node has the position it has in the new text and the next operation starts from a clean tree."
+fn normalized(files: List[edit.EditFile]) -> Result[List[edit.EditFile], Text] {
+var out: List[edit.EditFile] = []
+for f in files {
+if not f.changed {
+set out = append(out, f)
+continue
+}
+let text = printer.render_file(f.items, f.comments, f.file)
+let parsed = parse_source(text, f.file)
+if length(parsed.diagnostics) > 0 {
+return .Error("internal compiler error: the edited `\(f.path)` does not parse again (\(parsed.diagnostics[0].message)). This is a bug in the Tessera compiler.")
+}
+set out = append(out, f with { items: parsed.items, comments: parsed.comments })
+}
+.Ok(out)
+}
+
+fn rename_spans(op: json.Json, files: List[edit.EditFile], default_path: Text, options: Options, windows: Bool) -> Map[Text, Bool] uses fs {
+let empty: Map[Text, Bool] = [:]
+if value_or(json.text_field(op, "op"), "") != "rename_symbol" or json.field(op, "fn") != .None {
+return empty
+}
+let path = value_or(json.text_field(op, "file"), default_path)
+var index = -1
+for i in range(0, length(files)) {
+if files[i].path == path {
+set index = i
+}
+}
+if index < 0 {
+return empty
+}
+let from = value_or(json.text_field(op, "from"), "")
+let kind = edit.symbol_kind(files[index].items, from)
+if kind != "field" and kind != "variant" {
+return empty
+}
+let frontend = run_frontend(options.files, true, windows, changed_texts(files))
+if length(frontend.diagnostics) > 0 {
+return empty
+}
+edit.typed_spans(frontend.program.items, files[index].module_path, from, kind, files, index)
+}
+
+fn run_edit(options: Options, windows: Bool) -> Int uses io, fs {
+if options.ops == "" and options.op == "" {
+print_error("error: `edit` needs `--ops <file.json>` or `--op <json>`")
+return 2
+}
+let ops_text = if options.op != "" { options.op } else if file_exists(options.ops) { read_file(options.ops) } else { "" }
+if ops_text == "" {
+print_error("error: cannot read `\(options.ops)`")
+return 2
+}
+let parsed_ops = match json.parse(ops_text) {
+.Ok(value) => value
+.Error(problem) => return operation_error("E0702", "the operations are not valid JSON: \(problem)", "give one operation object, or a list of them", ops_text, options)
+}
+let ops = match parsed_ops {
+.Array(items) => items
+_ => [parsed_ops]
+}
+let loaded = load_program(options.files, windows, [:])
+var files: List[edit.EditFile] = []
+for k in range(0, length(loaded.files)) {
+let f = loaded.files[k]
+if source.starts_with_text(f.path, "<") {
+continue
+}
+let parsed = parse_source(f.text, k)
+if length(parsed.diagnostics) > 0 {
+report_diagnostics(parsed.diagnostics, loaded.files, options.json, "; fix the syntax before editing")
+return 1
+}
+set files = append(files, edit.EditFile { path: f.path, file: k, module_path: loaded.module_paths[k], items: parsed.items, comments: parsed.comments, changed: false })
+}
+let default_path = options.files[0]
+for i in range(0, length(ops)) {
+let op = ops[i]
+let spans = rename_spans(op, files, default_path, options, windows)
+let outcome = edit.apply(files, op, default_path, 1000000 * (i + 1), spans)
+if outcome.code != "" {
+let name = value_or(json.text_field(op, "op"), "?")
+return operation_error(outcome.code, "operation \(i + 1) (`\(name)`): \(outcome.message)", outcome.help, ops_text, options)
+}
+set files = match normalized(outcome.files) {
+.Ok(clean) => clean
+.Error(problem) => {
+print_error(problem)
+return 3
+}
+}
+}
+let texts = changed_texts(files)
+let frontend = run_frontend(options.files, false, windows, texts)
+if length(frontend.diagnostics) > 0 {
+report_diagnostics(frontend.diagnostics, frontend.files, options.json, "; no file was changed")
+return 1
+}
+var changed: List[Text] = []
+for f in files {
+if f.changed {
+set changed = append(changed, f.path)
+if not options.dry_run {
+let output = if source.ends_with_text(f.path, ".json") { astjson.file_json(f.items, f.comments, f.file) } else { value_or(get(texts, f.path), "") }
+write_file(f.path, output)
+}
+}
+}
+if options.json {
+var quoted: List[Text] = []
+for path in changed {
+set quoted = append(quoted, source.json_string(path))
+}
+print("{\"ok\":true,\"changed\":[\(join(quoted, ","))],\"written\":\(if options.dry_run { "false" } else { "true" })}")
+} else {
+for path in changed {
+print(if options.dry_run { "would change \(path)" } else { "changed \(path)" })
+}
+print_error("ok: \(length(ops)) operation(s) applied, the program checks")
+}
+0
+}
+
+note "`ast`: text to JSON; `render`: JSON to canonical text. Both read one file."
+fn convert_file(command: Text, options: Options) -> Int uses io, fs {
+if length(options.files) != 1 {
+print_error("error: `\(command)` takes exactly one file")
+return 2
+}
+let path = options.files[0]
+let read = source_text(path, 0, [:])
+let files = [source.SourceFile { path: path, text: read.text }]
+if length(read.diagnostics) > 0 {
+report_diagnostics(read.diagnostics, files, options.json, "")
+return 1
+}
+let parsed = parse_source(read.text, 0)
+if length(parsed.diagnostics) > 0 {
+report_diagnostics(parsed.diagnostics, files, options.json, "")
+return 1
+}
+let output = if command == "ast" { astjson.file_json(parsed.items, parsed.comments, 0) } else { printer.render_file(parsed.items, parsed.comments, 0) }
+if options.output == "" { print(without_final_newline(output)) } else { write_file(options.output, output) }
+0
 }
 
 fn run_rustc(options: Options, extra: List[Text], output: Text, rust_path: Text) -> Int uses process, env {
@@ -515,8 +789,8 @@ print(usage())
 exit(0)
 }
 for path in options.files {
-if not source.ends_with_text(path, ".tes") {
-print_error("error: `\(path)` is not a Tessera source file (expected the `.tes` extension)")
+if not source.ends_with_text(path, ".tes") and not source.ends_with_text(path, ".json") {
+print_error("error: `\(path)` is not a Tessera source file (expected the `.tes` extension, or `.json` for a syntax tree)")
 exit(2)
 }
 if not file_exists(path) {
@@ -525,14 +799,32 @@ exit(2)
 }
 }
 let command = options.command
-if not source.contains_text(["check", "build", "emit-rust", "notes", "test", "format"], command) {
+if not source.contains_text(["check", "build", "emit-rust", "notes", "test", "format", "ast", "render", "edit", "fix", "grammar"], command) {
 print_error("error: unknown command `\(command)`")
 exit(2)
 }
 if command == "format" {
 exit(format_files(options.files, options.check))
 }
-let frontend = run_frontend(options.files, command == "test", windows)
+if command == "ast" or command == "render" {
+exit(convert_file(command, options))
+}
+if command == "edit" {
+exit(run_edit(options, windows))
+}
+if command == "fix" {
+exit(run_fix(options, windows))
+}
+if command == "grammar" {
+let exported = if options.format == "gbnf" { runtime_text.grammar_gbnf() } else if options.format == "ast-schema" { grammar.ast_schema(options.depth) } else if options.format == "edit-schema" { grammar.edit_schema() } else { "" }
+if exported == "" {
+print_error("error: unknown grammar format `\(options.format)`; use `gbnf`, `ast-schema` or `edit-schema`")
+exit(2)
+}
+print(without_final_newline(exported))
+exit(0)
+}
+let frontend = run_frontend(options.files, command == "test", windows, [:])
 let files = frontend.files
 if command == "check" {
 report_diagnostics(frontend.diagnostics, files, options.json, "")
@@ -568,11 +860,7 @@ exit(2)
 let mode = if options.library { "library" } else { "program" }
 let rust = codegen.generate(frontend.program, paths_of(files), runtime, mode)
 if command == "emit-rust" {
-if options.output == "" {
-print(without_final_newline(rust))
-} else {
-write_file(options.output, rust)
-}
+if options.output == "" { print(without_final_newline(rust)) } else { write_file(options.output, rust) }
 exit(0)
 }
 if options.output == "" {

@@ -112,7 +112,9 @@ match words[0] {
 "right" => set p = movement.walk(l, trig, p, 0, shift_left(amount, 16))
 "left" => set p = movement.walk(l, trig, p, 0, -shift_left(amount, 16))
 "turn" => set p = movement.turn(p, amount * geometry.fine_angles() / 360)
-"look" => if length(words) > 1 { write_image(w, render.render(scene, movement.camera(l, p), trig), words[1]) }
+"look" => if length(words) > 1 {
+write_image(w, render.render(scene, movement.camera(l, p), trig), words[1])
+}
 "where" => {}
 "quit" => break
 "" => {}
@@ -168,7 +170,9 @@ print("monster \(m.kind) at \(shift_right(m.x, 16)) \(shift_right(m.y, 16)) heal
 let s = game.level.sectors[amount]
 print("sector \(amount) floor \(s.floor) ceiling \(s.ceiling) light \(s.light)")
 }
-"look" => if length(words) > 1 { write_image(w, render.render_world(geometry.classic_screen(), scene, game.level.sectors, game.switched, world.camera(game), trig, world.sprites(game), sprites), words[1]) }
+"look" => if length(words) > 1 {
+write_image(w, render.render_world(geometry.classic_screen(), scene, game.level.sectors, game.switched, world.camera(game), trig, world.sprites(game), sprites), words[1])
+}
 "weapon" => set game = world.tic(game, none with { weapon: amount - 1 }, trig)
 "give" => set game.stats = game.stats with { weapons: repeat([true], 8), ammo: game.stats.max_ammo, keys: ["blue", "yellow", "red"] }
 "place" => if length(words) >= 4 {
