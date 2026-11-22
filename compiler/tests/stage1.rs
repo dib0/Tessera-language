@@ -628,3 +628,82 @@ fn exported_grammars_accept_the_canonical_files() {
     let out = Command::new(python).arg(root().join("harness/tools/check_grammar.py")).arg("--compiler").arg(stage1()).current_dir(root()).output().unwrap();
     assert!(out.status.success(), "{}", text(&out));
 }
+
+/// Spec section 21: `interpret` runs a program as its compiled form does — the same standard output,
+/// standard error (runtime errors with their locations) and exit code — for every test program whose
+/// `main` uses only the effects the interpreter offers. Programs with other effects are skipped
+/// (E0707); so is `record_moves.tes`, which times 100,000 in-place updates of a list of a million
+/// elements that the interpreter copies (section 19).
+#[test]
+fn interpreter_matches_compiled_programs() {
+    let mut files = Vec::new();
+    for dir in ["tests/run", "tests/stage1_run", "examples/valid", "tests/runtime_fail", "tests/stage1_runtime_fail", "tests/interpret", "tests/interpret/fail"] {
+        files.extend(tes_files(dir));
+    }
+    files.push(root().join("tests/modules/run/main.tes"));
+    let mut compared = 0;
+    for path in files {
+        if path.file_name().unwrap() == "record_moves.tes" {
+            continue;
+        }
+        let relative = path.strip_prefix(root()).unwrap().to_path_buf();
+        let interpreted = Command::new(stage1()).arg("interpret").arg(&relative).current_dir(root()).output().unwrap();
+        let interpreted_err = String::from_utf8_lossy(&interpreted.stderr).to_string();
+        if interpreted_err.contains("error[E0707]") {
+            continue;
+        }
+        let name = relative.to_string_lossy().replace(['/', '\\', '.'], "_");
+        let exe = binary(&work_dir(), &format!("interpret_{}", name));
+        check_build(Command::new(stage1()).arg("build").arg(&relative).arg("-o").arg(&exe).arg("--opt").arg("0").current_dir(root()).output().unwrap(), "building a program to compare with the interpreter");
+        let compiled = Command::new(&exe).current_dir(root()).output().unwrap();
+        assert_eq!(interpreted.status.code(), compiled.status.code(), "{}: exit code\n{}", relative.display(), interpreted_err);
+        assert_eq!(String::from_utf8_lossy(&interpreted.stdout), String::from_utf8_lossy(&compiled.stdout), "{}: standard output", relative.display());
+        assert_eq!(interpreted_err, String::from_utf8_lossy(&compiled.stderr), "{}: standard error", relative.display());
+        let expected = path.with_extension("out");
+        if expected.exists() {
+            assert_eq!(String::from_utf8_lossy(&interpreted.stdout), std::fs::read_to_string(&expected).unwrap(), "{}: expected output", relative.display());
+        }
+        compared += 1;
+    }
+    assert!(compared >= 60, "only {} programs compared", compared);
+}
+
+/// E0707: `interpret` refuses a program whose `main` uses an effect outside io, env, time, random and
+/// log, before running any of it, and says what to do instead. A program's arguments follow `--`.
+#[test]
+fn interpreter_refuses_other_effects() {
+    let files = tes_files("tests/interpret/refused");
+    assert!(files.len() >= 2);
+    for path in files {
+        let out = Command::new(stage1()).arg("interpret").arg(&path).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{}\n{}", path.display(), stderr);
+        assert!(stderr.contains("error[E0707]") && stderr.contains("help: ") && stderr.contains("tessera1 build"), "{}:\n{}", path.display(), stderr);
+        assert!(out.stdout.is_empty(), "{}: ran anyway", path.display());
+    }
+    let dir = work_dir().join("interpret_args");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.tes"), "fn main() -> Unit uses io, env {\nprint(join(args(), \"+\"))\nexit(3)\n}\n").unwrap();
+    let out = run_stage1(&["interpret", "main.tes", "--", "a", "-o", "c"], &dir);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a+-o+c\n");
+}
+
+/// Spec section 21.3: the compiler builds itself as WebAssembly and browser/tessera.js runs programs
+/// with it in headless Chrome (browser/test/test.html). Skipped without the wasm32-unknown-unknown
+/// target or Chrome.
+#[test]
+fn browser_library_runs_programs() {
+    let targets = Command::new("rustup").args(["target", "list", "--installed"]).output();
+    let has_target = targets.map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == "wasm32-unknown-unknown")).unwrap_or(false);
+    let has_chrome = ["google-chrome", "chromium", "chromium-browser"].iter().any(|c| Command::new(c).arg("--version").output().is_ok());
+    if !has_target || !has_chrome || cfg!(windows) {
+        eprintln!("skipped: needs the wasm32-unknown-unknown target and Chrome");
+        return;
+    }
+    let wasm = root().join("browser/tessera.wasm");
+    check_build(Command::new(stage1()).arg("build").arg(stage1_entry()).arg("--wasm").arg("-o").arg(&wasm).output().unwrap(), "building the compiler as WebAssembly");
+    let _ = std::fs::remove_dir_all(root().join("browser/tessera.wasm.build"));
+    let out = Command::new("sh").arg(root().join("browser/test/run.sh")).env("TESSERA_TEST_PORT", "8791").output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+}

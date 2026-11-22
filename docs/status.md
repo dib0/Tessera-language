@@ -179,3 +179,17 @@ Measured on Linux x86-64, rustc 1.99.1, on 2026-11-18.
 | `tessera1 fix tests/mfp/fix/broken.tes` | 12 of 13 errors fixed in two rounds; the one left needs a choice |
 | `bin/tessera1 format --check` | `stage1/`, `std/`, `examples/` (except `valid/` and `invalid/`, see CLAUDE.md) and `tools/` are canonical |
 | `harness.py dry-run --variants baseline` | 25/25 reference solutions pass with the updated reference |
+
+## Draft 0.25: Tessera in the browser
+
+Measured on Linux x86-64, rustc 1.99.1, Chrome (headless), on 2026-11-22.
+
+| | Result |
+|---|---|
+| `./build.sh` | succeeds, fixpoint reached (the seed was regenerated: the interpreter uses `Float` literals the old seed did not read); builds `browser/tessera.wasm` when `wasm32-unknown-unknown` is installed |
+| `cd compiler && cargo test --release` | **28 + 8 passed, 0 failed**, including three new tests: `interpreter_matches_compiled_programs`, `interpreter_refuses_other_effects`, `browser_library_runs_programs` |
+| Interpreter against compiled code | identical stdout, stderr and exit code for every program in `tests/run`, `tests/stage1_run`, `examples/valid`, `tests/runtime_fail`, `tests/stage1_runtime_fail`, `tests/modules/run` and `tests/interpret` (28 boundary cases, each limit crossed by the smallest step) whose `main` the interpreter accepts; skipped: programs using `fs` or `audio` (E0707) and `record_moves.tes` (does not finish: `set xs[i] = v` copies the list, spec section 19) |
+| `browser/test/run.sh` | 24 checks pass: text and tree programs, runtime and compile errors with diagnostics, E0707, input, arguments, `exit_with`, standard and own modules, time/random/log, streaming, `format`, `ast`, `render`, `grammar`, `<script type="text/tessera">`, the recursion limit and recovery after a trap |
+| `tessera.wasm` | 4.5 MB (`opt-level=s`), 1.0 MB gzip; six imports, exports `memory` and `tessera_main` |
+| Recursion | native `interpret` handles 99,000 nested calls (limit 100,000); V8 allows about 940 in the browser, the default limit is 700 |
+| `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |
