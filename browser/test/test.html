@@ -76,6 +76,71 @@ try {
   await tessera.runScripts(box);
   check("script elements", box.querySelector("#out").textContent === "from a script\n", box.innerHTML);
 
+  // The page effect (spec section 21.5).
+  const area = document.createElement("div");
+  area.innerHTML = '<ul id="list"><li class="item">one</li><li class="item" data-n="2">two</li></ul><a id="link" href="#nowhere">link</a>';
+  document.body.append(area);
+  const pageProgram = `fn toggle(event: PageEvent) -> Unit uses page {
+if element_has_class(event.element, "open") {
+remove_element_class(event.element, "open")
+} else {
+add_element_class(event.element, "open")
+}
+set_element_attribute(event.element, "data-kind", "\\(event.kind) \\(event.target.id == event.element.id)")
+}
+
+fn stop_link(event: PageEvent) -> Unit uses page {
+prevent_default()
+set_element_text(event.element, "stopped")
+on_timer(event.element, 20, later)
+}
+
+fn later(event: PageEvent) -> Unit uses page {
+set_element_text(event.element, "later \\(event.kind)")
+}
+
+fn main() -> Unit uses io, page {
+let items = page_select("#list .item")
+print("\\(length(items)) \\(element_text(items[0])) \\(value_or(element_attribute(items[1], "data-n"), "-")) \\(element_attribute(items[0], "data-n") == .None)")
+for item in items {
+on_event(item, "click", toggle)
+}
+let made = create_element("li")
+set_element_text(made, "three")
+add_element_class(made, "item")
+set_element_style(made, "--tilt", "4deg")
+let lists = page_select("#list")
+append_element(lists[0], made)
+let first = create_element("li")
+set_element_text(first, "zero")
+insert_element_before(lists[0], first, items[0])
+print("\\(length(element_select(lists[0], "li"))) \\(length(page_select("#missing")))")
+for link in page_select("#link") {
+on_event(link, "click", stop_link)
+}
+store_text("tessera-test", "kept")
+print("\\(value_or(stored_text("tessera-test"), "-")) \\(stored_text("tessera-none") == .None) \\(media_matches("(min-width: 1px)"))")
+}
+`;
+  r = tessera.run(pageProgram, { page: true });
+  check("page: select, attributes, create, store", r.exitCode === 0 && r.stdout === "2 one 2 true\n4 0\nkept true true\n" && area.querySelector("#list").textContent === "zeroonetwothree", r);
+  check("page: style", area.querySelectorAll("li")[3].style.getPropertyValue("--tilt") === "4deg", area.innerHTML);
+  const second = area.querySelectorAll(".item")[1];
+  second.click();
+  check("page: click handler", second.classList.contains("open") && second.getAttribute("data-kind") === "click true", area.innerHTML);
+  second.click();
+  check("page: state lives in the page", !second.classList.contains("open"), area.innerHTML);
+  const link = area.querySelector("#link");
+  const clicked = new MouseEvent("click", { bubbles: true, cancelable: true });
+  link.dispatchEvent(clicked);
+  check("page: prevent_default", clicked.defaultPrevented && link.textContent === "stopped", link.outerHTML);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  check("page: on_timer", link.textContent === "later timer" && !link.hasAttribute("data-tessera-timer"), link.outerHTML);
+  r = tessera.run('fn main() -> Unit uses page {\nlet nothing = page_select("p")\nfail("handlers \\(length(nothing))")\n}\n', { page: true });
+  check("page: runtime error", r.exitCode === 70 && r.stderr.startsWith("runtime error R010: handlers"), r);
+  r = tessera.run('fn main() -> Unit uses page {\nlet nothing = page_select("p")\n}\n');
+  check("page: refused without a page", r.exitCode === 1 && r.diagnostics[0].code === "E0707", r);
+
   const t0 = performance.now();
   r = tessera.run('fn fib(n: Int) -> Int = if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n\nfn main() -> Unit uses io {\nprint("\\(fib(20))")\n}\n');
   check("fib(20)", r.stdout === "6765\n", r);

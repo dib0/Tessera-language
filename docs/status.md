@@ -193,3 +193,16 @@ Measured on Linux x86-64, rustc 1.99.1, Chrome (headless), on 2026-11-22.
 | `tessera.wasm` | 4.5 MB (`opt-level=s`), 1.0 MB gzip; six imports, exports `memory` and `tessera_main` |
 | Recursion | native `interpret` handles 99,000 nested calls (limit 100,000); V8 allows about 940 in the browser, the default limit is 700 |
 | `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |
+
+## Draft 0.26: the `page` effect
+
+Measured on Linux x86-64, rustc 1.99.1, Chrome (headless), on 2026-11-22.
+
+| | Result |
+|---|---|
+| `./build.sh` | succeeds, fixpoint reached (seed regenerated so that the interpreter can call the `page` built-ins) |
+| `browser/test/run.sh` | 32 checks pass, 8 of them new for `page`: selecting, attributes, created and inserted elements, styles, storage, a click handler whose state lives in the page, `prevent_default`, `on_timer`, a runtime error in a page program, and E0707 without a page |
+| `tests/stage1_runtime_fail/R022-page-without-browser.tes`, `tests/interpret/refused/E0707-page.tes` | R022 natively, E0707 from `interpret` without a browser |
+| Tessera website | `site.js` replaced by `wwwroot/assets/tes/site.tes`; in headless Chrome under the site's Content-Security-Policy the same checks pass for the old and the new version (theme, menu, copy, tilt; reveal on scroll gives the same counts for both) |
+| Speed | one check and run in Chrome: about 1 ms for a small program, 3 ms for 156 lines; `fib(22)` 68 ms |
+| `harness.py dry-run --variants baseline` | all reference solutions pass with the updated reference |

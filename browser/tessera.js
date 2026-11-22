@@ -59,12 +59,14 @@ export class Tessera {
    * @param {Object<string, string>} [options.env] environment variables
    * @param {(text: string) => void} [options.onStdout] receives output as it is written
    * @param {(text: string) => void} [options.onStderr]
+   * @param {Page} [options.page] the web page the `page` effect works on (spec section 21.5)
    * @returns {{exitCode: number, stdout: string, stderr: string, files: Object<string, string>}}
    */
   exec(args, options = {}) {
     const files = new Map();
     for (const [path, content] of Object.entries(options.files || {})) files.set(normalPath(path), bytesOf(content));
-    const env = { TESSERA_INTERPRET_DEPTH: String(DEFAULT_DEPTH), ...(options.env || {}) };
+    const page = options.page || null;
+    const env = { TESSERA_INTERPRET_DEPTH: String(DEFAULT_DEPTH), ...(page ? { TESSERA_PAGE: "1" } : {}), ...(options.env || {}) };
     const stdin = bytesOf(options.stdin || "");
     const written = new Set();
     const out = { stdout: "", stderr: "" };
@@ -84,6 +86,11 @@ export class Tessera {
         return Object.prototype.hasOwnProperty.call(env, name) ? encoder.encode(env[name]) : null;
       }
       if (key.startsWith("file/")) return files.get(normalPath(key.slice(5))) || null;
+      if (key.startsWith("page/") && page) {
+        const [op, ...rest] = JSON.parse(key.slice(5));
+        const answer = page.call(op, rest);
+        return answer === null ? null : encoder.encode(answer);
+      }
       return null;
     };
 
@@ -163,7 +170,9 @@ export class Tessera {
     const entry = Tessera.entryFile(program);
     const files = { ...(options.modules || {}), [entry.path]: entry.content };
     const args = ["interpret", entry.path, "--", ...(options.args || [])];
-    const result = this.exec(args, { ...options, files });
+    const page = options.page === true ? this.page() : options.page || null;
+    if (page) page.remember({ path: entry.path, files, onStdout: options.onStdout, onStderr: options.onStderr });
+    const result = this.exec(args, { ...options, files, page });
     let diagnostics = [];
     if (result.exitCode === 1 && /\d+ error\(s\)(; no code was generated|; the program was not run)\n$/.test(result.stderr)) {
       const report = this.exec(["interpret", entry.path, "--json"], { files });
@@ -228,7 +237,212 @@ export class Tessera {
         if (target) target.append(document.createTextNode(piece));
         else (isError ? console.error : console.log)(piece.replace(/\n$/, ""));
       };
-      this.run(source, { stdin: script.dataset.input || "", onStdout: (s) => write(s, false), onStderr: (s) => write(s, true) });
+      this.run(source, { page: true, stdin: script.dataset.input || "", onStdout: (s) => write(s, false), onStderr: (s) => write(s, true) });
+    }
+  }
+
+  /** The web page of this document, shared by all scripts run with `page: true`. */
+  page() {
+    if (!this.documentPage) this.documentPage = new Page(this, document);
+    return this.documentPage;
+  }
+}
+
+/**
+ * The `page` effect (spec section 21.5): elements by id, the operations the runtime asks for
+ * (runtime/page.rs), and the handlers. `on_event` and `on_timer` set an attribute naming the handler
+ * function (`data-tessera-on-<kind>`, `data-tessera-timer`); the page turns that into a listener that
+ * runs the program again with `interpret --handler <function>`, the event described in environment
+ * variables. A run takes a few milliseconds; the state of a page lives in the page itself.
+ */
+export class Page {
+  constructor(tessera, doc) {
+    this.tessera = tessera;
+    this.document = doc;
+    this.elements = [null];
+    this.ids = new WeakMap();
+    this.handlers = new WeakMap();
+    this.program = null;
+    this.event = null;
+    this.visible = null;
+  }
+
+  /** The program whose handlers are being registered (the one running now). */
+  remember(program) {
+    this.program = program;
+  }
+
+  id(node) {
+    if (!node) return 0;
+    let id = this.ids.get(node);
+    if (id === undefined) {
+      id = this.elements.length;
+      this.elements.push(node);
+      this.ids.set(node, id);
+    }
+    return id;
+  }
+
+  node(id) {
+    return this.elements[Number(id)] || null;
+  }
+
+  list(nodes) {
+    return Array.from(nodes, (n) => this.id(n)).join("\0");
+  }
+
+  /** One operation of runtime/page.rs: the answer as text, or null for "none". */
+  call(op, args) {
+    const node = this.node(args[0]);
+    switch (op) {
+      case "page_select":
+        try { return this.list(this.document.querySelectorAll(args[0])); } catch { return ""; }
+      case "element_select":
+        try { return node ? this.list(node.querySelectorAll(args[1])) : ""; } catch { return ""; }
+      case "element_text":
+        return node ? node.textContent : "";
+      case "set_element_text":
+        if (node) node.textContent = args[1];
+        return "";
+      case "element_attribute":
+        return node && node.hasAttribute(args[1]) ? node.getAttribute(args[1]) : null;
+      case "set_element_attribute":
+        if (node) {
+          node.setAttribute(args[1], args[2]);
+          this.watch(node, args[1], args[2]);
+        }
+        return "";
+      case "remove_element_attribute":
+        if (node) node.removeAttribute(args[1]);
+        return "";
+      case "element_has_class":
+        return node && node.classList.contains(args[1]) ? "true" : "false";
+      case "add_element_class":
+        if (node) node.classList.add(args[1]);
+        return "";
+      case "remove_element_class":
+        if (node) node.classList.remove(args[1]);
+        return "";
+      case "set_element_style":
+        if (node) node.style.setProperty(args[1], args[2]);
+        return "";
+      case "create_element":
+        return String(this.id(this.document.createElement(args[0])));
+      case "append_element": {
+        const child = this.node(args[1]);
+        if (node && child) node.appendChild(child);
+        return "";
+      }
+      case "insert_element_before": {
+        const child = this.node(args[1]);
+        const before = this.node(args[2]);
+        if (node && child) node.insertBefore(child, before && before.parentNode === node ? before : null);
+        return "";
+      }
+      case "prevent_default":
+        if (this.event && this.event.preventDefault) this.event.preventDefault();
+        return "";
+      case "page_confirm":
+        return typeof confirm === "function" && confirm(args[0]) ? "true" : "false";
+      case "copy_to_clipboard":
+        if (typeof navigator !== "undefined" && navigator.clipboard) navigator.clipboard.writeText(args[0]).catch(() => {});
+        return "";
+      case "media_matches":
+        return typeof matchMedia === "function" && matchMedia(args[0]).matches ? "true" : "false";
+      case "stored_text":
+        try { return localStorage.getItem(args[0]); } catch { return null; }
+      case "store_text":
+        try { localStorage.setItem(args[0], args[1]); } catch { /* storage can be blocked */ }
+        return "";
+      default:
+        return null;
+    }
+  }
+
+  /** An attribute naming a handler becomes a listener (or a timer) for the running program. */
+  watch(node, name, value) {
+    const program = this.program;
+    if (!program) return;
+    if (name === "data-tessera-timer") {
+      const space = value.indexOf(" ");
+      const ms = Number(value.slice(0, space));
+      const handler = value.slice(space + 1);
+      setTimeout(() => {
+        if (node.getAttribute("data-tessera-timer") === value) node.removeAttribute("data-tessera-timer");
+        this.dispatch(program, handler, "timer", node, null);
+      }, ms);
+      return;
+    }
+    if (!name.startsWith("data-tessera-on-")) return;
+    const kind = name.slice("data-tessera-on-".length);
+    let kinds = this.handlers.get(node);
+    if (!kinds) this.handlers.set(node, (kinds = new Map()));
+    const known = kinds.has(kind);
+    kinds.set(kind, { program, handler: value });
+    if (known) return;
+    const current = () => kinds.get(kind);
+    if (kind === "visible") {
+      if (typeof IntersectionObserver === "undefined") {
+        this.dispatch(program, value, "visible", node, null);
+        return;
+      }
+      if (!this.visible) {
+        this.visible = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            const registered = this.handlers.get(entry.target)?.get("visible");
+            // Once per element: the first time it scrolls into view.
+            if (entry.isIntersecting && registered) {
+              this.visible.unobserve(entry.target);
+              this.dispatch(registered.program, registered.handler, "visible", entry.target, null);
+            }
+          }
+        }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+      }
+      this.visible.observe(node);
+      return;
+    }
+    if (kind === "pointermove") {
+      // At most one run per 16 ms, and always one for the last move: pointer events can come faster
+      // than the screen is drawn.
+      let last = -Infinity;
+      let pending = null;
+      const run = (event) => {
+        last = performance.now();
+        this.dispatch(current().program, current().handler, kind, node, event);
+      };
+      node.addEventListener(kind, (event) => {
+        const wait = last + 16 - performance.now();
+        if (wait <= 0 && pending === null) return run(event);
+        if (pending !== null) clearTimeout(pending.timer);
+        pending = { timer: setTimeout(() => { pending = null; run(event); }, Math.max(wait, 0)) };
+      });
+      return;
+    }
+    node.addEventListener(kind, (event) => this.dispatch(current().program, current().handler, kind, node, event));
+  }
+
+  /** Runs `handler` of `program` for an event on `node`. */
+  dispatch(program, handler, kind, node, event) {
+    const box = node.getBoundingClientRect ? node.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+    const env = {
+      TESSERA_EVENT_KIND: kind,
+      TESSERA_EVENT_ELEMENT: String(this.id(node)),
+      TESSERA_EVENT_TARGET: String(this.id(event && event.target && event.target.nodeType === 1 ? event.target : node)),
+      TESSERA_EVENT_X: String(event && "clientX" in event ? event.clientX - box.left : 0),
+      TESSERA_EVENT_Y: String(event && "clientY" in event ? event.clientY - box.top : 0),
+      TESSERA_EVENT_WIDTH: String(box.width),
+      TESSERA_EVENT_HEIGHT: String(box.height),
+      TESSERA_EVENT_KEY: (event && event.key) || "",
+      TESSERA_EVENT_POINTER: (event && event.pointerType) || "",
+    };
+    const previous = [this.program, this.event];
+    this.program = program;
+    this.event = event;
+    try {
+      const result = this.tessera.exec(["interpret", program.path, "--handler", handler], { files: program.files, page: this, env, onStdout: program.onStdout, onStderr: program.onStderr || ((s) => console.error(s.replace(/\n$/, ""))) });
+      if (result.exitCode !== 0 && !program.onStderr && !result.stderr) console.error(`tessera: handler ${handler} ended with exit code ${result.exitCode}`);
+    } finally {
+      [this.program, this.event] = previous;
     }
   }
 }

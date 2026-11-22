@@ -210,6 +210,7 @@ fn embedded_runtime_is_up_to_date() {
         .arg(format!("tls_runtime={}", root().join("runtime/tls.rs").display()))
         .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
         .arg(format!("wasm_runtime={}", root().join("runtime/wasm.rs").display()))
+        .arg(format!("page_runtime={}", root().join("runtime/page.rs").display()))
         .arg(format!("grammar_gbnf={}", root().join("grammar/tessera.gbnf").display()))
         .args(&std_modules)
         .output()
@@ -678,7 +679,7 @@ fn interpreter_refuses_other_effects() {
         let out = Command::new(stage1()).arg("interpret").arg(&path).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{}\n{}", path.display(), stderr);
-        assert!(stderr.contains("error[E0707]") && stderr.contains("help: ") && stderr.contains("tessera1 build"), "{}:\n{}", path.display(), stderr);
+        assert!(stderr.contains("error[E0707]") && stderr.contains("help: ") && (stderr.contains("tessera1 build") || stderr.contains("tessera.js")), "{}:\n{}", path.display(), stderr);
         assert!(out.stdout.is_empty(), "{}: ran anyway", path.display());
     }
     let dir = work_dir().join("interpret_args");

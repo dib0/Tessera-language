@@ -59,12 +59,30 @@ print("from a script tag")
 <pre id="out"></pre>
 ```
 
+## The page
+
+`run(program, { page: true })`, and every `<script type="text/tessera">`, gives the program the effect `page`: it reads and changes the document and reacts to events (spec section 21.5).
+
+```tessera
+fn toggle(event: PageEvent) -> Unit uses page {
+if element_has_class(event.element, "open") { remove_element_class(event.element, "open") } else { add_element_class(event.element, "open") }
+}
+
+fn main() -> Unit uses page {
+for item in page_select("li") {
+on_event(item, "click", toggle)
+}
+}
+```
+
+Each event runs the program again, calling only its handler, which takes 1 to 3 ms. Keep the state in the page (classes, attributes, `store_text`). `on_event` writes an attribute naming the handler (`data-tessera-on-click="toggle"`), and the `Page` class in `tessera.js` turns that into a listener. A page that runs Tessera needs `'wasm-unsafe-eval'` in its Content-Security-Policy `script-src`. The Tessera website's scripts are an example: `wwwroot/assets/tes/site.tes` in the website repository.
+
 ## Limits
 
 - A program runs on the calling thread until it ends. Run long programs in a Web Worker: the module works there unchanged.
 - The browser's own stack allows about 940 nested calls in V8. Beyond the limit (700 by default) a program stops with R013.
 - The interpreter is much slower than a compiled program. `set xs[i] = v` copies the list, so programs that update large buffers element by element are slow (spec section 19).
-- `fs`, `net`, `db`, `process`, `ui` and `audio` are not available.
+- `fs`, `net`, `db`, `process`, `ui` and `audio` are not available. `page` handlers work only in interpreted programs, not in `build --wasm` modules.
 
 ## Host interface
 

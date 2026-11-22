@@ -158,6 +158,7 @@ audio: Text
 winmm: Text
 extra: Text
 web: Text
+page: Text
 }
 
 note "Generated programs forbid `unsafe` code. A program that opens a window or plays sound needs one exception on Windows: runtime/win32.rs and runtime/winmm.rs call the window system and the sound card, which offer no interface other than their C functions. `forbid` cannot be lifted anywhere in the crate, so such a program says `deny` on Windows -- where exactly one module per device is allowed to use it -- and keeps `forbid` on every other system."
@@ -237,6 +238,9 @@ set head += audio_backend(runtime)
 }
 if contains_part(body, "tw_") or contains_part(body, "TDecimal") or contains_part(body, "TDatabase") {
 set head += runtime.web
+}
+if contains_part(body, "T_PageElement") or contains_part(body, "T_PageEvent") or contains_part(body, "t_page_") {
+set head += definition_of(program.type_defs, "PageElement") + definition_of(program.type_defs, "PageEvent") + runtime.page
 }
 "\(head)\n\(body)"
 }
@@ -1147,6 +1151,28 @@ _ => call_with_location("t_repeat", a, loc)
 "next_event" => call_with_location("t_next_event", a, loc)
 "poll_event" => call_with_location("t_poll_event", a, loc)
 "play_sound" => "t_play_sound(&\(a[0]), \(a[1]), \(a[2]), \(a[3]), \(location(g, span)))"
+"page_select" => call_with_location("t_page_select", a, loc)
+"element_select" => call_with_location("t_element_select", a, loc)
+"element_text" => call_with_location("t_element_text", a, loc)
+"set_element_text" => call_with_location("t_set_element_text", a, loc)
+"element_attribute" => call_with_location("t_element_attribute", a, loc)
+"set_element_attribute" => call_with_location("t_set_element_attribute", a, loc)
+"remove_element_attribute" => call_with_location("t_remove_element_attribute", a, loc)
+"element_has_class" => call_with_location("t_element_has_class", a, loc)
+"add_element_class" => call_with_location("t_add_element_class", a, loc)
+"remove_element_class" => call_with_location("t_remove_element_class", a, loc)
+"set_element_style" => call_with_location("t_set_element_style", a, loc)
+"create_element" => call_with_location("t_create_element", a, loc)
+"append_element" => call_with_location("t_append_element", a, loc)
+"insert_element_before" => call_with_location("t_insert_element_before", a, loc)
+"on_event" => call_with_location("t_on_event", a, loc)
+"on_timer" => call_with_location("t_on_timer", a, loc)
+"prevent_default" => call_with_location("t_prevent_default", a, loc)
+"page_confirm" => call_with_location("t_page_confirm", a, loc)
+"copy_to_clipboard" => call_with_location("t_copy_to_clipboard", a, loc)
+"media_matches" => call_with_location("t_media_matches", a, loc)
+"stored_text" => call_with_location("t_stored_text", a, loc)
+"store_text" => call_with_location("t_store_text", a, loc)
 "draw_pixels" => "t_draw_pixels(\(a[0]), \(a[1]), \(a[2]), &\(a[3]), \(a[4]), \(location(g, span)))"
 _ => call_plain("f_\(name)", a)
 }

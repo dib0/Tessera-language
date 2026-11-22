@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.25. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), TLS and the crypto built-ins of draft 0.22, the standard modules `std/logging` and `std/config` of draft 0.23, the Model First Programming tools of draft 0.24 (section 20), and the interpreter and WebAssembly build of draft 0.25 (section 21). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
+**Status:** Draft 0.26. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), TLS and the crypto built-ins of draft 0.22, the standard modules `std/logging` and `std/config` of draft 0.23, the Model First Programming tools of draft 0.24 (section 20), the interpreter and WebAssembly build of draft 0.25 (section 21), and the `page` effect of draft 0.26 (section 21.5). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -317,6 +317,21 @@ Decided against, with the reasons:
 - **Compiling on a server and running the result in the page.** That is not self-contained: every page would need the server, and a program could not be checked and repaired offline.
 - **The interpreter in JavaScript, working on the JSON tree.** The tree carries no types; the checker would have to run first anyway, and the interpreter would be a third implementation again.
 - **`fs`, `net`, `db`, `process`, `ui` and `audio` in the browser.** The host already offers files to the compiler, so `fs` could follow; the others need asynchronous browser interfaces that a blocking program cannot wait for. Deferred until measured.
+
+From draft 0.25 to 0.26, **the `page` effect** (section 21.5): a program in a browser reads and changes the web page and reacts to events, so a site's scripts can be written in Tessera instead of JavaScript.
+
+| Added | Why |
+|---|---|
+| Effect `page` with 22 built-ins: `page_select`, `element_select`, `element_text`, `set_element_text`, `element_attribute`, `set_element_attribute`, `remove_element_attribute`, `element_has_class`, `add_element_class`, `remove_element_class`, `set_element_style`, `create_element`, `append_element`, `insert_element_before`, `on_event`, `on_timer`, `prevent_default`, `page_confirm`, `copy_to_clipboard`, `media_matches`, `stored_text`, `store_text` | Enough for what sites do with small scripts (highlighting, menus, theme switches, effects on scroll and pointer, confirmations), measured by porting the Tessera website's JavaScript. Every function that touches the page says so in its signature. |
+| Built-in records `PageElement` (a handle) and `PageEvent` | Elements are values like any other; an event is a plain record, so handlers are ordinary functions `fn(PageEvent) -> Unit uses page`. |
+| R022: a `page` built-in outside a browser | Natively, and in a compiled program for the two handler built-ins, there is no page to work on. |
+
+Decided against, with the reasons:
+
+- **A handle that keeps a JavaScript object alive in the interpreter, and an interpreter that stays loaded between events.** Each event runs the program again with its handler (`interpret --handler`), which takes one to three milliseconds. The state of a page is the page (classes, attributes, `stored_text`), so a run needs no memory of the last one, and there are no global variables to add to the language.
+- **Inserting HTML text** (`innerHTML`). It is the classic injection hole; elements are made with `create_element` and filled with `set_element_text`, which cannot inject markup.
+- **Names that follow the browser (`querySelector`, `classList.add`).** They would be the only camel-case names in the language; the built-ins say what they do in its naming style, prefixed so that they do not take common names away from programs (section 4.3).
+- **Handlers in compiled WebAssembly programs.** A compiled function value has no name the host could call back; that needs an exported dispatcher and an instance that stays alive. Deferred.
 
 ## 4. Source files and lexical structure
 
@@ -1233,6 +1248,7 @@ Some errors can only be detected while running. A program cannot catch them; the
 | R019 | `assert` failed |
 | R020 | Shift amount outside 0 to 63 (`shift_left`, `shift_right`) |
 | R021 | `Float` operation without a real result (`sqrt` of a negative number, `ln` of zero, ...) |
+| R022 | A `page` built-in where there is no web page: outside a browser, or `on_event`/`on_timer` in a compiled program (section 21.5) |
 
 When a runtime error occurs:
 
@@ -1342,7 +1358,7 @@ Rules:
 | E0704 | The target of an edit operation is not found (declaration, function, anchor or `match`) |
 | E0705 | The target of an edit operation is ambiguous, or a declaration of that name already exists |
 | E0706 | The source text of an edit operation does not parse as what the operation needs |
-| E0707 | `interpret` cannot run a program whose `main` uses an effect other than `io`, `env`, `time`, `random` and `log` (section 21.1) |
+| E0707 | `interpret` cannot run a program whose `main` uses an effect other than `io`, `env`, `time`, `random` and `log`, or `page` outside a browser (section 21.1) |
 
 ## 14. Canonical formatting
 
@@ -1475,7 +1491,7 @@ Compiler exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failu
 
 Both compilers embed the same runtime `runtime/core.rs`. Stage 1 adds `runtime/extra.rs` to every program and, per program, `runtime/web.rs` for decimals, time, randomness, crypto, the database, the network or `handle`, always together with `runtime/crypto.rs` (the cryptographic primitives) and `runtime/tls.rs` (TLS 1.3 for the HTTP client and server); `runtime/ui.rs` and `runtime/win32.rs` for `ui`; `runtime/audio.rs` and `runtime/winmm.rs` for `audio`. `runtime/adapter.rs` is the C interface of `--library` builds, `runtime/wasm.rs` the host interface of `--wasm` builds (section 21.3). Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
 
-Four runtime files contain `unsafe` code, and they are the only ones: `adapter.rs` (the C interface a web host calls), `wasm.rs` (the functions a JavaScript host offers a WebAssembly module, section 21.3), `win32.rs` (the window) and `winmm.rs` (the sound card). The last two are reached only on Windows and only by a program that asked for a window or sound; everything that can be done without the operating system's C functions is done in safe Rust.
+`runtime/page.rs` holds the `page` effect, embedded when a program uses it. Four runtime files contain `unsafe` code, and they are the only ones: `adapter.rs` (the C interface a web host calls), `wasm.rs` (the functions a JavaScript host offers a WebAssembly module, section 21.3), `win32.rs` (the window) and `winmm.rs` (the sound card). The last two are reached only on Windows and only by a program that asked for a window or sound; everything that can be done without the operating system's C functions is done in safe Rust.
 
 Since draft 0.13 stage 1 inserts stack and time checks into generated functions and loops, so its Rust differs from that of the frozen stage 0. The parity test therefore compares behaviour: every program shared by both compilers must give the same output, error messages and exit code.
 
@@ -1638,6 +1654,7 @@ Findings from the interpreter and the WebAssembly build (draft 0.25, section 21)
 
 - **Value semantics through a value type cost copies.** `set xs[i] = v` on a large list is in place in compiled code, but the interpreter keeps a list inside a `Value` enum, and taking it out of the enum leaves a second reference, so the list is copied. `tests/stage1_run/record_moves.tes` (100,000 updates of a million elements) does not finish. Moving the fields of a value out on its last use in `match` (a code generation change, no language change) would remove the copy; until then the interpreter suits scripts, not frame buffers.
 - **The browser's stack, not the WebAssembly memory, limits recursion.** About 1 KB of the JavaScript engine's own stack per interpreted call, at every optimization level, so V8 allows about 940 nested calls. `tessera.js` sets the limit to 700, which gives R013 with the program's location; a native `interpret` allows 100,000.
+- **Porting a website's JavaScript to the `page` effect** (draft 0.26): the Tessera website's 219 lines of `site.js` became 273 lines of `site.tes` (plus two tests of its highlighter) with the same behaviour in headless Chrome (highlighting, copy buttons, theme, menu, reveal on scroll, pointer tilt, confirmations). What was missing at first: a timer (`on_timer`, for "Copied" turning back into "Copy") and a parent of an element; the copy button now carries its text in an attribute instead. A run per event costs 1 to 3 ms, so even pointer moves are handled by running the program again.
 - **Overflow checks without overflowing.** A `Float` operation that overflows is itself a runtime error in Tessera, so the interpreter decides on exactly scaled operands (`float_add`, `float_mul`, `float_div` in `stage1/interp.tes`) and the boundary tests in `tests/interpret/fail/` cross each limit by the smallest step. `Decimal` `*` and `/` are checked by division against the largest value and may differ from the compiled program in the last unit at the boundary; `round` is decided exactly from the digits.
 
 ## 20. Model First Programming
@@ -1801,5 +1818,46 @@ tessera.check(program)   tessera.format(text)   tessera.ast(text)   tessera.rend
 tessera.exec(["fix", "main.tes", "--json"], { files: { "main.tes": text } })   // any command
 ```
 
-A program given as an object, or as text starting with `{`, is a syntax tree. `onStdout` and `onStderr` receive output as it is written. `<script type="text/tessera">` elements run when the page loads `tessera.js?auto`, with their output in the element named by `data-output`. A program runs on the calling thread, so a long one belongs in a Web Worker. `browser/test/run.sh` checks the library in headless Chrome.
+A program given as an object, or as text starting with `{`, is a syntax tree. `onStdout` and `onStderr` receive output as it is written. `run(program, { page: true })` gives the program the `page` effect on the document (section 21.5). `<script type="text/tessera">` elements, inline or with `src`, run with the page when the document loads `tessera.js?auto`; their output goes to the element named by `data-output`, or to the console. A program runs on the calling thread, so a long one belongs in a Web Worker. `browser/test/run.sh` checks the library in headless Chrome.
+
+### 21.5 The `page` effect
+
+In a browser, `interpret` also offers the effect `page`: the web page the program runs in. The host says so with `TESSERA_PAGE=1`; elsewhere `page` in `main` is E0707, and a `page` built-in reached anyway (a compiled program) is R022.
+
+```tessera
+fn toggle_menu(event: PageEvent) -> Unit uses page {
+for nav in page_select("nav.main") {
+if element_has_class(nav, "open") { remove_element_class(nav, "open") } else { add_element_class(nav, "open") }
+}
+}
+
+fn main() -> Unit uses page {
+for button in page_select(".menu-button") {
+on_event(button, "click", toggle_menu)
+}
+}
+```
+
+| Built-in | Meaning |
+|---|---|
+| `page_select(selector: Text) -> List[PageElement]` | Every element matching a CSS selector, in document order; an invalid selector matches nothing |
+| `element_select(element, selector) -> List[PageElement]` | The same within an element's descendants |
+| `element_text(element) -> Text`, `set_element_text(element, text)` | The text content; setting it replaces all children by that text |
+| `element_attribute(element, name) -> Option[Text]`, `set_element_attribute(element, name, value)`, `remove_element_attribute(element, name)` | Attributes |
+| `element_has_class`, `add_element_class`, `remove_element_class` `(element, name)` | Classes (`-> Bool` for the first) |
+| `set_element_style(element, property, value)` | One style property, also custom properties (`--tilt`) |
+| `create_element(tag) -> PageElement`, `append_element(parent, child)`, `insert_element_before(parent, child, before)` | New elements, put into the page (`before` must be a child of `parent`, else `child` goes last) |
+| `on_event(element, kind, handler: fn(PageEvent) -> Unit uses page)` | Calls `handler` for every `kind` event on the element (`click`, `keydown`, `pointermove`, `pointerleave`, `input`, ...); `visible` is called once, when the element first scrolls into view. One handler per element and kind: a later one replaces it. `pointermove` runs at most every 16 ms, always including the last move |
+| `on_timer(element, ms, handler)` | Calls `handler` once after `ms` milliseconds, with `kind` `timer`; R004 for negative `ms` |
+| `prevent_default()` | Cancels the default action of the event being handled (following a link, submitting a form) |
+| `page_confirm(question) -> Bool` | Asks the user to confirm |
+| `copy_to_clipboard(text)` | Copies text, when the browser allows it |
+| `media_matches(query) -> Bool` | A CSS media query, e.g. `(prefers-color-scheme: dark)` |
+| `stored_text(key) -> Option[Text]`, `store_text(key, value)` | The browser's local storage for this site |
+
+`PageElement` is `{ id: Int }`: a handle the host hands out, valid for the life of the page; an id the host did not give out refers to no element, and operations on it do nothing. `PageEvent` is `{ kind: Text, element: PageElement, target: PageElement, x: Float, y: Float, width: Float, height: Float, key: Text, pointer: Text }`: `element` is the element the handler was registered on, `target` the innermost element hit, `x` and `y` the pointer position relative to `element`, `width` and `height` the size of `element` in CSS pixels, `key` the key of a `keydown`, `pointer` the pointer type (`mouse`, `touch`, `pen`; empty otherwise).
+
+Each event runs the program again from its checked tree, calling the handler instead of `main` (`tessera1 interpret <file> --handler <function>`, the event in environment variables `TESSERA_EVENT_*`). A run takes a few milliseconds. Nothing from earlier runs is remembered except what is in the page, which is where the state of a page belongs. In the page, a registered handler is an attribute naming its function: `data-tessera-on-<kind>`, and `data-tessera-timer` for a timer. The host turns these into listeners.
+
+Calls reach the host as one `get` each, with the key `page/` and a JSON array of the operation and its arguments (section 21.3; `runtime/page.rs`, `browser/tessera.js`). A page that runs Tessera scripts needs `'wasm-unsafe-eval'` in its `script-src` policy so that the browser compiles `tessera.wasm`.
 

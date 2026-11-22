@@ -10,12 +10,12 @@ import printer uses nothing
 import astjson uses nothing
 import edit uses nothing
 import grammar uses nothing
-import interp uses io, env, time, random, log
+import interp uses io, env, time, random, log, page
 import std/json uses nothing
 import runtime_text uses nothing
 
 fn usage() -> Text {
-join(["Tessera stage 1 compiler (written in Tessera)", "", "Usage:", "  tessera1 check <files...> [--json]           Check for errors without generating code", "  tessera1 build <files...> -o <output>        Compile to a native executable", "        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)", "        [--library]                             A web application as a shared library for the", "                                                nginx, Apache and IIS modules (see hosts/README.md)", "        [--wasm]                                A WebAssembly module for browser/tessera.js (spec", "                                                section 21.3; needs the wasm32-unknown-unknown target)", "  tessera1 test <files...>                     Run the `test` declarations of the entry module", "  tessera1 interpret <files...> [-- <args>]    Run `main` without compiling it (spec section 21);", "                                                the effects io, env, time, random and log", "  tessera1 format <files...> [--check]         Rewrite files in their canonical form", "  tessera1 ast <file.tes>                      Write the syntax tree as JSON (spec section 20.1)", "  tessera1 render <file.json> [-o <file.tes>]  Write the canonical text of a JSON syntax tree", "  tessera1 fix <files...> [--dry-run] [--json] Apply the fixes the diagnostics carry (spec section 20.4)", "  tessera1 grammar [--format <f>] [--depth N]  Export the grammar (spec section 20.3): `gbnf` (the", "                                                text), `ast-schema` (JSON trees; `--depth N` unrolls", "                                                it for decoders without recursion), `edit-schema`", "  tessera1 edit <files...> --ops <ops.json>    Apply edit operations (spec section 20.2); the", "        [--op <json>] [--dry-run] [--json]      program is checked before any file is written", "  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code", "  tessera1 notes <files...>                    Export notes as JSON", "", "Every command that reads source files also accepts a JSON syntax tree (`.json`).", "The first file is the entry module (with `main`, or `handle` for a web application);", "imported modules are found relative to its directory; `std/...` modules are built in.", "A web application built as an executable runs as CGI, `app serve --port N`,", "`app fastcgi --port N` or `app request GET /path`.", "Further files given on the command line are part of the entry module.", "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.", "On Windows an output name without an extension is written with `.exe` added.", "Set TESSERA_RUSTC to choose the rustc binary."], "\n")
+join(["Tessera stage 1 compiler (written in Tessera)", "", "Usage:", "  tessera1 check <files...> [--json]           Check for errors without generating code", "  tessera1 build <files...> -o <output>        Compile to a native executable", "        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)", "        [--library]                             A web application as a shared library for the", "                                                nginx, Apache and IIS modules (see hosts/README.md)", "        [--wasm]                                A WebAssembly module for browser/tessera.js (spec", "                                                section 21.3; needs the wasm32-unknown-unknown target)", "  tessera1 test <files...>                     Run the `test` declarations of the entry module", "  tessera1 interpret <files...> [-- <args>]    Run `main` without compiling it (spec section 21);", "        [--handler <fn>]                        the effects io, env, time, random and log", "  tessera1 format <files...> [--check]         Rewrite files in their canonical form", "  tessera1 ast <file.tes>                      Write the syntax tree as JSON (spec section 20.1)", "  tessera1 render <file.json> [-o <file.tes>]  Write the canonical text of a JSON syntax tree", "  tessera1 fix <files...> [--dry-run] [--json] Apply the fixes the diagnostics carry (spec section 20.4)", "  tessera1 grammar [--format <f>] [--depth N]  Export the grammar (spec section 20.3): `gbnf` (the", "                                                text), `ast-schema` (JSON trees; `--depth N` unrolls", "                                                it for decoders without recursion), `edit-schema`", "  tessera1 edit <files...> --ops <ops.json>    Apply edit operations (spec section 20.2); the", "        [--op <json>] [--dry-run] [--json]      program is checked before any file is written", "  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code", "  tessera1 notes <files...>                    Export notes as JSON", "", "Every command that reads source files also accepts a JSON syntax tree (`.json`).", "The first file is the entry module (with `main`, or `handle` for a web application);", "imported modules are found relative to its directory; `std/...` modules are built in.", "A web application built as an executable runs as CGI, `app serve --port N`,", "`app fastcgi --port N` or `app request GET /path`.", "Further files given on the command line are part of the entry module.", "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.", "On Windows an output name without an extension is written with `.exe` added.", "Set TESSERA_RUSTC to choose the rustc binary."], "\n")
 }
 
 type Options {
@@ -33,6 +33,7 @@ dry_run: Bool
 format: Text
 depth: Int
 program_args: List[Text]
+handler: Text
 }
 
 fn value_after(arguments: List[Text], index: Int) -> Result[Text, Text] {
@@ -47,7 +48,7 @@ fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
 if length(arguments) == 0 {
 return .Error("missing command")
 }
-var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, wasm: false, check: false, ops: "", op: "", dry_run: false, format: "gbnf", depth: 0, program_args: [] }
+var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, wasm: false, check: false, ops: "", op: "", dry_run: false, format: "gbnf", depth: 0, program_args: [], handler: "" }
 if options.command == "help" or options.command == "--help" {
 return .Ok(options)
 }
@@ -92,6 +93,9 @@ if depth < 1 or depth > 64 {
 return .Error("`--depth` needs a number from 1 to 64, found `\(depth_text)`")
 }
 set options = options with { depth: depth }
+set index += 2
+} else if argument == "--handler" {
+set options = options with { handler: try value_after(arguments, index) }
 set index += 2
 } else if argument == "--" {
 set options = options with { program_args: slice(arguments, index + 1, length(arguments)) }
@@ -784,11 +788,11 @@ let home = if environment_variable("HOME") != "" { environment_variable("HOME") 
 run_process("\(to_slashes(home))/.cargo/bin/rustc", arguments)
 }
 
-note "The effects `interpret` offers; the WebAssembly build of the compiler offers the same in a browser."
-fn interpreter_effects() -> List[Text] = ["io", "env", "time", "random", "log"]
+note "The effects `interpret` offers. A browser host (browser/tessera.js) sets `TESSERA_PAGE=1` and adds `page`."
+fn interpreter_effects() -> List[Text] uses env = if environment_variable("TESSERA_PAGE") == "1" { ["io", "env", "time", "random", "log", "page"] } else { ["io", "env", "time", "random", "log"] }
 
 note "Runs a checked program with the interpreter (spec section 21). `main` declares every effect the program uses, so its `uses` clause decides whether the program can run."
-fn run_interpreter(frontend: Frontend, options: Options) -> Int uses io, env, time, random, log {
+fn run_interpreter(frontend: Frontend, options: Options) -> Int uses io, env, time, random, log, page {
 var problems: List[source.Diagnostic] = []
 var found = false
 for item in frontend.program.items {
@@ -797,7 +801,7 @@ match item {
 set found = true
 for effect in f.effects {
 if not source.contains_text(interpreter_effects(), effect.name) {
-set problems += [source.error_help("E0707", effect.span, "`interpret` cannot run a program that uses `\(effect.name)`", "the interpreter, also in the browser, offers only the effects io, env, time, random and log: remove `\(effect.name)` from `main` and the functions that need it, or compile the program with `tessera1 build`")]
+set problems += [source.error_help("E0707", effect.span, "`interpret` cannot run a program that uses `\(effect.name)`", if effect.name == "page" { "`page` exists only in a browser: run the program with browser/tessera.js" } else { "the interpreter offers only the effects io, env, time, random and log (and `page` in a browser): remove `\(effect.name)` from `main` and the functions that need it, or compile the program with `tessera1 build`" })]
 }
 }
 }
@@ -814,10 +818,10 @@ return 1
 }
 // The WebAssembly host sets a lower limit to fit its smaller stack.
 let depth = value_or(parse_int(environment_variable("TESSERA_INTERPRET_DEPTH")), 100000)
-interp.run(frontend.program, paths_of(frontend.files), options.program_args, depth)
+interp.run(frontend.program, paths_of(frontend.files), options.program_args, depth, options.handler)
 }
 
-fn main() -> Unit uses io, fs, env, process, time, random, log {
+fn main() -> Unit uses io, fs, env, process, time, random, log, page {
 let windows = on_windows()
 let options = match parse_options(args()) {
 .Ok(parsed) => parsed
@@ -883,7 +887,7 @@ if command == "notes" {
 print(without_final_newline(notes_json(frontend.program.items, files)))
 exit(0)
 }
-let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), win32: runtime_text.win32_runtime(), audio: runtime_text.audio_runtime(), winmm: runtime_text.winmm_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() + runtime_text.crypto_runtime() + runtime_text.tls_runtime() }
+let runtime = codegen.Runtime { core: runtime_text.core_runtime(), ui: runtime_text.ui_runtime(), win32: runtime_text.win32_runtime(), audio: runtime_text.audio_runtime(), winmm: runtime_text.winmm_runtime(), extra: runtime_text.extra_runtime(), web: runtime_text.web_runtime() + runtime_text.crypto_runtime() + runtime_text.tls_runtime(), page: runtime_text.page_runtime() }
 if command == "test" {
 let base = without_extension(options.files[0])
 let test_binary = if options.output == "" { "\(base).tests" } else { options.output }

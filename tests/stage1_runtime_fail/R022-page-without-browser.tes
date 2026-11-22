@@ -1,0 +1,6 @@
+// Spec section 21.5: outside a browser there is no page, so the first `page` call stops the program.
+fn main() -> Unit uses page {
+for item in page_select("li") {
+add_element_class(item, "seen")
+}
+}

@@ -21,7 +21,9 @@
 //   random(destination, len)       fills with secure random bytes
 // Keys: "args" (arguments separated by NUL), "stdin", "env/NAME",
 // "file/PATH" (get and put), "stdout", "stderr" and "exit" (put; the code as
-// decimal text, sent once just before the program ends).
+// decimal text, sent once just before the program ends), and for the `page`
+// effect "page/" followed by a JSON array of an operation and its arguments
+// (get; runtime/page.rs).
 // Export: `tessera_main() -> i32` runs `main` and returns its exit code. A
 // runtime error or `exit` ends the run by a trap (Rust panics abort on this
 // target) after "exit" was put; the host treats that trap as the end of the run.

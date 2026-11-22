@@ -1,0 +1,4 @@
+fn main() -> Unit uses page {
+let items = page_select("li")
+assert(length(items) >= 0)
+}

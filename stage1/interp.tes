@@ -84,8 +84,8 @@ index: Int
 span: source.Span
 }
 
-note "Runs `main` of a checked program and returns the exit code: 0, the code given to `exit`, or 70 after a runtime error, which is reported on standard error as a compiled program does. `max_depth` limits nested calls (R013)."
-pub fn run(program: checker.CheckedProgram, paths: List[Text], arguments: List[Text], max_depth: Int) -> Int uses io, env, time, random, log {
+note "Runs `main` of a checked program, or with `handler` that function with the page event the host describes in the environment (spec section 21.5), and returns the exit code: 0, the code given to `exit`, or 70 after a runtime error, which is reported on standard error as a compiled program does. `max_depth` limits nested calls (R013)."
+pub fn run(program: checker.CheckedProgram, paths: List[Text], arguments: List[Text], max_depth: Int, handler: Text) -> Int uses io, env, time, random, log, page {
 var functions: Map[Text, ast.Function] = [:]
 for item in program.items {
 match item {
@@ -98,9 +98,14 @@ for def in program.type_defs {
 set types = put(types, def.name, def)
 }
 let p = Program { functions: functions, types: types, paths: paths, arguments: arguments, max_depth: max_depth }
-let main = get(functions, "main") else return 0
-let empty: List[Value] = []
-let result = call_function(p, Ctx { function_name: "", depth: 0 }, Frame { names: [], values: [] }, main, empty)
+let entry = if handler == "" { "main" } else { handler }
+let start = get(functions, entry) else {
+print_error("error: the program has no function `\(entry)`")
+return 2
+}
+let no_args: List[Value] = []
+let start_args = if handler == "" { no_args } else { [event_from_host()] }
+let result = call_function(p, Ctx { function_name: "", depth: 0 }, Frame { names: [], values: [] }, start, start_args)
 match result.flow {
 .Failed(code, message, location) => {
 print_error("runtime error \(code): \(message)\n  at \(location)")
@@ -108,6 +113,101 @@ print_error("runtime error \(code): \(message)\n  at \(location)")
 }
 .Exit(code) => code
 _ => 0
+}
+}
+
+note "The event a handler is called with: the browser host describes it in environment variables."
+fn event_from_host() -> Value uses env {
+Value.RecordV("PageEvent", [Value.TextV(environment_variable("TESSERA_EVENT_KIND")), element_value(PageElement { id: value_or(parse_int(environment_variable("TESSERA_EVENT_ELEMENT")), 0) }), element_value(PageElement { id: value_or(parse_int(environment_variable("TESSERA_EVENT_TARGET")), 0) }), Value.FloatV(float_env("TESSERA_EVENT_X")), Value.FloatV(float_env("TESSERA_EVENT_Y")), Value.FloatV(float_env("TESSERA_EVENT_WIDTH")), Value.FloatV(float_env("TESSERA_EVENT_HEIGHT")), Value.TextV(environment_variable("TESSERA_EVENT_KEY")), Value.TextV(environment_variable("TESSERA_EVENT_POINTER"))])
+}
+
+fn float_env(name: Text) -> Float uses env = value_or(parse_float(environment_variable(name)), 0.0)
+
+fn element_of(v: Value) -> PageElement {
+match v {
+.RecordV(_, fields) => PageElement { id: int_of(fields[0]) }
+_ => PageElement { id: 0 }
+}
+}
+
+fn element_value(e: PageElement) -> Value = .RecordV("PageElement", [.IntV(e.id)])
+
+fn elements_value(elements: List[PageElement]) -> Value {
+var out: List[Value] = []
+for e in elements {
+set out += [element_value(e)]
+}
+.ListV(out)
+}
+
+note "The `page` built-ins. A handler is registered as an attribute naming the function (`data-tessera-on-click`, `data-tessera-timer`), which the browser host turns into a listener that runs the program again with that handler (spec section 21.5)."
+fn page_builtin(name: Text, a: Value, b: Value, c: Value) -> Result[Value, Failure] uses page {
+match name {
+"page_select" => .Ok(elements_value(page_select(text_of(a))))
+"element_select" => .Ok(elements_value(element_select(element_of(a), text_of(b))))
+"element_text" => .Ok(.TextV(element_text(element_of(a))))
+"set_element_text" => {
+set_element_text(element_of(a), text_of(b))
+unit_result()
+}
+"element_attribute" => .Ok(option_text(element_attribute(element_of(a), text_of(b))))
+"set_element_attribute" => {
+set_element_attribute(element_of(a), text_of(b), text_of(c))
+unit_result()
+}
+"remove_element_attribute" => {
+remove_element_attribute(element_of(a), text_of(b))
+unit_result()
+}
+"element_has_class" => .Ok(.BoolV(element_has_class(element_of(a), text_of(b))))
+"add_element_class" => {
+add_element_class(element_of(a), text_of(b))
+unit_result()
+}
+"remove_element_class" => {
+remove_element_class(element_of(a), text_of(b))
+unit_result()
+}
+"set_element_style" => {
+set_element_style(element_of(a), text_of(b), text_of(c))
+unit_result()
+}
+"create_element" => .Ok(element_value(create_element(text_of(a))))
+"append_element" => {
+append_element(element_of(a), element_of(b))
+unit_result()
+}
+"insert_element_before" => {
+insert_element_before(element_of(a), element_of(b), element_of(c))
+unit_result()
+}
+"on_event" => {
+set_element_attribute(element_of(a), "data-tessera-on-\(text_of(b))", function_name_of(c))
+unit_result()
+}
+"on_timer" => {
+if int_of(b) < 0 {
+return .Error(problem("R004", "on_timer: \(int_of(b)) milliseconds is negative"))
+}
+set_element_attribute(element_of(a), "data-tessera-timer", "\(int_of(b)) \(function_name_of(c))")
+unit_result()
+}
+"prevent_default" => {
+prevent_default()
+unit_result()
+}
+"page_confirm" => .Ok(.BoolV(page_confirm(text_of(a))))
+"copy_to_clipboard" => {
+copy_to_clipboard(text_of(a))
+unit_result()
+}
+"media_matches" => .Ok(.BoolV(media_matches(text_of(a))))
+"stored_text" => .Ok(option_text(stored_text(text_of(a))))
+"store_text" => {
+store_text(text_of(a), text_of(b))
+unit_result()
+}
+_ => .Error(problem("R000", "`\(name)` cannot run in the interpreter"))
 }
 }
 
@@ -636,7 +736,7 @@ _ => .Ok(a)
 
 // ---------- expressions ----------
 
-fn eval_all(p: Program, ctx: Ctx, frame: Frame, exprs: List[ast.Expr]) -> Evs uses io, env, time, random, log {
+fn eval_all(p: Program, ctx: Ctx, frame: Frame, exprs: List[ast.Expr]) -> Evs uses io, env, time, random, log, page {
 var current = frame
 var values: List[Value] = []
 for e in exprs {
@@ -650,7 +750,7 @@ set values += [r.value]
 Evs { frame: current, values: values, flow: .Normal }
 }
 
-fn eval(p: Program, ctx: Ctx, frame: Frame, e: ast.Expr) -> Ev uses io, env, time, random, log {
+fn eval(p: Program, ctx: Ctx, frame: Frame, e: ast.Expr) -> Ev uses io, env, time, random, log, page {
 match e.kind {
 .IntLiteral(n) => done(frame, .IntV(n))
 .BoolLiteral(b) => done(frame, .BoolV(b))
@@ -796,7 +896,7 @@ _ => v
 }
 }
 
-fn eval_binary(p: Program, ctx: Ctx, frame: Frame, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> Ev uses io, env, time, random, log {
+fn eval_binary(p: Program, ctx: Ctx, frame: Frame, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> Ev uses io, env, time, random, log, page {
 let l = eval(p, ctx, frame, left)
 if l.flow != .Normal {
 return l
@@ -823,7 +923,7 @@ match binary(op, l.value, r.value) {
 }
 }
 
-fn eval_index(p: Program, ctx: Ctx, frame: Frame, target: ast.Expr, index: ast.Expr, span: source.Span) -> Ev uses io, env, time, random, log {
+fn eval_index(p: Program, ctx: Ctx, frame: Frame, target: ast.Expr, index: ast.Expr, span: source.Span) -> Ev uses io, env, time, random, log, page {
 let t = eval(p, ctx, frame, target)
 if t.flow != .Normal {
 return t
@@ -850,7 +950,7 @@ done(i.frame, items[n])
 }
 }
 
-fn eval_map(p: Program, ctx: Ctx, frame: Frame, keys: List[ast.Expr], values: List[ast.Expr], ty: ast.Type) -> Ev uses io, env, time, random, log {
+fn eval_map(p: Program, ctx: Ctx, frame: Frame, keys: List[ast.Expr], values: List[ast.Expr], ty: ast.Type) -> Ev uses io, env, time, random, log, page {
 let k = eval_all(p, ctx, frame, keys)
 if k.flow != .Normal {
 return stop(k.frame, k.flow)
@@ -904,7 +1004,7 @@ _ => record
 
 // ---------- statements ----------
 
-fn eval_block(p: Program, ctx: Ctx, frame: Frame, block: ast.Block) -> Ev uses io, env, time, random, log {
+fn eval_block(p: Program, ctx: Ctx, frame: Frame, block: ast.Block) -> Ev uses io, env, time, random, log, page {
 var current = frame
 for statement in block.statements {
 let r = exec(p, ctx, current, statement)
@@ -919,7 +1019,7 @@ match block.tail {
 }
 }
 
-fn exec(p: Program, ctx: Ctx, frame: Frame, statement: ast.Statement) -> Ev uses io, env, time, random, log {
+fn exec(p: Program, ctx: Ctx, frame: Frame, statement: ast.Statement) -> Ev uses io, env, time, random, log, page {
 match statement {
 .Let(name, _, _, value, _) => {
 let v = eval(p, ctx, frame, value)
@@ -1003,7 +1103,7 @@ _ => empty
 }
 
 note "`set place = value` as compiled code does it: the indexes from left to right, then the value, then the checked write."
-fn set_place(p: Program, ctx: Ctx, frame: Frame, target: ast.Expr, value: ast.Expr) -> Ev uses io, env, time, random, log {
+fn set_place(p: Program, ctx: Ctx, frame: Frame, target: ast.Expr, value: ast.Expr) -> Ev uses io, env, time, random, log, page {
 var current = frame
 var steps: List[Step] = []
 for link in place_chain(target) {
@@ -1072,7 +1172,7 @@ _ => .Ok(container)
 }
 }
 
-fn eval_match(p: Program, ctx: Ctx, frame: Frame, scrutinee: ast.Expr, arms: List[ast.Arm]) -> Ev uses io, env, time, random, log {
+fn eval_match(p: Program, ctx: Ctx, frame: Frame, scrutinee: ast.Expr, arms: List[ast.Arm]) -> Ev uses io, env, time, random, log, page {
 let s = eval(p, ctx, frame, scrutinee)
 if s.flow != .Normal {
 return s
@@ -1116,7 +1216,7 @@ out
 
 // ---------- calls ----------
 
-fn call(p: Program, ctx: Ctx, frame: Frame, name: Text, args: List[Value], span: source.Span) -> Ev uses io, env, time, random, log {
+fn call(p: Program, ctx: Ctx, frame: Frame, name: Text, args: List[Value], span: source.Span) -> Ev uses io, env, time, random, log, page {
 match get(p.functions, name) {
 .Some(f) => call_function(p, ctx, frame, f, args)
 .None => {
@@ -1126,7 +1226,7 @@ call_builtin(p, ctx, frame, builtin_name, args, span)
 }
 }
 
-fn call_function(p: Program, ctx: Ctx, frame: Frame, f: ast.Function, args: List[Value]) -> Ev uses io, env, time, random, log {
+fn call_function(p: Program, ctx: Ctx, frame: Frame, f: ast.Function, args: List[Value]) -> Ev uses io, env, time, random, log, page {
 let inner = Ctx { function_name: f.name, depth: ctx.depth + 1 }
 if inner.depth > p.max_depth {
 return failed_at(p, inner, frame, f.name_span, problem("R013", "recursion is too deep: the stack is full"))
@@ -1143,7 +1243,7 @@ _ => done(frame, body.value)
 }
 }
 
-fn call_builtin(p: Program, ctx: Ctx, frame: Frame, name: Text, args: List[Value], span: source.Span) -> Ev uses io, env, time, random, log {
+fn call_builtin(p: Program, ctx: Ctx, frame: Frame, name: Text, args: List[Value], span: source.Span) -> Ev uses io, env, time, random, log, page {
 if name == "map" or name == "filter" {
 var out: List[Value] = []
 let function = function_name_of(args[1])
@@ -1442,12 +1542,14 @@ return .Error(problem("R011", "\(names[index]) component \(parts[index]) is outs
 .Ok(.IntV(rgb(red, green, blue)))
 }
 
+fn page_builtin_names() -> List[Text] = ["page_select", "element_select", "element_text", "set_element_text", "element_attribute", "set_element_attribute", "remove_element_attribute", "element_has_class", "add_element_class", "remove_element_class", "set_element_style", "create_element", "append_element", "insert_element_before", "on_event", "on_timer", "prevent_default", "page_confirm", "copy_to_clipboard", "media_matches", "stored_text", "store_text"]
+
 fn argument(args: List[Value], index: Int) -> Value = if index < length(args) { args[index] } else { Value.UnitV }
 
 fn unit_result() -> Result[Value, Failure] = .Ok(.UnitV)
 
 note "The built-in functions without effects or with the effects a script may use. The rest cannot be reached: `interpret` refuses a program whose `main` uses another effect (E0707)."
-fn builtin(p: Program, name: Text, args: List[Value]) -> Result[Value, Failure] uses io, env, time, random, log {
+fn builtin(p: Program, name: Text, args: List[Value]) -> Result[Value, Failure] uses io, env, time, random, log, page {
 let a = argument(args, 0)
 let b = argument(args, 1)
 let c = argument(args, 2)
@@ -1491,7 +1593,7 @@ return .Error(problem("R004", "random_bytes: count \(int_of(a)) is outside 0..10
 .Ok(.BytesV(random_bytes(int_of(a))))
 }
 "password_hash" => .Ok(.TextV(password_hash(text_of(a))))
-_ => pure_builtin(name, a, b, c, d)
+_ => if contains(page_builtin_names(), name) { page_builtin(name, a, b, c) } else { pure_builtin(name, a, b, c, d) }
 }
 }
 
