@@ -1,0 +1,5 @@
+fn main() -> Unit uses io, env, random {
+let dmax = value_or(parse_decimal("170141183460469231731687303715.884105727"), 0.0)
+let dmin = -dmax - 0.000000001
+print(to_text(-dmin))
+}

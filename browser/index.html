@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<!-- Demo of browser/tessera.js. Serve the repository root, e.g. `python3 -m http.server`, and open
+     http://localhost:8000/browser/ (WebAssembly is not loaded from file:// URLs). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tessera in the browser</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; color: #222; }
+  textarea, pre { font: 14px/1.4 ui-monospace, monospace; width: 100%; box-sizing: border-box; }
+  textarea { height: 18rem; padding: .5rem; }
+  pre { background: #f4f4f4; padding: .5rem; min-height: 3rem; white-space: pre-wrap; }
+  .error { color: #a00; }
+  .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+  input { flex: 1; font: inherit; }
+</style>
+</head>
+<body>
+<h1>Tessera in the browser</h1>
+<p>The Tessera compiler, built as WebAssembly, checks and interprets the program in this page. Paste Tessera text or a JSON syntax tree (<code>tessera1 ast</code>).</p>
+<textarea id="source" spellcheck="false">import std/json
+
+fn fib(n: Int) -> Int = if n &lt; 2 { n } else { fib(n - 1) + fib(n - 2) }
+
+fn main() -> Unit uses io, time {
+let start = monotonic()
+print("fib(22) = \(fib(22))")
+let doc = json.parse("{\"language\": \"Tessera\", \"draft\": 0.25}") else return
+print(json.encode(doc))
+while true {
+let line = read_line() else break
+print("read: \(line)")
+}
+print("\(monotonic() - start) ms")
+}
+</textarea>
+<div class="row">
+  <label for="stdin">Standard input</label>
+  <input id="stdin" value="first line\nsecond line">
+  <button id="run" disabled>Run</button>
+  <button id="format" disabled>Format</button>
+  <button id="tree" disabled>Show tree</button>
+</div>
+<pre id="output">loading tessera.wasm…</pre>
+
+<script type="module">
+import { Tessera } from "./tessera.js";
+
+const output = document.getElementById("output");
+const source = document.getElementById("source");
+const buttons = ["run", "format", "tree"].map((id) => document.getElementById(id));
+
+function show(text, isError) {
+  const span = document.createElement("span");
+  if (isError) span.className = "error";
+  span.textContent = text;
+  output.append(span);
+}
+
+const started = performance.now();
+const tessera = await Tessera.load();
+output.textContent = `tessera.wasm ready in ${Math.round(performance.now() - started)} ms\n`;
+buttons.forEach((b) => (b.disabled = false));
+
+document.getElementById("run").onclick = () => {
+  output.textContent = "";
+  const stdin = document.getElementById("stdin").value.replaceAll("\\n", "\n") + "\n";
+  const result = tessera.run(source.value, { stdin, onStdout: (s) => show(s, false), onStderr: (s) => show(s, true) });
+  show(`\nexit code ${result.exitCode}${result.diagnostics.length ? `, ${result.diagnostics.length} diagnostic(s)` : ""}\n`, result.exitCode !== 0);
+};
+document.getElementById("format").onclick = () => {
+  try {
+    source.value = tessera.format(source.value);
+    output.textContent = "formatted\n";
+  } catch (error) {
+    output.textContent = "";
+    show(error.message, true);
+  }
+};
+document.getElementById("tree").onclick = () => {
+  try {
+    output.textContent = JSON.stringify(tessera.ast(source.value), null, 1);
+  } catch (error) {
+    output.textContent = "";
+    show(error.message, true);
+  }
+};
+</script>
+</body>
+</html>

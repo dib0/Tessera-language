@@ -12,9 +12,10 @@
 
 const encoder = new TextEncoder();
 
-// Nested calls the interpreter allows here; the browser's WebAssembly stack is smaller than the
-// 512 MB thread a native `tessera1 interpret` uses.
-const DEFAULT_DEPTH = 2000;
+// Nested calls the interpreter allows here. The JavaScript engine's own stack (about 1 MB in V8,
+// roughly 1 KB per interpreted call) is far smaller than the 512 MB thread of a native
+// `tessera1 interpret`; staying below it gives R013 with the program's location.
+const DEFAULT_DEPTH = 700;
 
 function bytesOf(value) {
   if (value instanceof Uint8Array) return value;
@@ -133,9 +134,13 @@ export class Tessera {
       const code = instance.exports.tessera_main();
       if (exitCode === null) exitCode = code;
     } catch (error) {
-      // `exit` and runtime errors end in a trap after the exit code was put; anything else is a bug.
+      // `exit` and runtime errors end in a trap after the exit code was put. The engine's stack can
+      // still run out before the interpreter's limit (deeply nested expressions): that is R013 too.
       if (exitCode === null) {
-        const message = `internal error: ${error && error.message ? error.message : error}\n`;
+        const overflow = error instanceof RangeError || /call stack/i.test(String(error && error.message));
+        const message = overflow
+          ? "runtime error R013: recursion is too deep: the stack is full\n  at (the browser's stack ran out; lower TESSERA_INTERPRET_DEPTH)\n"
+          : `internal error: ${error && error.message ? error.message : error}\n`;
         out.stderr += message;
         if (listeners.stderr) listeners.stderr(message);
         exitCode = 70;

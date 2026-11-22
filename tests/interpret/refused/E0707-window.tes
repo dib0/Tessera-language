@@ -1,0 +1,3 @@
+fn main() -> Unit uses ui {
+open_window("x", 100, 100)
+}

@@ -3,6 +3,7 @@
 #   compiler/target/release/tessera  stage 0 compiler (Rust)
 #   bin/tessera-bootstrap            compiler built from the seed bootstrap/tessera1.rs
 #   bin/tessera1                     stage 1 compiler (stage1/, built by the bootstrap compiler)
+#   browser/tessera.wasm             the stage 1 compiler as WebAssembly, when that target is installed
 #   tools/xsend/xsend                test helper that sends clicks/keys to windows
 # and regenerates stage1/runtime_text.tes from runtime/ and std/.
 #
@@ -50,6 +51,14 @@ echo "== self-hosting check: stage 1 rebuilds itself and must produce identical 
 cmp bin/by-stage1.rs bin/by-stage2.rs
 rm -f "bin/tessera2$exe" bin/tessera2.rs "bin/tessera2$exe.rs" bin/tessera2.pdb bin/by-stage1.rs bin/by-stage2.rs
 echo "ok: fixpoint reached"
+
+echo "== WebAssembly build of the compiler for browser/tessera.js (skipped without the target)"
+if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+    "bin/tessera1$exe" build stage1/main.tes --wasm -o browser/tessera.wasm
+    rm -rf browser/tessera.wasm.build
+else
+    echo "skipped: rustup target add wasm32-unknown-unknown"
+fi
 
 echo "== test helper"
 tools/xsend/build.sh

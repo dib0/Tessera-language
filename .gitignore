@@ -12,3 +12,5 @@ hosts/iis/TesseraModule.dll
 hosts/iis/TesseraModule.exp
 hosts/iis/TesseraModule.lib
 hosts/iis/TesseraModule.obj
+browser/tessera.wasm
+browser/tessera.wasm.build/

@@ -1,0 +1,4 @@
+fn main() -> Unit uses io, env, random {
+let huge: Float = 1e300
+print(to_text(huge * 1e8 * 1.8))
+}

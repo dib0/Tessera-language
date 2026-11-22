@@ -1,0 +1,4 @@
+fn main() -> Unit uses io, env, random {
+let tiny: Float = 5e-324
+print(to_text(1e-10 / tiny))
+}

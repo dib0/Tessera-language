@@ -1,0 +1,4 @@
+fn main() -> Unit uses io, env, random {
+let min = -9223372036854775807 - 1
+print(to_text(-min))
+}

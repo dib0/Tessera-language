@@ -61,14 +61,20 @@ try {
   check("format", tessera.format('fn main() -> Unit uses io {\n    print( "x" )\n}\n') === 'fn main() -> Unit uses io {\nprint("x")\n}\n', null);
   check("grammar", tessera.grammar("gbnf").includes("root"), null);
 
-  r = tessera.run(deep(1900));
-  check("recursion within the limit", r.exitCode === 0 && r.stdout === "1900\n", r);
+  r = tessera.run(deep(650));
+  check("recursion within the limit", r.exitCode === 0 && r.stdout === "650\n", r);
   r = tessera.run(deep(5000));
-  check("recursion limit", r.exitCode === 70 && r.stderr.startsWith("runtime error R013"), r);
+  check("recursion limit", r.exitCode === 70 && r.stderr === "runtime error R013: recursion is too deep: the stack is full\n  at main.tes:1:4 in function `down`\n", r);
   r = tessera.run(deep(30000), { env: { TESSERA_INTERPRET_DEPTH: "40000" } });
-  check("stack overflow is contained", r.exitCode !== 0, r);
+  check("engine stack overflow is R013", r.exitCode === 70 && r.stderr.startsWith("runtime error R013"), r);
   r = tessera.run(hello);
   check("usable after a trap", r.exitCode === 0 && r.stdout === "hello 42\n", r);
+
+  const box = document.createElement("div");
+  box.innerHTML = '<script type="text/tessera" data-output="#out">\nfn main() -> Unit uses io {\nprint("from a script")\n}\n<\/script><pre id="out"></pre>';
+  document.body.append(box);
+  await tessera.runScripts(box);
+  check("script elements", box.querySelector("#out").textContent === "from a script\n", box.innerHTML);
 
   const t0 = performance.now();
   r = tessera.run('fn fib(n: Int) -> Int = if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n\nfn main() -> Unit uses io {\nprint("\\(fib(20))")\n}\n');

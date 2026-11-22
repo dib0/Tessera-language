@@ -1,6 +1,6 @@
 # Tessera language reference
 
-Tessera is a statically typed, expression-oriented language. Programs compile to safe native code. This reference describes language draft 0.23 and is complete for command-line programs, programs split into modules, web applications and graphical programs. The same programs run on Linux and on Windows. The authoritative specification is `language-design.md`.
+Tessera is a statically typed, expression-oriented language. Programs compile to safe native code. This reference describes language draft 0.25 and is complete for command-line programs, programs split into modules, web applications and graphical programs. The same programs run on Linux and on Windows. The authoritative specification is `language-design.md`.
 
 ## Program structure
 
@@ -403,9 +403,10 @@ tessera1 format files... [--check]
 tessera1 fix main.tes
 tessera1 edit main.tes --op '{"op": "rename_symbol", "from": "area", "to": "surface"}'
 tessera1 ast file.tes / tessera1 render file.json
+tessera1 interpret main.tes [-- args...]
 ```
 
-`build` keeps the generated Rust as `program.rs`. Compiler exit codes: 0 ok, 1 compile errors, 2 usage error. `format` writes the one canonical text of a program. `fix` applies every fix the diagnostics carry (see below). `edit` applies typed changes and writes nothing unless the whole program still checks; operations: `add_fn`/`add_item` (`source`, `after`), `replace_fn` (`name`, `source`), `remove_fn` (`name`), `rename_symbol` (`from`, `to`; `Type.variant` or `Type.field`, or a local with `fn`), `set_effect` (`fn`, `uses`), `add_match_arm` (`fn`, `match`, `arm`), `insert_stmt_after`/`insert_stmt_before`/`replace_stmt` (`fn`, `anchor`: the statement's canonical first line, `source`), `remove_stmt`; `"file"` selects a module.
+`interpret` runs `main` without compiling it, with the same output, errors and exit code as the built program, when `main` uses only `io`, `env`, `time`, `random` and `log` (otherwise E0707); the same interpreter runs programs in a browser through `browser/tessera.js`. `build` keeps the generated Rust as `program.rs`. Compiler exit codes: 0 ok, 1 compile errors, 2 usage error. `format` writes the one canonical text of a program. `fix` applies every fix the diagnostics carry (see below). `edit` applies typed changes and writes nothing unless the whole program still checks; operations: `add_fn`/`add_item` (`source`, `after`), `replace_fn` (`name`, `source`), `remove_fn` (`name`), `rename_symbol` (`from`, `to`; `Type.variant` or `Type.field`, or a local with `fn`), `set_effect` (`fn`, `uses`), `add_match_arm` (`fn`, `match`, `arm`), `insert_stmt_after`/`insert_stmt_before`/`replace_stmt` (`fn`, `anchor`: the statement's canonical first line, `source`), `remove_stmt`; `"file"` selects a module.
 
 Runtime errors (`R001` index out of bounds, `R002` overflow, `R003` division by zero, `R004` argument out of range, `R010` `fail`, `R019` `assert`, ...) cannot be caught: the program prints `runtime error R001: ...` with the location to standard error and exits with code 70. Expected failures are `Result` values.
 

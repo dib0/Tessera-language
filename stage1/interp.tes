@@ -436,7 +436,7 @@ return .Error(problem("R002", "float overflow: \(a) * \(b)"))
 .Ok(.FloatV(a * b))
 }
 
-note "Division by at least 1 in size cannot overflow. Otherwise the quotient is computed 2^1023 smaller (normal divisor) or 2^1022 smaller (subnormal divisor) from exactly scaled operands."
+note "Division by at least 1 in size cannot overflow. Otherwise the quotient is computed from exactly scaled operands, 2^1023 smaller for a normal divisor (overflow from 2) and 2^1126 smaller for a subnormal one (overflow from 2^-102); a dividend below 1e-290 cannot overflow by a subnormal divisor."
 fn float_div(a: Float, b: Float) -> Result[Value, Failure] {
 if b == 0.0 {
 return .Error(problem("R003", "division by zero: \(a) / \(b)"))
@@ -451,7 +451,8 @@ set overflow = abs_float(a / 2.0 / (b * two_1022)) >= 2.0
 } else if abs_float(a) >= 1e-290 {
 let two_52: Float = 4503599627370496.0
 let two_minus_52: Float = 2.220446049250313e-16
-set overflow = abs_float(a * two_minus_52 / (b * two_1022 * two_52)) >= 4.0
+let two_minus_102: Float = 1.9721522630525295e-31
+set overflow = abs_float(a * two_minus_52 / (b * two_1022 * two_52)) >= two_minus_102
 }
 if overflow {
 return .Error(problem("R002", "float overflow: \(a) / \(b)"))
@@ -520,6 +521,25 @@ if size < decimal(1) and abs_decimal(a) > decimal_max() * size {
 return .Error(problem("R002", "decimal overflow: \(a) / \(b)"))
 }
 .Ok(.DecimalV(a / b))
+}
+
+note "Rounding half away from zero can carry past the largest Decimal. The exact digits of `to_text` tell whether the value rounds up; the kept digits plus one unit overflow when they exceed the limit, compared without computing the sum."
+fn decimal_round(d: Decimal, places: Int) -> Result[Value, Failure] {
+if places < 9 {
+let text = to_text(d)
+let negative = starts_with(text, "-")
+let parts = split(if negative { slice_text(text, 1, length(text)) } else { text }, ".")
+let digits = pad_right(if length(parts) > 1 { parts[1] } else { "" }, 9, "0")
+if code_points(digits)[places] >= 53 {
+let kept = value_or(parse_decimal(if places == 0 { parts[0] } else { "\(parts[0]).\(slice_text(digits, 0, places))" }), decimal(0))
+let unit = value_or(parse_decimal(if places == 0 { "1" } else { "0.\(repeat("0", places - 1))1" }), decimal(0))
+let limit = if negative { decimal_max() - unit + 0.000000001 } else { decimal_max() - unit }
+if kept > limit {
+return .Error(problem("R002", "decimal overflow: round(\(d), \(places))"))
+}
+}
+}
+.Ok(.DecimalV(round(d, places)))
 }
 
 // ---------- operators ----------
@@ -1383,7 +1403,7 @@ _ => {
 if places < 0 or places > 9 {
 return .Error(problem("R004", "round: places \(places) is outside 0..9"))
 }
-.Ok(.DecimalV(round(decimal_of(v), places)))
+decimal_round(decimal_of(v), places)
 }
 }
 }

@@ -25,6 +25,7 @@ tessera1 test main.tes             # runs `test "name" { assert(...) }` blocks
 tessera1 format files...           # rewrite in the one canonical text (--check only reports)
 tessera1 fix main.tes              # apply every `fix:` the diagnostics carry, then report what is left
 tessera1 edit main.tes --op JSON   # typed change (rename, add_fn, insert_stmt_after, ...), checked before writing
+tessera1 interpret main.tes        # run without rustc (main may use only io, env, time, random, log)
 ```
 
 Give only the entry file; imported modules are found from its directory. Compiler exit codes: 0 ok, 1 compile errors, 2 usage error. A compiled program exits with 70 on a runtime error.

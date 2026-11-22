@@ -1,0 +1,3 @@
+fn main() -> Unit uses io, fs {
+print(read_file("notes.txt"))
+}

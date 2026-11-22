@@ -1,0 +1,3 @@
+fn main() -> Unit uses io, env, random {
+print(to_text(3037000500 * 3037000500))
+}

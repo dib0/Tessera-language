@@ -1,6 +1,6 @@
 # Tessera Language Design
 
-**Status:** Draft 0.24. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), TLS and the crypto built-ins of draft 0.22, the standard modules `std/logging` and `std/config` of draft 0.23, and the Model First Programming tools of draft 0.24 (section 20). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
+**Status:** Draft 0.25. Implemented by the stage 1 compiler in `stage1/` (written in Tessera, self-hosting, itself split into modules). The stage 0 compiler in `compiler/` (Rust) implements everything except the `ui` effect (section 9.4), modules (section 9.5), `Option` (section 5.5), `Result` and `try` (section 5.6), `with` (section 5.2), `.Variant` shorthand (section 5.2), text interpolation (section 4.5), `for _` (section 8.1), statement arms in `match` (section 7.5), `set x += e` (section 6.2), `+` on lists (section 7.1) the built-ins `parse_int`, `split`, `sort`, `index_of`, `contains`, `to_lower`, `to_upper` and `exit_with` (section 10), and everything added in drafts 0.13 to 0.20: `Map`, `Decimal`, `Bytes`, function values, `let ... else`, the effects `time`, `random`, `log`, `db` and `net`, web applications, `test` declarations, the standard modules, `set` on fields and elements, the bit operations, binary files, the standard modules added in draft 0.16, `Float`, the `audio` effect and the game modules of draft 0.20 (sections 5.1, 6.1, 6.2, 7.6, 9.6 to 9.8, 10), TLS and the crypto built-ins of draft 0.22, the standard modules `std/logging` and `std/config` of draft 0.23, the Model First Programming tools of draft 0.24 (section 20), and the interpreter and WebAssembly build of draft 0.25 (section 21). Both compilers run on Linux and on Windows, which are tested; macOS is unix like Linux and is expected to work apart from `ui`, but is not tested (draft 0.21, section 16.1).
 **Scope:** Everything described here is implemented and tested unless marked *not implemented*. Anything not described here is not part of the language.
 
 This document is the authoritative description of Tessera. When the compiler and this document disagree, the document wins and the compiler has a bug, or the document is updated through an explicit decision (see section 19).
@@ -301,6 +301,22 @@ Decided against, with the reasons:
 - **Applying edits that do not check.** An edit operation that leaves an error refuses the whole batch and reports the error in the would-be text, so a program on disk always checks after an edit.
 - **Fixes for every diagnostic.** A fix is only given where one change is clearly right (`let` to `var`, a missing `uses io`, `len` to `length`, `float(n)`). Where a choice is needed (`p.z` when both `x` and `y` exist, a non-exhaustive `match`) the diagnostic keeps its help text and offers no fix, so `tessera1 fix` never guesses.
 - **A machine-readable specification generated from the compiler, contracts and property tests** (steps 5 and 6 of the MFP plan) are deferred until the tools above are measured (section 18).
+
+From draft 0.24 to 0.25, **Tessera in the browser** (section 21): a model generates a program, as text or as its syntax tree, and a web page runs it, with no server and no Rust toolchain. The language itself did not change.
+
+| Added | Why |
+|---|---|
+| `tessera1 interpret <files...> [-- <args>]` runs `main` straight from the checked syntax tree (section 21.1), in the effects `io`, `env`, `time`, `random` and `log` | A browser cannot run `rustc`. The interpreter is written in Tessera, in `stage1/interp.tes`, so it is part of the compiler and travels with it. Built-in functions are called directly, so their results are the compiled ones by construction; every runtime error is checked by the interpreter first, so it carries the program's location. It behaves exactly as the compiled program: the same output, error messages and exit code, which a test checks for every test program. |
+| E0707: `interpret` refuses a program whose `main` uses another effect | `main` declares every effect the program uses (section 9.2), so its `uses` clause decides before anything runs. |
+| `tessera1 build <files> --wasm -o x.wasm` (section 21.3): a program with `main` as a WebAssembly module for a JavaScript host, with `runtime/wasm.rs` as its interface | The compiler is such a program: `tessera1 build stage1/main.tes --wasm` gives `browser/tessera.wasm`, the whole command line (`check`, `format`, `ast`, `render`, `fix`, `edit`, `grammar`, `interpret`) in one module. |
+| `browser/tessera.js` (section 21.4), a JavaScript library without dependencies around that module | `run(program)` takes Tessera text or a syntax tree and returns the output, the exit code and, when the program did not compile, the diagnostics as JSON (section 20.4), so a model can repair and retry inside the page. |
+
+Decided against, with the reasons:
+
+- **A second code generator that writes JavaScript.** It would run faster, but it would be a third implementation of the semantics (overflow, evaluation order, error messages) next to the Rust runtime, in a language that has no 64-bit integers. The interpreter reuses the runtime's built-ins and is checked against the compiled programs.
+- **Compiling on a server and running the result in the page.** That is not self-contained: every page would need the server, and a program could not be checked and repaired offline.
+- **The interpreter in JavaScript, working on the JSON tree.** The tree carries no types; the checker would have to run first anyway, and the interpreter would be a third implementation again.
+- **`fs`, `net`, `db`, `process`, `ui` and `audio` in the browser.** The host already offers files to the compiler, so `fs` could follow; the others need asynchronous browser interfaces that a blocking program cannot wait for. Deferred until measured.
 
 ## 4. Source files and lexical structure
 
@@ -1326,6 +1342,7 @@ Rules:
 | E0704 | The target of an edit operation is not found (declaration, function, anchor or `match`) |
 | E0705 | The target of an edit operation is ambiguous, or a declaration of that name already exists |
 | E0706 | The source text of an edit operation does not parse as what the operation needs |
+| E0707 | `interpret` cannot run a program whose `main` uses an effect other than `io`, `env`, `time`, `random` and `log` (section 21.1) |
 
 ## 14. Canonical formatting
 
@@ -1446,6 +1463,8 @@ tessera1 render <file.json> [-o <file.tes>]
 tessera1 edit <entry.tes> (--ops <ops.json> | --op <json>) [--dry-run] [--json]
 tessera1 fix <entry.tes> [--dry-run] [--json]
 tessera1 grammar [--format gbnf|ast-schema|edit-schema] [--depth N]
+tessera1 interpret <entry.tes> [-- <args...>]
+tessera1 build <entry.tes> --wasm -o <file.wasm>
 ```
 
 Every command that reads a source file also accepts a JSON syntax tree (`.json`, section 20.1) in its place.
@@ -1454,9 +1473,9 @@ Imported modules are found automatically; only the entry file is given.
 
 Compiler exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure (always a compiler bug). Stage 1 reports an unreadable source file as runtime error R006 (exit code 70).
 
-Both compilers embed the same runtime `runtime/core.rs`. Stage 1 adds `runtime/extra.rs` to every program and, per program, `runtime/web.rs` for decimals, time, randomness, crypto, the database, the network or `handle`, always together with `runtime/crypto.rs` (the cryptographic primitives) and `runtime/tls.rs` (TLS 1.3 for the HTTP client and server); `runtime/ui.rs` and `runtime/win32.rs` for `ui`; `runtime/audio.rs` and `runtime/winmm.rs` for `audio`. `runtime/adapter.rs` is the C interface of `--library` builds. Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
+Both compilers embed the same runtime `runtime/core.rs`. Stage 1 adds `runtime/extra.rs` to every program and, per program, `runtime/web.rs` for decimals, time, randomness, crypto, the database, the network or `handle`, always together with `runtime/crypto.rs` (the cryptographic primitives) and `runtime/tls.rs` (TLS 1.3 for the HTTP client and server); `runtime/ui.rs` and `runtime/win32.rs` for `ui`; `runtime/audio.rs` and `runtime/winmm.rs` for `audio`. `runtime/adapter.rs` is the C interface of `--library` builds, `runtime/wasm.rs` the host interface of `--wasm` builds (section 21.3). Stage 1 carries all of them, and the standard modules in `std/`, as `stage1/runtime_text.tes`, generated by `tools/embed_runtime.tes`.
 
-Four runtime files contain `unsafe` code, and they are the only ones: `adapter.rs` (the C interface a web host calls), `win32.rs` (the window) and `winmm.rs` (the sound card). The last two are reached only on Windows and only by a program that asked for a window or sound; everything that can be done without the operating system's C functions is done in safe Rust.
+Four runtime files contain `unsafe` code, and they are the only ones: `adapter.rs` (the C interface a web host calls), `wasm.rs` (the functions a JavaScript host offers a WebAssembly module, section 21.3), `win32.rs` (the window) and `winmm.rs` (the sound card). The last two are reached only on Windows and only by a program that asked for a window or sound; everything that can be done without the operating system's C functions is done in safe Rust.
 
 Since draft 0.13 stage 1 inserts stack and time checks into generated functions and loops, so its Rust differs from that of the frozen stage 0. The parity test therefore compares behaviour: every program shared by both compilers must give the same output, error messages and exit code.
 
@@ -1615,6 +1634,12 @@ Findings from building the Model First Programming tools (draft 0.24, section 20
 - **Claude's structured outputs accept no recursive JSON Schema.** A syntax tree is recursive, so grammar-constrained generation of whole trees with Claude needs the unrolled schema (`--depth`), whose size grows linearly with the depth (about 95 KB at depth 12). Edit operations are not recursive and fit strict tool use directly. Which of the two helps more is to be measured.
 - **The 13 typical mistakes of `tests/mfp/fix/broken.tes` need one `fix` run.** Twelve are fixed automatically in two rounds (a removed import and an added one would overlap in the first); the remaining one (`p.z` on a record with `x` and `y`) has no single right answer and is left to the model.
 
+Findings from the interpreter and the WebAssembly build (draft 0.25, section 21):
+
+- **Value semantics through a value type cost copies.** `set xs[i] = v` on a large list is in place in compiled code, but the interpreter keeps a list inside a `Value` enum, and taking it out of the enum leaves a second reference, so the list is copied. `tests/stage1_run/record_moves.tes` (100,000 updates of a million elements) does not finish. Moving the fields of a value out on its last use in `match` (a code generation change, no language change) would remove the copy; until then the interpreter suits scripts, not frame buffers.
+- **The browser's stack, not the WebAssembly memory, limits recursion.** About 1 KB of the JavaScript engine's own stack per interpreted call, at every optimization level, so V8 allows about 940 nested calls. `tessera.js` sets the limit to 700, which gives R013 with the program's location; a native `interpret` allows 100,000.
+- **Overflow checks without overflowing.** A `Float` operation that overflows is itself a runtime error in Tessera, so the interpreter decides on exactly scaled operands (`float_add`, `float_mul`, `float_div` in `stage1/interp.tes`) and the boundary tests in `tests/interpret/fail/` cross each limit by the smallest step. `Decimal` `*` and `/` are checked by division against the largest value and may differ from the compiled program in the last unit at the boundary; `round` is decided exactly from the digits.
+
 ## 20. Model First Programming
 
 Tessera is written, reviewed and repaired mainly by models. **Model First Programming (MFP)** is the paradigm that follows from that: the program is a structured object that models change through typed operations, a model can be kept from writing invalid syntax at all, and every error the compiler finds says how to repair it. Text remains, as the one canonical view of the program for reading and review. Draft 0.24 implements the first four steps; the order follows from measurement (`harness/`), which comes first:
@@ -1707,3 +1732,74 @@ Diagnostics with fixes in draft 0.24: tabs and carriage returns (E0101), `_name`
 ### 20.5 Deferred
 
 Steps 5 to 7 wait until the effect of steps 1 to 4 on fix rounds and tokens has been measured with the harness. The candidate design: a typed reference (grammar, type rules, effect rules, built-in signatures) generated by `tessera1` itself, so it cannot drift from the implementation; contracts (`requires`/`ensures`) or `test` declarations required per public function and run by the compiler; and stable node ids carried through code generation into runtime error locations.
+
+## 21. Tessera in the browser
+
+A model writes a program, as text or as a JSON syntax tree (section 20.1), and a web page runs it, much like a WebAssembly module: no server, no Rust toolchain. Three parts make that possible: an interpreter in the compiler (21.1), the compiler built as WebAssembly (21.3) and a JavaScript library around it (21.4).
+
+### 21.1 `tessera1 interpret`
+
+```
+tessera1 interpret <entry.tes | entry.json> [-- <args...>]
+```
+
+checks the program like `check` and, when it has no errors, runs `main` from the checked syntax tree without generating Rust. Arguments after `--` are the program's `args()`. The exit code is the program's: 0, the code given to `exit`, or 70 after a runtime error.
+
+The interpreter offers the effects `io`, `env`, `time`, `random` and `log`. `main` declares every effect the program uses (section 9.2), so `interpret` decides from its `uses` clause, before anything runs: any other effect is E0707, with the effect as the location.
+
+```
+error[E0707]: `interpret` cannot run a program that uses `fs`
+  --> notes.tes:1:28
+   |
+ 1 | fn main() -> Unit uses io, fs {
+   |                            ^^
+   |
+help: the interpreter, also in the browser, offers only the effects io, env, time, random and log: remove `fs` from `main` and the functions that need it, or compile the program with `tessera1 build`
+```
+
+`test` declarations and web applications (`handle`) are not interpreted.
+
+### 21.2 Semantics
+
+An interpreted program behaves as its compiled form: the same standard output, the same standard error, including every runtime error's code, message and location (section 12), and the same exit code. The test suite checks this for every test program in the effects above (`interpreter_matches_compiled_programs`).
+
+- Built-in functions are called by the interpreter itself, so their results are the compiled ones by construction.
+- Every runtime error a built-in or an operator can raise is checked by the interpreter before the operation, so that its location is the program's. The boundary tests in `tests/interpret/` cross each limit by the smallest step. One difference remains: `Decimal` `*` and `/` within one unit (10^-9) of the largest `Decimal` may be decided differently from the compiled program (section 19).
+- Nested calls are limited to 100,000 natively; the environment variable `TESSERA_INTERPRET_DEPTH` sets another limit (the browser uses 700). Beyond it, R013 at the called function.
+- The interpreter is slower than compiled code, and `set xs[i] = v` copies the list (section 19).
+
+### 21.3 WebAssembly builds
+
+```
+tessera1 build <entry.tes> --wasm -o <file.wasm>
+```
+
+compiles a program with `main` for `wasm32-unknown-unknown` (install it with `rustup target add wasm32-unknown-unknown`), with `runtime/wasm.rs` as the crate root. The module imports six functions from the JavaScript host, module `tessera`, and exports `memory` and `tessera_main() -> i32`:
+
+| Import | Meaning |
+|---|---|
+| `get(key, key_len) -> i32` | Makes the host's value for `key` ready; its length in bytes, or -1 when there is none |
+| `take(destination)` | Copies the value made ready by `get` into the module's memory |
+| `put(key, key_len, value, value_len) -> i32` | Gives a value to the host: 0 accepted, -1 refused |
+| `now() -> f64`, `monotonic() -> f64` | Milliseconds since 1970 (UTC), and from an arbitrary start |
+| `random(destination, len)` | Secure random bytes |
+
+Keys: `args` (the arguments, separated by NUL), `stdin` (all of standard input, read once), `env/NAME`, `file/PATH` (`get` reads a file, `put` writes one), `stdout`, `stderr` and `exit` (the exit code as decimal text). A runtime error or `exit` ends the run with a trap after `exit` was put, since Rust panics abort on this target; the host treats that trap as the end of the run. `sleep` waits on the host's clock. Directories, `list_directory` and `remove_file` are not offered. Only `runtime/wasm.rs` calls the imports; it is one of the four runtime files allowed to contain `unsafe` (section 16).
+
+`tessera1 build stage1/main.tes --wasm -o browser/tessera.wasm` builds the compiler itself; `build.sh` does so when the target is installed.
+
+### 21.4 `browser/tessera.js`
+
+A JavaScript module without dependencies (browsers, Web Workers, Deno and Node 18+). Every call runs the compiler's command line in a fresh instance of the module, against files kept in memory:
+
+```js
+import { Tessera } from "./tessera.js";
+const tessera = await Tessera.load();                 // tessera.wasm next to tessera.js
+const result = tessera.run(programTextOrTree, { stdin: "", args: [], modules: {} });
+// { exitCode, stdout, stderr, diagnostics }: diagnostics as in `check --json` when it did not compile
+tessera.check(program)   tessera.format(text)   tessera.ast(text)   tessera.render(tree)   tessera.grammar("gbnf")
+tessera.exec(["fix", "main.tes", "--json"], { files: { "main.tes": text } })   // any command
+```
+
+A program given as an object, or as text starting with `{`, is a syntax tree. `onStdout` and `onStderr` receive output as it is written. `<script type="text/tessera">` elements run when the page loads `tessera.js?auto`, with their output in the element named by `data-output`. A program runs on the calling thread, so a long one belongs in a Web Worker. `browser/test/run.sh` checks the library in headless Chrome.
+
