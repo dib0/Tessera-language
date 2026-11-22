@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<!-- Checked by browser/test/run.sh in headless Chrome: each case writes PASS or FAIL. -->
+<meta charset="utf-8">
+<title>tessera.js test</title>
+<pre id="result">running</pre>
+<script type="module">
+import { Tessera } from "../tessera.js";
+
+const lines = [];
+function check(name, condition, detail) {
+  lines.push(`${condition ? "PASS" : "FAIL"} ${name}${condition ? "" : ": " + JSON.stringify(detail)}`);
+}
+const deep = (n) => `fn down(n: Int) -> Int {\nif n == 0 {\nreturn 0\n}\n1 + down(n - 1)\n}\n\nfn main() -> Unit uses io {\nprint("\\(down(${n}))")\n}\n`;
+
+try {
+  const tessera = await Tessera.load();
+  const hello = 'fn main() -> Unit uses io {\nprint("hello \\(6 * 7)")\n}\n';
+
+  let r = tessera.run(hello);
+  check("text program", r.exitCode === 0 && r.stdout === "hello 42\n" && r.stderr === "", r);
+
+  const tree = tessera.ast(hello);
+  check("ast", tree.tessera_ast === 1 && tree.items[0].kind === "fn", tree);
+  r = tessera.run(tree);
+  check("tree program", r.exitCode === 0 && r.stdout === "hello 42\n", r);
+  r = tessera.run(JSON.stringify(tree));
+  check("tree as JSON text", r.exitCode === 0 && r.stdout === "hello 42\n", r);
+  check("render", tessera.render(tree) === hello, tessera.render(tree));
+
+  r = tessera.run('fn main() -> Unit uses io {\nlet big = 9223372036854775807\nprint("\\(big + 1)")\n}\n');
+  check("runtime error", r.exitCode === 70 && r.stderr === "runtime error R002: integer overflow: 9223372036854775807 + 1\n  at main.tes:3:14 in function `main`\n" && r.stdout === "", r);
+
+  r = tessera.run('fn main() -> Unit uses io {\nprint(1)\n}\n');
+  check("compile error", r.exitCode === 1 && r.diagnostics.length === 1 && r.diagnostics[0].code === "E0501", r);
+  check("check", tessera.check('fn main() -> Unit uses io {\nprint(1)\n}\n')[0].code === "E0501" && tessera.check(hello).length === 0, null);
+
+  r = tessera.run('fn main() -> Unit uses io, fs {\nprint(read_file("x"))\n}\n');
+  check("effect refused", r.exitCode === 1 && r.diagnostics.length === 1 && r.diagnostics[0].code === "E0707", r);
+
+  r = tessera.run('fn main() -> Unit uses io {\nwhile true {\nlet line = read_line() else break\nprint(to_upper(line))\n}\n}\n', { stdin: "ab\ncd\n" });
+  check("standard input", r.exitCode === 0 && r.stdout === "AB\nCD\n", r);
+
+  r = tessera.run('fn main() -> Unit uses io, env {\nlet a = args()\nif length(a) != 2 {\nexit_with(3, "two arguments")\n}\nprint(join(a, "+"))\n}\n', { args: ["x", "y"] });
+  check("arguments", r.exitCode === 0 && r.stdout === "x+y\n", r);
+  r = tessera.run('fn main() -> Unit uses io, env {\nexit_with(3, "two arguments")\n}\n');
+  check("exit_with", r.exitCode === 3 && r.stderr === "two arguments\n", r);
+
+  r = tessera.run('import std/json\n\nfn main() -> Unit uses io {\nlet doc = json.parse("{\\"a\\": [1, 2.5]}") else return\nprint(json.encode(doc))\n}\n');
+  check("standard module", r.exitCode === 0 && r.stdout === '{"a":[1,2.5]}\n', r);
+
+  r = tessera.run('import shapes\n\nfn main() -> Unit uses io {\nprint("\\(shapes.area(3))")\n}\n', { modules: { "shapes.tes": "pub fn area(side: Int) -> Int = side * side\n" } });
+  check("own module", r.exitCode === 0 && r.stdout === "9\n", r);
+
+  r = tessera.run('fn main() -> Unit uses io, time, random, log {\nlet t = now()\nlet n = random_int(1, 7)\nlog("info", "rolled")\nprint("\\(t > 1700000000000) \\(n >= 1 and n < 7) \\(length(random_bytes(16)))")\n}\n');
+  check("time, random and log", r.exitCode === 0 && r.stdout === "true true 16\n" && r.stderr === "[info] rolled\n", r);
+
+  const streamed = [];
+  r = tessera.run('fn main() -> Unit uses io {\nprint("a")\nprint_error("b")\n}\n', { onStdout: (s) => streamed.push("out:" + s), onStderr: (s) => streamed.push("err:" + s) });
+  check("streaming", streamed.join("|") === "out:a\n|err:b\n", streamed);
+
+  check("format", tessera.format('fn main() -> Unit uses io {\n    print( "x" )\n}\n') === 'fn main() -> Unit uses io {\nprint("x")\n}\n', null);
+  check("grammar", tessera.grammar("gbnf").includes("root"), null);
+
+  r = tessera.run(deep(1900));
+  check("recursion within the limit", r.exitCode === 0 && r.stdout === "1900\n", r);
+  r = tessera.run(deep(5000));
+  check("recursion limit", r.exitCode === 70 && r.stderr.startsWith("runtime error R013"), r);
+  r = tessera.run(deep(30000), { env: { TESSERA_INTERPRET_DEPTH: "40000" } });
+  check("stack overflow is contained", r.exitCode !== 0, r);
+  r = tessera.run(hello);
+  check("usable after a trap", r.exitCode === 0 && r.stdout === "hello 42\n", r);
+
+  const t0 = performance.now();
+  r = tessera.run('fn fib(n: Int) -> Int = if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n\nfn main() -> Unit uses io {\nprint("\\(fib(20))")\n}\n');
+  check("fib(20)", r.stdout === "6765\n", r);
+  lines.push(`TIME fib(20) ${Math.round(performance.now() - t0)} ms`);
+} catch (error) {
+  lines.push(`FAIL exception: ${error && error.stack ? error.stack : error}`);
+}
+document.getElementById("result").textContent = lines.join("\n") + "\nDONE";
+</script>

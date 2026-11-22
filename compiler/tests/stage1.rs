@@ -209,6 +209,7 @@ fn embedded_runtime_is_up_to_date() {
         .arg(format!("crypto_runtime={}", root().join("runtime/crypto.rs").display()))
         .arg(format!("tls_runtime={}", root().join("runtime/tls.rs").display()))
         .arg(format!("adapter_runtime={}", root().join("runtime/adapter.rs").display()))
+        .arg(format!("wasm_runtime={}", root().join("runtime/wasm.rs").display()))
         .arg(format!("grammar_gbnf={}", root().join("grammar/tessera.gbnf").display()))
         .args(&std_modules)
         .output()

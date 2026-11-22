@@ -180,6 +180,8 @@ fn tw_dec_parse(text: Rc<String>) -> Option<TDecimal> {
 // ===========================================================================
 
 fn tw_now_ms() -> i64 {
+    #[cfg(target_arch = "wasm32")]
+    return crate::wasm_now().floor() as i64;
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
         Err(e) => {
@@ -191,11 +193,16 @@ fn tw_now_ms() -> i64 {
 }
 static TW_MONO_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 fn tw_monotonic_ms() -> i64 {
+    #[cfg(target_arch = "wasm32")]
+    return crate::wasm_monotonic().floor() as i64;
     let start = TW_MONO_START.get_or_init(std::time::Instant::now);
     i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 fn tw_sleep_ms(ms: i64, loc: &str) {
     if ms < 0 { t_fail("R004", format!("sleep: {} milliseconds is negative", ms), loc) }
+    // WebAssembly cannot block: wait on the host's clock (run scripts in a Web Worker to keep a page responsive).
+    #[cfg(target_arch = "wasm32")]
+    { let end = crate::wasm_monotonic() + ms as f64; while crate::wasm_monotonic() < end {} return; }
     std::thread::sleep(std::time::Duration::from_millis(ms as u64));
 }
 
@@ -395,7 +402,9 @@ fn tw_chacha_fill(out: &mut [u8]) {
 fn tw_os_random(buf: &mut [u8]) -> bool {
     match std::fs::File::open("/dev/urandom") { Ok(mut f) => f.read_exact(buf).is_ok(), Err(_) => false }
 }
-#[cfg(not(unix))]
+#[cfg(target_arch = "wasm32")]
+fn tw_os_random(buf: &mut [u8]) -> bool { crate::wasm_random(buf); true }
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
 fn tw_os_random(_buf: &mut [u8]) -> bool { false }
 fn tw_fill_random(buf: &mut [u8]) {
     if buf.is_empty() { return; }

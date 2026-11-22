@@ -13,9 +13,28 @@ fn t_fail(code: &str, message: String, location: &str) -> ! {
     std::panic::panic_any(TFailure { code: code.to_string(), message, location: location.to_string() })
 }
 fn t_report_failure(f: &TFailure) {
+    #[cfg(target_arch = "wasm32")]
+    { crate::wasm_write(2, format!("runtime error {}: {}\n  at {}\n", f.code, f.message, f.location).as_bytes()); return; }
     let _ = std::io::stdout().flush();
     eprintln!("runtime error {}: {}\n  at {}", f.code, f.message, f.location);
 }
+// In WebAssembly a panic aborts (a trap), so the hook itself reports the end of the run to the host.
+#[cfg(target_arch = "wasm32")]
+fn t_install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        if let Some(failure) = payload.downcast_ref::<TFailure>() {
+            t_report_failure(failure);
+            let _ = crate::wasm_put("exit", b"70");
+        } else if let Some(exit) = payload.downcast_ref::<TExit>() {
+            let _ = crate::wasm_put("exit", exit.code.to_string().as_bytes());
+        } else {
+            crate::wasm_write(2, format!("runtime error R000: internal error: {}\n", info).as_bytes());
+            let _ = crate::wasm_put("exit", b"70");
+        }
+    }));
+}
+#[cfg(not(target_arch = "wasm32"))]
 fn t_install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -193,12 +212,16 @@ fn t_value_or<T>(option: Option<T>, default: T) -> T { match option { Some(v) =>
 fn t_iter<T: Clone>(l: Rc<Vec<T>>) -> impl Iterator<Item = T> { (0..l.len()).map(move |i| l[i].clone()) }
 
 fn t_print(t: Rc<String>) {
+    #[cfg(target_arch = "wasm32")]
+    { crate::wasm_write(1, format!("{}\n", t).as_bytes()); return; }
     let out = std::io::stdout();
     let mut lock = out.lock();
     let _ = lock.write_all(t.as_bytes());
     let _ = lock.write_all(b"\n");
 }
 fn t_print_error(t: Rc<String>) {
+    #[cfg(target_arch = "wasm32")]
+    { crate::wasm_write(2, format!("{}\n", t).as_bytes()); return; }
     let _ = std::io::stdout().flush();
     let err = std::io::stderr();
     let mut lock = err.lock();
@@ -206,17 +229,34 @@ fn t_print_error(t: Rc<String>) {
     let _ = lock.write_all(b"\n");
 }
 fn t_read_file(path: Rc<String>, loc: &str) -> Rc<String> {
+    #[cfg(target_arch = "wasm32")]
+    match t_wasm_read(&path) {
+        Ok(bytes) => match String::from_utf8(bytes) { Ok(s) => return Rc::new(s), Err(_) => t_fail("R006", format!("cannot read file `{}`: stream did not contain valid UTF-8", path), loc) },
+        Err(e) => t_fail("R006", format!("cannot read file `{}`: {}", path, e), loc),
+    }
     match std::fs::read_to_string(t_check_path(&path, loc)) {
         Ok(s) => Rc::new(s),
         Err(e) => t_fail("R006", format!("cannot read file `{}`: {}", path, e), loc),
     }
 }
 fn t_write_file(path: Rc<String>, content: Rc<String>, loc: &str) {
+    #[cfg(target_arch = "wasm32")]
+    { if let Err(e) = t_wasm_write(&path, content.as_bytes()) { t_fail("R007", format!("cannot write file `{}`: {}", path, e), loc) } return; }
     if let Err(e) = std::fs::write(t_check_path(&path, loc), content.as_bytes()) {
         t_fail("R007", format!("cannot write file `{}`: {}", path, e), loc)
     }
 }
 fn t_args(loc: &str) -> Rc<Vec<Rc<String>>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let joined = crate::wasm_get("args").unwrap_or_default();
+        if joined.is_empty() { return Rc::new(Vec::new()); }
+        let mut out = Vec::new();
+        for part in joined.split(|&b| b == 0) {
+            match String::from_utf8(part.to_vec()) { Ok(s) => out.push(Rc::new(s)), Err(_) => t_fail("R008", "a command-line argument is not valid UTF-8".to_string(), loc) }
+        }
+        return Rc::new(out);
+    }
     let mut out = Vec::new();
     for a in std::env::args_os().skip(1) {
         match a.into_string() {
@@ -234,12 +274,20 @@ fn t_exit(code: i64, loc: &str) -> ! {
 fn t_exit_with(code: i64, message: Rc<String>, loc: &str) -> ! {
     if !(0..=255).contains(&code) { t_fail("R009", format!("exit code {} is outside 0..255", code), loc) }
     let _ = std::io::stdout().flush();
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_write(2, format!("{}\n", message).as_bytes());
+    #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{}", message);
     std::panic::panic_any(TExit { code: code as i32 })
 }
 fn t_user_fail(message: Rc<String>, loc: &str) -> ! { t_fail("R010", message.to_string(), loc) }
+#[cfg(target_arch = "wasm32")]
+fn t_file_exists(path: Rc<String>) -> bool { crate::wasm_get(&format!("file/{}", path)).is_some() }
+#[cfg(not(target_arch = "wasm32"))]
 fn t_file_exists(path: Rc<String>) -> bool { t_check_path(&path, "file_exists").is_file() }
 fn t_environment_variable(name: Rc<String>) -> Rc<String> {
+    #[cfg(target_arch = "wasm32")]
+    return Rc::new(crate::wasm_get(&format!("env/{}", name)).and_then(|v| String::from_utf8(v).ok()).unwrap_or_default());
     match std::env::var(name.as_str()) { Ok(v) => Rc::new(v), Err(_) => Rc::new(String::new()) }
 }
 fn t_run_process(program: Rc<String>, arguments: Rc<Vec<Rc<String>>>) -> i64 {
@@ -258,6 +306,27 @@ fn t_rgb(red: i64, green: i64, blue: i64, loc: &str) -> i64 {
     (red << 16) | (green << 8) | blue
 }
 
+// WebAssembly: the files of the host. Missing files are NotFound, refused writes PermissionDenied.
+#[cfg(target_arch = "wasm32")]
+fn t_wasm_read(path: &str) -> std::io::Result<Vec<u8>> {
+    crate::wasm_get(&format!("file/{}", path)).ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+#[cfg(target_arch = "wasm32")]
+fn t_wasm_write(path: &str, data: &[u8]) -> std::io::Result<()> {
+    if crate::wasm_put(&format!("file/{}", path), data) { Ok(()) } else { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) }
+}
+// The stack size `tessera1 build --wasm` links with; R013 is raised before it is used up.
+#[cfg(target_arch = "wasm32")]
+const T_WASM_STACK: usize = 64 * 1024 * 1024;
+// WebAssembly has no threads: `main` runs on the caller's stack, and a runtime error or `exit`
+// ends in a trap after the panic hook has told the host the exit code.
+#[cfg(target_arch = "wasm32")]
+fn t_run(entry: fn()) {
+    t_install_panic_hook();
+    t_limits_begin(T_WASM_STACK, 0, 0);
+    entry();
+}
+#[cfg(not(target_arch = "wasm32"))]
 fn t_run(entry: fn()) {
     t_install_panic_hook();
     let stack = 512 * 1024 * 1024;

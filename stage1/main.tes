@@ -10,11 +10,12 @@ import printer uses nothing
 import astjson uses nothing
 import edit uses nothing
 import grammar uses nothing
+import interp uses io, env, time, random, log
 import std/json uses nothing
 import runtime_text uses nothing
 
 fn usage() -> Text {
-join(["Tessera stage 1 compiler (written in Tessera)", "", "Usage:", "  tessera1 check <files...> [--json]           Check for errors without generating code", "  tessera1 build <files...> -o <output>        Compile to a native executable", "        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)", "        [--library]                             A web application as a shared library for the", "                                                nginx, Apache and IIS modules (see hosts/README.md)", "  tessera1 test <files...>                     Run the `test` declarations of the entry module", "  tessera1 format <files...> [--check]         Rewrite files in their canonical form", "  tessera1 ast <file.tes>                      Write the syntax tree as JSON (spec section 20.1)", "  tessera1 render <file.json> [-o <file.tes>]  Write the canonical text of a JSON syntax tree", "  tessera1 fix <files...> [--dry-run] [--json] Apply the fixes the diagnostics carry (spec section 20.4)", "  tessera1 grammar [--format <f>] [--depth N]  Export the grammar (spec section 20.3): `gbnf` (the", "                                                text), `ast-schema` (JSON trees; `--depth N` unrolls", "                                                it for decoders without recursion), `edit-schema`", "  tessera1 edit <files...> --ops <ops.json>    Apply edit operations (spec section 20.2); the", "        [--op <json>] [--dry-run] [--json]      program is checked before any file is written", "  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code", "  tessera1 notes <files...>                    Export notes as JSON", "", "Every command that reads source files also accepts a JSON syntax tree (`.json`).", "The first file is the entry module (with `main`, or `handle` for a web application);", "imported modules are found relative to its directory; `std/...` modules are built in.", "A web application built as an executable runs as CGI, `app serve --port N`,", "`app fastcgi --port N` or `app request GET /path`.", "Further files given on the command line are part of the entry module.", "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.", "On Windows an output name without an extension is written with `.exe` added.", "Set TESSERA_RUSTC to choose the rustc binary."], "\n")
+join(["Tessera stage 1 compiler (written in Tessera)", "", "Usage:", "  tessera1 check <files...> [--json]           Check for errors without generating code", "  tessera1 build <files...> -o <output>        Compile to a native executable", "        [--opt 0|1|2|3]                         (the generated Rust is kept as <output>.rs)", "        [--library]                             A web application as a shared library for the", "                                                nginx, Apache and IIS modules (see hosts/README.md)", "        [--wasm]                                A WebAssembly module for browser/tessera.js (spec", "                                                section 21.3; needs the wasm32-unknown-unknown target)", "  tessera1 test <files...>                     Run the `test` declarations of the entry module", "  tessera1 interpret <files...> [-- <args>]    Run `main` without compiling it (spec section 21);", "                                                the effects io, env, time, random and log", "  tessera1 format <files...> [--check]         Rewrite files in their canonical form", "  tessera1 ast <file.tes>                      Write the syntax tree as JSON (spec section 20.1)", "  tessera1 render <file.json> [-o <file.tes>]  Write the canonical text of a JSON syntax tree", "  tessera1 fix <files...> [--dry-run] [--json] Apply the fixes the diagnostics carry (spec section 20.4)", "  tessera1 grammar [--format <f>] [--depth N]  Export the grammar (spec section 20.3): `gbnf` (the", "                                                text), `ast-schema` (JSON trees; `--depth N` unrolls", "                                                it for decoders without recursion), `edit-schema`", "  tessera1 edit <files...> --ops <ops.json>    Apply edit operations (spec section 20.2); the", "        [--op <json>] [--dry-run] [--json]      program is checked before any file is written", "  tessera1 emit-rust <files...> [-o <file.rs>] Write the generated Rust code", "  tessera1 notes <files...>                    Export notes as JSON", "", "Every command that reads source files also accepts a JSON syntax tree (`.json`).", "The first file is the entry module (with `main`, or `handle` for a web application);", "imported modules are found relative to its directory; `std/...` modules are built in.", "A web application built as an executable runs as CGI, `app serve --port N`,", "`app fastcgi --port N` or `app request GET /path`.", "Further files given on the command line are part of the entry module.", "Exit codes: 0 ok, 1 compile errors, 2 usage error, 3 Rust backend failure.", "On Windows an output name without an extension is written with `.exe` added.", "Set TESSERA_RUSTC to choose the rustc binary."], "\n")
 }
 
 type Options {
@@ -24,12 +25,14 @@ output: Text
 json: Bool
 opt: Text
 library: Bool
+wasm: Bool
 check: Bool
 ops: Text
 op: Text
 dry_run: Bool
 format: Text
 depth: Int
+program_args: List[Text]
 }
 
 fn value_after(arguments: List[Text], index: Int) -> Result[Text, Text] {
@@ -44,7 +47,7 @@ fn parse_options(arguments: List[Text]) -> Result[Options, Text] {
 if length(arguments) == 0 {
 return .Error("missing command")
 }
-var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, check: false, ops: "", op: "", dry_run: false, format: "gbnf", depth: 0 }
+var options = Options { command: arguments[0], files: [], output: "", json: false, opt: "2", library: false, wasm: false, check: false, ops: "", op: "", dry_run: false, format: "gbnf", depth: 0, program_args: [] }
 if options.command == "help" or options.command == "--help" {
 return .Ok(options)
 }
@@ -67,6 +70,9 @@ set index += 1
 } else if argument == "--library" {
 set options = options with { library: true }
 set index += 1
+} else if argument == "--wasm" {
+set options = options with { wasm: true }
+set index += 1
 } else if argument == "--check" {
 set options = options with { check: true }
 set index += 1
@@ -87,6 +93,9 @@ return .Error("`--depth` needs a number from 1 to 64, found `\(depth_text)`")
 }
 set options = options with { depth: depth }
 set index += 2
+} else if argument == "--" {
+set options = options with { program_args: slice(arguments, index + 1, length(arguments)) }
+set index = length(arguments)
 } else if argument == "--dry-run" {
 set options = options with { dry_run: true }
 set index += 1
@@ -775,7 +784,40 @@ let home = if environment_variable("HOME") != "" { environment_variable("HOME") 
 run_process("\(to_slashes(home))/.cargo/bin/rustc", arguments)
 }
 
-fn main() -> Unit uses io, fs, env, process {
+note "The effects `interpret` offers; the WebAssembly build of the compiler offers the same in a browser."
+fn interpreter_effects() -> List[Text] = ["io", "env", "time", "random", "log"]
+
+note "Runs a checked program with the interpreter (spec section 21). `main` declares every effect the program uses, so its `uses` clause decides whether the program can run."
+fn run_interpreter(frontend: Frontend, options: Options) -> Int uses io, env, time, random, log {
+var problems: List[source.Diagnostic] = []
+var found = false
+for item in frontend.program.items {
+match item {
+.FunctionItem(f) => if f.name == "main" {
+set found = true
+for effect in f.effects {
+if not source.contains_text(interpreter_effects(), effect.name) {
+set problems += [source.error_help("E0707", effect.span, "`interpret` cannot run a program that uses `\(effect.name)`", "the interpreter, also in the browser, offers only the effects io, env, time, random and log: remove `\(effect.name)` from `main` and the functions that need it, or compile the program with `tessera1 build`")]
+}
+}
+}
+_ => {}
+}
+}
+if not found {
+print_error("error: `interpret` needs an entry file with `fn main() -> Unit`; a web application (`handle`) cannot be interpreted")
+return 2
+}
+if length(problems) > 0 {
+report_diagnostics(problems, frontend.files, options.json, "; the program was not run")
+return 1
+}
+// The WebAssembly host sets a lower limit to fit its smaller stack.
+let depth = value_or(parse_int(environment_variable("TESSERA_INTERPRET_DEPTH")), 100000)
+interp.run(frontend.program, paths_of(frontend.files), options.program_args, depth)
+}
+
+fn main() -> Unit uses io, fs, env, process, time, random, log {
 let windows = on_windows()
 let options = match parse_options(args()) {
 .Ok(parsed) => parsed
@@ -799,7 +841,7 @@ exit(2)
 }
 }
 let command = options.command
-if not source.contains_text(["check", "build", "emit-rust", "notes", "test", "format", "ast", "render", "edit", "fix", "grammar"], command) {
+if not source.contains_text(["check", "build", "emit-rust", "notes", "test", "format", "ast", "render", "edit", "fix", "grammar", "interpret"], command) {
 print_error("error: unknown command `\(command)`")
 exit(2)
 }
@@ -834,6 +876,9 @@ if length(frontend.diagnostics) > 0 {
 report_diagnostics(frontend.diagnostics, files, options.json, "; no code was generated")
 exit(1)
 }
+if command == "interpret" {
+exit(run_interpreter(frontend, options))
+}
 if command == "notes" {
 print(without_final_newline(notes_json(frontend.program.items, files)))
 exit(0)
@@ -857,7 +902,11 @@ if options.library and frontend.program.entry != "handle" {
 print_error("error: `--library` needs a web application: an entry file with `fn handle(request: http.Request) -> http.Response`")
 exit(2)
 }
-let mode = if options.library { "library" } else { "program" }
+if options.wasm and (options.library or frontend.program.entry != "main") {
+print_error("error: `--wasm` needs a program with `fn main() -> Unit` and cannot be combined with `--library`")
+exit(2)
+}
+let mode = if options.library { "library" } else if options.wasm { "wasm" } else { "program" }
 let rust = codegen.generate(frontend.program, paths_of(files), runtime, mode)
 if command == "emit-rust" {
 if options.output == "" { print(without_final_newline(rust)) } else { write_file(options.output, rust) }
@@ -866,6 +915,19 @@ exit(0)
 if options.output == "" {
 print_error("error: `build` needs `-o <output>`")
 exit(2)
+}
+if options.wasm {
+let directory = "\(options.output).build"
+let _ = create_directory(directory)
+write_file("\(directory)/app.rs", rust)
+write_file("\(directory)/wasm.rs", runtime_text.wasm_runtime())
+let wasm_options = options with { opt: if options.opt == "2" { "s" } else { options.opt } }
+let wasm_status = run_rustc(wasm_options, ["--target", "wasm32-unknown-unknown", "--crate-type", "cdylib", "-C", "link-arg=-zstack-size=67108864"], options.output, "\(directory)/wasm.rs")
+if wasm_status != 0 {
+print_error("error: the WebAssembly module did not compile (status \(wasm_status)); is the target installed? Run `rustup target add wasm32-unknown-unknown`")
+exit(3)
+}
+exit(0)
 }
 if options.library {
 let directory = "\(options.output).build"

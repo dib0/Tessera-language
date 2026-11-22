@@ -43,7 +43,31 @@ fn t_lines(t: &Rc<String>) -> Rc<Vec<Rc<String>>> {
 }
 
 // Standard input
+// WebAssembly: standard input is the host's "stdin" value, read once and consumed line by line.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static T_WASM_INPUT: std::cell::RefCell<Option<(Vec<u8>, usize)>> = std::cell::RefCell::new(None);
+}
+#[cfg(target_arch = "wasm32")]
+fn t_wasm_input(all: bool) -> Option<Vec<u8>> {
+    T_WASM_INPUT.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let (data, at) = state.get_or_insert_with(|| (crate::wasm_get("stdin").unwrap_or_default(), 0));
+        if *at >= data.len() { return if all { Some(Vec::new()) } else { None }; }
+        let end = if all { data.len() } else { data[*at..].iter().position(|&b| b == b'\n').map(|i| *at + i + 1).unwrap_or(data.len()) };
+        let piece = data[*at..end].to_vec();
+        *at = end;
+        Some(piece)
+    })
+}
 fn t_read_line(loc: &str) -> Option<Rc<String>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut line = t_wasm_input(false)?;
+        if line.last() == Some(&b'\n') { line.pop(); }
+        if line.last() == Some(&b'\r') { line.pop(); }
+        return match String::from_utf8(line) { Ok(s) => Some(Rc::new(s)), Err(_) => t_fail("R008", "standard input is not valid UTF-8".to_string(), loc) };
+    }
     let _ = std::io::stdout().flush();
     let mut buffer = Vec::new();
     let mut input = std::io::stdin().lock();
@@ -61,6 +85,8 @@ fn t_read_line(loc: &str) -> Option<Rc<String>> {
     }
 }
 fn t_read_input(loc: &str) -> Rc<String> {
+    #[cfg(target_arch = "wasm32")]
+    return match String::from_utf8(t_wasm_input(true).unwrap_or_default()) { Ok(s) => Rc::new(s), Err(_) => t_fail("R008", "standard input is not valid UTF-8".to_string(), loc) };
     let _ = std::io::stdout().flush();
     let mut buffer = Vec::new();
     if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buffer) {
@@ -81,8 +107,21 @@ fn t_file_error(e: std::io::Error) -> Rc<T_FileError> {
         _ => T_FileError::V_Other(Rc::new(e.to_string())),
     })
 }
+// The file system: the host's files in WebAssembly, the real one elsewhere.
+fn t_fs_read(path: &str, loc: &str) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    return t_wasm_read(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::fs::read(t_check_path(path, loc));
+}
+fn t_fs_write(path: &str, data: &[u8], loc: &str) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    return t_wasm_write(path, data);
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::fs::write(t_check_path(path, loc), data);
+}
 fn t_read_text(path: Rc<String>, loc: &str) -> Result<Rc<String>, Rc<T_FileError>> {
-    match std::fs::read(t_check_path(&path, loc)) {
+    match t_fs_read(&path, loc) {
         Ok(bytes) => {
             t_charge(bytes.len());
             match String::from_utf8(bytes) {
@@ -94,16 +133,16 @@ fn t_read_text(path: Rc<String>, loc: &str) -> Result<Rc<String>, Rc<T_FileError
     }
 }
 fn t_write_text(path: Rc<String>, content: Rc<String>, loc: &str) -> Result<(), Rc<T_FileError>> {
-    std::fs::write(t_check_path(&path, loc), content.as_bytes()).map_err(t_file_error)
+    t_fs_write(&path, content.as_bytes(), loc).map_err(t_file_error)
 }
 fn t_read_bytes(path: Rc<String>, loc: &str) -> Result<Rc<Vec<u8>>, Rc<T_FileError>> {
-    match std::fs::read(t_check_path(&path, loc)) {
+    match t_fs_read(&path, loc) {
         Ok(bytes) => { t_charge(bytes.len()); Ok(Rc::new(bytes)) }
         Err(e) => Err(t_file_error(e)),
     }
 }
 fn t_write_bytes(path: Rc<String>, data: Rc<Vec<u8>>, loc: &str) -> Result<(), Rc<T_FileError>> {
-    std::fs::write(t_check_path(&path, loc), data.as_slice()).map_err(t_file_error)
+    t_fs_write(&path, data.as_slice(), loc).map_err(t_file_error)
 }
 fn t_list_directory(path: Rc<String>, loc: &str) -> Result<Rc<Vec<Rc<String>>>, Rc<T_FileError>> {
     let entries = std::fs::read_dir(t_check_path(&path, loc)).map_err(t_file_error)?;
@@ -116,6 +155,9 @@ fn t_list_directory(path: Rc<String>, loc: &str) -> Result<Rc<Vec<Rc<String>>>, 
     Ok(Rc::new(names))
 }
 fn t_create_directory(path: Rc<String>, loc: &str) -> Result<(), Rc<T_FileError>> {
+    // The host's files have no directories of their own: a path is just a name.
+    #[cfg(target_arch = "wasm32")]
+    return Ok(());
     std::fs::create_dir_all(t_check_path(&path, loc)).map_err(t_file_error)
 }
 fn t_remove_file(path: Rc<String>, loc: &str) -> Result<(), Rc<T_FileError>> {
@@ -124,6 +166,8 @@ fn t_remove_file(path: Rc<String>, loc: &str) -> Result<(), Rc<T_FileError>> {
 
 // Logging: standard error, which hosts route to their error log.
 fn t_log(level: Rc<String>, message: Rc<String>) {
+    #[cfg(target_arch = "wasm32")]
+    { crate::wasm_write(2, format!("[{}] {}\n", level, message).as_bytes()); return; }
     let _ = std::io::stdout().flush();
     eprintln!("[{}] {}", level, message);
 }

@@ -1,0 +1,1596 @@
+// Interpreter for checked programs (spec section 21). It runs `main` straight from the typed syntax
+// tree, without generating Rust, so that the compiler built for WebAssembly can run programs in a
+// browser; `tessera1 interpret` runs the same code natively. Built-in functions are called directly,
+// so their results are the compiled ones by construction. Every runtime error a built-in or an
+// operator can raise is checked here first, so that it carries the program's location and not the
+// interpreter's.
+
+import source uses nothing
+import ast uses nothing
+import checker uses nothing
+
+note "A value at run time. `Option` and `Result` are `VariantV` with the type name `Option` or `Result`; a record keeps its fields in declaration order; a map is keyed by `Int` or by `Text`; a function value is the canonical name of a function, or `#` and the name of a built-in."
+enum Value {
+IntV(value: Int)
+BoolV(value: Bool)
+TextV(value: Text)
+UnitV
+ListV(items: List[Value])
+IntMapV(entries: Map[Int, Value])
+TextMapV(entries: Map[Text, Value])
+BytesV(value: Bytes)
+DecimalV(value: Decimal)
+FloatV(value: Float)
+RecordV(type_name: Text, fields: List[Value])
+VariantV(type_name: Text, variant: Text, args: List[Value])
+FunctionV(name: Text)
+}
+
+note "How evaluation continues. `Return` carries its value in `Ev.value`; `Failed` is a runtime error with its location; `Exit` ends the program with a code."
+enum Flow {
+Normal
+Return
+Break
+Continue
+Failed(code: Text, message: Text, location: Text)
+Exit(code: Int)
+}
+
+type Program {
+functions: Map[Text, ast.Function]
+types: Map[Text, checker.TypeDef]
+paths: List[Text]
+arguments: List[Text]
+max_depth: Int
+}
+
+type Ctx {
+function_name: Text
+depth: Int
+}
+
+note "The variables of one function call. There is no shadowing (E0204), so a name is in it at most once; a later `let` of the same name in a sibling block reuses its slot."
+type Frame {
+names: List[Text]
+values: List[Value]
+}
+
+type Ev {
+frame: Frame
+value: Value
+flow: Flow
+}
+
+type Evs {
+frame: Frame
+values: List[Value]
+flow: Flow
+}
+
+type Failure {
+code: Text
+message: Text
+}
+
+type PlaceError {
+code: Text
+message: Text
+span: source.Span
+}
+
+type Step {
+field: Text
+index: Int
+span: source.Span
+}
+
+note "Runs `main` of a checked program and returns the exit code: 0, the code given to `exit`, or 70 after a runtime error, which is reported on standard error as a compiled program does. `max_depth` limits nested calls (R013)."
+pub fn run(program: checker.CheckedProgram, paths: List[Text], arguments: List[Text], max_depth: Int) -> Int uses io, env, time, random, log {
+var functions: Map[Text, ast.Function] = [:]
+for item in program.items {
+match item {
+.FunctionItem(f) => set functions = put(functions, f.name, f)
+_ => {}
+}
+}
+var types: Map[Text, checker.TypeDef] = [:]
+for def in program.type_defs {
+set types = put(types, def.name, def)
+}
+let p = Program { functions: functions, types: types, paths: paths, arguments: arguments, max_depth: max_depth }
+let main = get(functions, "main") else return 0
+let empty: List[Value] = []
+let result = call_function(p, Ctx { function_name: "", depth: 0 }, Frame { names: [], values: [] }, main, empty)
+match result.flow {
+.Failed(code, message, location) => {
+print_error("runtime error \(code): \(message)\n  at \(location)")
+70
+}
+.Exit(code) => code
+_ => 0
+}
+}
+
+// ---------- helpers ----------
+
+fn done(frame: Frame, value: Value) -> Ev = Ev { frame: frame, value: value, flow: .Normal }
+
+fn stop(frame: Frame, flow: Flow) -> Ev = Ev { frame: frame, value: .UnitV, flow: flow }
+
+fn location(p: Program, ctx: Ctx, span: source.Span) -> Text = "\(p.paths[span.file]):\(span.line):\(span.col) in function `\(ctx.function_name)`"
+
+fn failed_at(p: Program, ctx: Ctx, frame: Frame, span: source.Span, failure: Failure) -> Ev = stop(frame, .Failed(failure.code, failure.message, location(p, ctx, span)))
+
+fn problem(code: Text, message: Text) -> Failure = Failure { code: code, message: message }
+
+fn slot_of(frame: Frame, name: Text) -> Int {
+var index = length(frame.names) - 1
+while index >= 0 {
+if frame.names[index] == name {
+return index
+}
+set index -= 1
+}
+-1
+}
+
+fn lookup(frame: Frame, name: Text) -> Value {
+let index = slot_of(frame, name)
+if index < 0 {
+return .UnitV
+}
+frame.values[index]
+}
+
+fn bind(frame: Frame, name: Text, value: Value) -> Frame {
+var out = frame
+if name == "_" {
+return out
+}
+let index = slot_of(out, name)
+if index < 0 {
+set out.names += [name]
+set out.values += [value]
+} else {
+set out.values[index] = value
+}
+out
+}
+
+fn int_of(v: Value) -> Int {
+match v {
+.IntV(n) => n
+_ => 0
+}
+}
+
+fn bool_of(v: Value) -> Bool {
+match v {
+.BoolV(b) => b
+_ => false
+}
+}
+
+fn text_of(v: Value) -> Text {
+match v {
+.TextV(t) => t
+_ => ""
+}
+}
+
+fn list_of(v: Value) -> List[Value] {
+let empty: List[Value] = []
+match v {
+.ListV(items) => items
+_ => empty
+}
+}
+
+fn bytes_of(v: Value) -> Bytes {
+match v {
+.BytesV(b) => b
+_ => bytes([])
+}
+}
+
+fn decimal_of(v: Value) -> Decimal {
+match v {
+.DecimalV(d) => d
+_ => decimal(0)
+}
+}
+
+fn float_of(v: Value) -> Float {
+match v {
+.FloatV(x) => x
+_ => float(0)
+}
+}
+
+fn function_name_of(v: Value) -> Text {
+match v {
+.FunctionV(name) => name
+_ => ""
+}
+}
+
+fn some(v: Value) -> Value = .VariantV("Option", "Some", [v])
+
+fn none() -> Value {
+let empty: List[Value] = []
+.VariantV("Option", "None", empty)
+}
+
+fn option_int(o: Option[Int]) -> Value {
+match o {
+.Some(n) => some(.IntV(n))
+.None => none()
+}
+}
+
+fn option_text(o: Option[Text]) -> Value {
+match o {
+.Some(t) => some(.TextV(t))
+.None => none()
+}
+}
+
+fn option_bytes(o: Option[Bytes]) -> Value {
+match o {
+.Some(b) => some(.BytesV(b))
+.None => none()
+}
+}
+
+fn option_decimal(o: Option[Decimal]) -> Value {
+match o {
+.Some(d) => some(.DecimalV(d))
+.None => none()
+}
+}
+
+fn option_float(o: Option[Float]) -> Value {
+match o {
+.Some(x) => some(.FloatV(x))
+.None => none()
+}
+}
+
+fn option_value(o: Option[Value]) -> Value {
+match o {
+.Some(v) => some(v)
+.None => none()
+}
+}
+
+fn int_list(values: List[Int]) -> List[Value] {
+var out: List[Value] = []
+for n in values {
+set out += [Value.IntV(n)]
+}
+out
+}
+
+fn text_list(texts: List[Text]) -> List[Value] {
+var out: List[Value] = []
+for t in texts {
+set out += [Value.TextV(t)]
+}
+out
+}
+
+fn texts_of(v: Value) -> List[Text] {
+var out: List[Text] = []
+for item in list_of(v) {
+set out += [text_of(item)]
+}
+out
+}
+
+fn ints_of(v: Value) -> List[Int] {
+var out: List[Int] = []
+for item in list_of(v) {
+set out += [int_of(item)]
+}
+out
+}
+
+fn floats_of(v: Value) -> List[Float] {
+var out: List[Float] = []
+for item in list_of(v) {
+set out += [float_of(item)]
+}
+out
+}
+
+fn field_index(p: Program, type_name: Text, name: Text) -> Int {
+let def = get(p.types, type_name) else return -1
+for index in range(0, length(def.fields)) {
+if def.fields[index].name == name {
+return index
+}
+}
+-1
+}
+
+fn field_of(p: Program, record: Value, name: Text) -> Value {
+match record {
+.RecordV(type_name, fields) => {
+let index = field_index(p, type_name, name)
+if index < 0 { Value.UnitV } else { fields[index] }
+}
+_ => .UnitV
+}
+}
+
+note "The text of a value as Rust's `{:?}` writes a text: quoted, with escapes for quotes, backslashes and control characters."
+fn debug_quoted(text: Text) -> Text {
+var out = "\""
+for code in code_points(text) {
+let piece = match code {
+0 => "\\0"
+9 => "\\t"
+10 => "\\n"
+13 => "\\r"
+34 => "\\\""
+92 => "\\\\"
+_ => if code < 32 or code == 127 { "\\u{\(hex_digits(code))}" } else { from_code_point(code) }
+}
+set out += piece
+}
+"\(out)\""
+}
+
+fn hex_digits(value: Int) -> Text {
+let digits = split("0123456789abcdef", "")
+if value < 16 {
+return digits[value]
+}
+"\(hex_digits(value / 16))\(digits[value % 16])"
+}
+
+// ---------- integers ----------
+
+fn max_int() -> Int = 9223372036854775807
+
+fn min_int() -> Int = -9223372036854775807 - 1
+
+fn int_add(a: Int, b: Int) -> Result[Value, Failure] {
+if (b > 0 and a > max_int() - b) or (b < 0 and a < min_int() - b) {
+return .Error(problem("R002", "integer overflow: \(a) + \(b)"))
+}
+.Ok(.IntV(a + b))
+}
+
+fn int_sub(a: Int, b: Int) -> Result[Value, Failure] {
+if (b < 0 and a > max_int() + b) or (b > 0 and a < min_int() + b) {
+return .Error(problem("R002", "integer overflow: \(a) - \(b)"))
+}
+.Ok(.IntV(a - b))
+}
+
+fn int_mul_overflows(a: Int, b: Int) -> Bool {
+if a == 0 or b == 0 {
+return false
+}
+if a > 0 {
+return if b > 0 { a > max_int() / b } else { b < min_int() / a }
+}
+if b > 0 { a < min_int() / b } else { b < max_int() / a }
+}
+
+fn int_mul(a: Int, b: Int) -> Result[Value, Failure] {
+if int_mul_overflows(a, b) {
+return .Error(problem("R002", "integer overflow: \(a) * \(b)"))
+}
+.Ok(.IntV(a * b))
+}
+
+fn int_div(a: Int, b: Int) -> Result[Value, Failure] {
+if b == 0 {
+return .Error(problem("R003", "division by zero: \(a) / 0"))
+}
+if a == min_int() and b == -1 {
+return .Error(problem("R002", "integer overflow: \(a) / \(b)"))
+}
+.Ok(.IntV(a / b))
+}
+
+fn int_rem(a: Int, b: Int) -> Result[Value, Failure] {
+if b == 0 {
+return .Error(problem("R003", "remainder by zero: \(a) % 0"))
+}
+if a == min_int() and b == -1 {
+return .Error(problem("R002", "integer overflow: \(a) % \(b)"))
+}
+.Ok(.IntV(a % b))
+}
+
+// ---------- floats ----------
+
+note "The largest Float, (2 - 2^-52) * 2^1023; a literal must stay below 10^308."
+fn float_max() -> Float = (2.0 - 2.220446049250313e-16) * 8.98846567431158e307
+
+fn abs_float(x: Float) -> Float = if x < 0.0 { -x } else { x }
+
+note "Halving both sides cannot overflow and is exact, and the halved sum rounds as the full sum does, so the sum overflows exactly when the halved sum exceeds half the largest Float."
+fn float_add(a: Float, b: Float, minus: Bool) -> Result[Value, Failure] {
+let other = if minus { -b } else { b }
+let half = a / 2.0 + other / 2.0
+if abs_float(half) > float_max() / 2.0 {
+let symbol = if minus { "-" } else { "+" }
+return .Error(problem("R002", "float overflow: \(a) \(symbol) \(b)"))
+}
+.Ok(.FloatV(a + other))
+}
+
+note "Below 1 in size a factor cannot make the product overflow. Otherwise both factors are scaled by 2^-512 (exact), so the product is computed 2^1024 smaller, rounding the same way; it overflows exactly when that scaled product reaches 1."
+fn float_mul(a: Float, b: Float) -> Result[Value, Failure] {
+let scale: Float = 7.458340731200207e-155
+if abs_float(a) > 1.0 and abs_float(b) > 1.0 {
+let scaled = a * scale * (b * scale)
+if abs_float(scaled) >= 1.0 {
+return .Error(problem("R002", "float overflow: \(a) * \(b)"))
+}
+}
+.Ok(.FloatV(a * b))
+}
+
+note "Division by at least 1 in size cannot overflow. Otherwise the quotient is computed 2^1023 smaller (normal divisor) or 2^1022 smaller (subnormal divisor) from exactly scaled operands."
+fn float_div(a: Float, b: Float) -> Result[Value, Failure] {
+if b == 0.0 {
+return .Error(problem("R003", "division by zero: \(a) / \(b)"))
+}
+let size = abs_float(b)
+if size < 1.0 {
+let two_1022: Float = 4.49423283715579e307
+let smallest_normal: Float = 2.2250738585072014e-308
+var overflow = false
+if size >= smallest_normal {
+set overflow = abs_float(a / 2.0 / (b * two_1022)) >= 2.0
+} else if abs_float(a) >= 1e-290 {
+let two_52: Float = 4503599627370496.0
+let two_minus_52: Float = 2.220446049250313e-16
+set overflow = abs_float(a * two_minus_52 / (b * two_1022 * two_52)) >= 4.0
+}
+if overflow {
+return .Error(problem("R002", "float overflow: \(a) / \(b)"))
+}
+}
+.Ok(.FloatV(a / b))
+}
+
+fn float_to_int(a: Float) -> Result[Value, Failure] {
+if a >= 9.223372036854775808e18 or a < -9.223372036854775808e18 {
+return .Error(problem("R002", "\(a) does not fit in Int"))
+}
+.Ok(.IntV(to_int(a)))
+}
+
+fn float_pow(a: Float, b: Float) -> Result[Value, Failure] {
+if a < 0.0 and floor(b) != b {
+return .Error(problem("R021", "pow(\(a), \(b)) has no real result"))
+}
+if a == 0.0 and b < 0.0 {
+return .Error(problem("R002", "float overflow: pow(\(a), \(b))"))
+}
+if a != 0.0 and ln(abs_float(a)) * b > 709.782712893384 {
+return .Error(problem("R002", "float overflow: pow(\(a), \(b))"))
+}
+.Ok(.FloatV(pow(a, b)))
+}
+
+// ---------- decimals ----------
+
+fn decimal_max() -> Decimal = value_or(parse_decimal("170141183460469231731687303715.884105727"), decimal(0))
+
+fn decimal_min() -> Decimal = -decimal_max() - value_or(parse_decimal("0.000000001"), decimal(0))
+
+fn abs_decimal(d: Decimal) -> Decimal {
+if d == decimal_min() {
+return decimal_max()
+}
+if d < decimal(0) { -d } else { d }
+}
+
+fn decimal_add(a: Decimal, b: Decimal, minus: Bool) -> Result[Value, Failure] {
+let zero = decimal(0)
+let symbol = if minus { "-" } else { "+" }
+let overflow = if minus { (b < zero and a > decimal_max() + b) or (b > zero and a < decimal_min() + b) } else { (b > zero and a > decimal_max() - b) or (b < zero and a < decimal_min() - b) }
+if overflow {
+return .Error(problem("R002", "decimal overflow: \(a) \(symbol) \(b)"))
+}
+.Ok(.DecimalV(if minus { a - b } else { a + b }))
+}
+
+fn decimal_mul(a: Decimal, b: Decimal) -> Result[Value, Failure] {
+let size = abs_decimal(b)
+if size >= decimal(1) and abs_decimal(a) > decimal_max() / size {
+return .Error(problem("R002", "decimal overflow: \(a) * \(b)"))
+}
+.Ok(.DecimalV(a * b))
+}
+
+fn decimal_div(a: Decimal, b: Decimal) -> Result[Value, Failure] {
+if b == decimal(0) {
+return .Error(problem("R003", "division by zero: \(a) / 0"))
+}
+let size = abs_decimal(b)
+if size < decimal(1) and abs_decimal(a) > decimal_max() * size {
+return .Error(problem("R002", "decimal overflow: \(a) / \(b)"))
+}
+.Ok(.DecimalV(a / b))
+}
+
+// ---------- operators ----------
+
+fn negate(v: Value) -> Result[Value, Failure] {
+match v {
+.IntV(n) => if n == min_int() { Result.Error(problem("R002", "integer overflow: -(\(n))")) } else { Result.Ok(Value.IntV(-n)) }
+.DecimalV(d) => if d == decimal_min() { Result.Error(problem("R002", "decimal overflow: -(\(d))")) } else { Result.Ok(Value.DecimalV(-d)) }
+.FloatV(x) => .Ok(.FloatV(-x))
+_ => .Ok(v)
+}
+}
+
+note "Order of two numbers (or texts, by code points): -1, 0 or 1. Floats compare as numbers, so -0.0 equals 0.0."
+fn compare(a: Value, b: Value) -> Int {
+match a {
+.IntV(x) => {
+let y = int_of(b)
+if x < y { -1 } else if x > y { 1 } else { 0 }
+}
+.DecimalV(x) => {
+let y = decimal_of(b)
+if x < y { -1 } else if x > y { 1 } else { 0 }
+}
+.FloatV(x) => {
+let y = float_of(b)
+if x < y { -1 } else if x > y { 1 } else { 0 }
+}
+.TextV(x) => {
+let y = text_of(b)
+if x == y { 0 } else if sort([x, y])[0] == x { -1 } else { 1 }
+}
+_ => 0
+}
+}
+
+note "The order `sort` and `sort_by` use: as `compare`, but -0.0 comes before 0.0 (Rust's `total_cmp`)."
+fn sort_order(a: Value, b: Value) -> Int {
+let order = compare(a, b)
+if order != 0 {
+return order
+}
+match a {
+.FloatV(x) => {
+let left_negative = to_text(x) == "-0.0"
+let right_negative = to_text(float_of(b)) == "-0.0"
+if left_negative and not right_negative { -1 } else if right_negative and not left_negative { 1 } else { 0 }
+}
+_ => 0
+}
+}
+
+fn binary(op: ast.BinaryOp, a: Value, b: Value) -> Result[Value, Failure] {
+match op {
+.Equal => .Ok(.BoolV(a == b))
+.NotEqual => .Ok(.BoolV(a != b))
+.Less => .Ok(.BoolV(compare(a, b) < 0))
+.LessEqual => .Ok(.BoolV(compare(a, b) <= 0))
+.Greater => .Ok(.BoolV(compare(a, b) > 0))
+.GreaterEqual => .Ok(.BoolV(compare(a, b) >= 0))
+.Add => add(a, b)
+.Subtract => match a {
+.DecimalV(x) => decimal_add(x, decimal_of(b), true)
+.FloatV(x) => float_add(x, float_of(b), true)
+_ => int_sub(int_of(a), int_of(b))
+}
+.Multiply => match a {
+.DecimalV(x) => decimal_mul(x, decimal_of(b))
+.FloatV(x) => float_mul(x, float_of(b))
+_ => int_mul(int_of(a), int_of(b))
+}
+.Divide => match a {
+.DecimalV(x) => decimal_div(x, decimal_of(b))
+.FloatV(x) => float_div(x, float_of(b))
+_ => int_div(int_of(a), int_of(b))
+}
+.Remainder => int_rem(int_of(a), int_of(b))
+.And => .Ok(.BoolV(bool_of(a) and bool_of(b)))
+.Or => .Ok(.BoolV(bool_of(a) or bool_of(b)))
+}
+}
+
+fn add(a: Value, b: Value) -> Result[Value, Failure] {
+match a {
+.IntV(x) => int_add(x, int_of(b))
+.TextV(x) => .Ok(.TextV(x + text_of(b)))
+.ListV(x) => .Ok(.ListV(x + list_of(b)))
+.BytesV(x) => .Ok(.BytesV(x + bytes_of(b)))
+.DecimalV(x) => decimal_add(x, decimal_of(b), false)
+.FloatV(x) => float_add(x, float_of(b), false)
+_ => .Ok(a)
+}
+}
+
+// ---------- expressions ----------
+
+fn eval_all(p: Program, ctx: Ctx, frame: Frame, exprs: List[ast.Expr]) -> Evs uses io, env, time, random, log {
+var current = frame
+var values: List[Value] = []
+for e in exprs {
+let r = eval(p, ctx, current, e)
+if r.flow != .Normal {
+return Evs { frame: r.frame, values: values, flow: r.flow }
+}
+set current = r.frame
+set values += [r.value]
+}
+Evs { frame: current, values: values, flow: .Normal }
+}
+
+fn eval(p: Program, ctx: Ctx, frame: Frame, e: ast.Expr) -> Ev uses io, env, time, random, log {
+match e.kind {
+.IntLiteral(n) => done(frame, .IntV(n))
+.BoolLiteral(b) => done(frame, .BoolV(b))
+.TextLiteral(t) => done(frame, .TextV(t))
+.UnitLiteral => done(frame, .UnitV)
+.Name(name) => done(frame, lookup(frame, name))
+.ListLiteral(items) => {
+let all = eval_all(p, ctx, frame, items)
+if all.flow != .Normal {
+return stop(all.frame, all.flow)
+}
+done(all.frame, .ListV(all.values))
+}
+.Call(name, _, args) => {
+let all = eval_all(p, ctx, frame, args)
+if all.flow != .Normal {
+return stop(all.frame, all.flow)
+}
+call(p, ctx, all.frame, name, all.values, e.span)
+}
+.Index(target, index) => eval_index(p, ctx, frame, target, index, e.span)
+.FieldAccess(target, name, _) => {
+let t = eval(p, ctx, frame, target)
+if t.flow != .Normal {
+return t
+}
+done(t.frame, field_of(p, t.value, name))
+}
+.Unary(op, operand) => {
+let o = eval(p, ctx, frame, operand)
+if o.flow != .Normal {
+return o
+}
+if op == .Not {
+return done(o.frame, .BoolV(not bool_of(o.value)))
+}
+match negate(o.value) {
+.Ok(v) => done(o.frame, v)
+.Error(f) => failed_at(p, ctx, o.frame, e.span, f)
+}
+}
+.Binary(op, op_span, left, right) => eval_binary(p, ctx, frame, op, op_span, left, right)
+.If(condition, then_block, else_branch) => {
+let c = eval(p, ctx, frame, condition)
+if c.flow != .Normal {
+return c
+}
+if bool_of(c.value) {
+return eval_block(p, ctx, c.frame, then_block)
+}
+match else_branch {
+.Some(other) => eval(p, ctx, c.frame, other)
+.None => done(c.frame, .UnitV)
+}
+}
+.BlockExpr(block) => eval_block(p, ctx, frame, block)
+.Match(scrutinee, arms) => eval_match(p, ctx, frame, scrutinee, arms)
+.RecordLiteral(type_name, _, inits) => {
+var current = frame
+var names: List[Text] = []
+var values: List[Value] = []
+for init in inits {
+let v = eval(p, ctx, current, init.value)
+if v.flow != .Normal {
+return v
+}
+set current = v.frame
+set names += [init.name]
+set values += [v.value]
+}
+done(current, .RecordV(type_name, in_declared_order(p, type_name, names, values)))
+}
+.RecordUpdate(target, changes) => {
+let t = eval(p, ctx, frame, target)
+if t.flow != .Normal {
+return t
+}
+var current = t.frame
+var record = t.value
+for change in changes {
+let v = eval(p, ctx, current, change.value)
+if v.flow != .Normal {
+return v
+}
+set current = v.frame
+set record = with_field(p, record, change.name, v.value)
+}
+done(current, record)
+}
+.Try(operand) => {
+let o = eval(p, ctx, frame, operand)
+if o.flow != .Normal {
+return o
+}
+match o.value {
+.VariantV(_, variant, values) => if variant == "Some" or variant == "Ok" { done(o.frame, values[0]) } else { Ev { frame: o.frame, value: o.value, flow: .Return } }
+_ => o
+}
+}
+.VariantLiteral(type_name, variant, _, args) => {
+let all = eval_all(p, ctx, frame, args)
+if all.flow != .Normal {
+return stop(all.frame, all.flow)
+}
+done(all.frame, .VariantV(type_name, variant, all.values))
+}
+.Return(value) => match value {
+.Some(returned) => {
+let r = eval(p, ctx, frame, returned)
+if r.flow != .Normal {
+return r
+}
+Ev { frame: r.frame, value: r.value, flow: .Return }
+}
+.None => Ev { frame: frame, value: .UnitV, flow: .Return }
+}
+.Break => stop(frame, .Break)
+.Continue => stop(frame, .Continue)
+.DecimalLiteral(digits) => if e.ty == .Float { done(frame, .FloatV(value_or(parse_float(digits), float(0)))) } else { done(frame, .DecimalV(value_or(parse_decimal(digits), decimal(0)))) }
+.MapLiteral(keys, values) => eval_map(p, ctx, frame, keys, values, e.ty)
+.FunctionRef(name) => done(frame, .FunctionV(name))
+.CallValue(callee, args) => {
+let f = eval(p, ctx, frame, callee)
+if f.flow != .Normal {
+return f
+}
+let all = eval_all(p, ctx, f.frame, args)
+if all.flow != .Normal {
+return stop(all.frame, all.flow)
+}
+call(p, ctx, all.frame, function_name_of(f.value), all.values, e.span)
+}
+.OrElse(value, otherwise) => {
+let v = eval(p, ctx, frame, value)
+if v.flow != .Normal {
+return v
+}
+match v.value {
+.VariantV(_, variant, values) => if variant == "Some" or variant == "Ok" { done(v.frame, values[0]) } else { eval(p, ctx, v.frame, otherwise) }
+_ => v
+}
+}
+}
+}
+
+fn eval_binary(p: Program, ctx: Ctx, frame: Frame, op: ast.BinaryOp, op_span: source.Span, left: ast.Expr, right: ast.Expr) -> Ev uses io, env, time, random, log {
+let l = eval(p, ctx, frame, left)
+if l.flow != .Normal {
+return l
+}
+if op == .And {
+if not bool_of(l.value) {
+return done(l.frame, .BoolV(false))
+}
+return eval(p, ctx, l.frame, right)
+}
+if op == .Or {
+if bool_of(l.value) {
+return done(l.frame, .BoolV(true))
+}
+return eval(p, ctx, l.frame, right)
+}
+let r = eval(p, ctx, l.frame, right)
+if r.flow != .Normal {
+return r
+}
+match binary(op, l.value, r.value) {
+.Ok(v) => done(r.frame, v)
+.Error(f) => failed_at(p, ctx, r.frame, op_span, f)
+}
+}
+
+fn eval_index(p: Program, ctx: Ctx, frame: Frame, target: ast.Expr, index: ast.Expr, span: source.Span) -> Ev uses io, env, time, random, log {
+let t = eval(p, ctx, frame, target)
+if t.flow != .Normal {
+return t
+}
+let i = eval(p, ctx, t.frame, index)
+if i.flow != .Normal {
+return i
+}
+let n = int_of(i.value)
+match t.value {
+.BytesV(b) => {
+if n < 0 or n >= length(b) {
+return failed_at(p, ctx, i.frame, span, problem("R001", "index \(n) is out of bounds for bytes of length \(length(b))"))
+}
+done(i.frame, .IntV(b[n]))
+}
+_ => {
+let items = list_of(t.value)
+if n < 0 or n >= length(items) {
+return failed_at(p, ctx, i.frame, span, problem("R001", "list index \(n) is out of bounds for a list of length \(length(items))"))
+}
+done(i.frame, items[n])
+}
+}
+}
+
+fn eval_map(p: Program, ctx: Ctx, frame: Frame, keys: List[ast.Expr], values: List[ast.Expr], ty: ast.Type) -> Ev uses io, env, time, random, log {
+let k = eval_all(p, ctx, frame, keys)
+if k.flow != .Normal {
+return stop(k.frame, k.flow)
+}
+let v = eval_all(p, ctx, k.frame, values)
+if v.flow != .Normal {
+return stop(v.frame, v.flow)
+}
+let int_keys = match ty {
+.Map(key, _) => key == .Int
+_ => false
+}
+var ints: Map[Int, Value] = [:]
+var texts: Map[Text, Value] = [:]
+for index in range(0, length(k.values)) {
+match k.values[index] {
+.IntV(n) => set ints = put(ints, n, v.values[index])
+.TextV(t) => set texts = put(texts, t, v.values[index])
+_ => {}
+}
+}
+done(v.frame, if int_keys { Value.IntMapV(ints) } else { Value.TextMapV(texts) })
+}
+
+fn in_declared_order(p: Program, type_name: Text, names: List[Text], values: List[Value]) -> List[Value] {
+let def = get(p.types, type_name) else return values
+var out: List[Value] = []
+for field in def.fields {
+match index_of(names, field.name) {
+.Some(index) => set out += [values[index]]
+.None => set out += [Value.UnitV]
+}
+}
+out
+}
+
+fn with_field(p: Program, record: Value, name: Text, value: Value) -> Value {
+match record {
+.RecordV(type_name, fields) => {
+let index = field_index(p, type_name, name)
+if index < 0 {
+return record
+}
+var changed = fields
+set changed[index] = value
+.RecordV(type_name, changed)
+}
+_ => record
+}
+}
+
+// ---------- statements ----------
+
+fn eval_block(p: Program, ctx: Ctx, frame: Frame, block: ast.Block) -> Ev uses io, env, time, random, log {
+var current = frame
+for statement in block.statements {
+let r = exec(p, ctx, current, statement)
+if r.flow != .Normal {
+return r
+}
+set current = r.frame
+}
+match block.tail {
+.Some(tail) => eval(p, ctx, current, tail)
+.None => done(current, .UnitV)
+}
+}
+
+fn exec(p: Program, ctx: Ctx, frame: Frame, statement: ast.Statement) -> Ev uses io, env, time, random, log {
+match statement {
+.Let(name, _, _, value, _) => {
+let v = eval(p, ctx, frame, value)
+if v.flow != .Normal {
+return v
+}
+done(bind(v.frame, name, v.value), .UnitV)
+}
+.Set(name, _, value) => {
+let v = eval(p, ctx, frame, value)
+if v.flow != .Normal {
+return v
+}
+done(bind(v.frame, name, v.value), .UnitV)
+}
+.SetPlace(target, value) => set_place(p, ctx, frame, target, value)
+.For(variable, _, iterable, body) => {
+let it = eval(p, ctx, frame, iterable)
+if it.flow != .Normal {
+return it
+}
+var current = it.frame
+for item in list_of(it.value) {
+let r = eval_block(p, ctx, bind(current, variable, item), body)
+match r.flow {
+.Normal => set current = r.frame
+.Continue => set current = r.frame
+.Break => return done(r.frame, .UnitV)
+_ => return r
+}
+}
+done(current, .UnitV)
+}
+.While(condition, body) => {
+var current = frame
+while true {
+let c = eval(p, ctx, current, condition)
+if c.flow != .Normal {
+return c
+}
+if not bool_of(c.value) {
+return done(c.frame, .UnitV)
+}
+let r = eval_block(p, ctx, c.frame, body)
+match r.flow {
+.Normal => set current = r.frame
+.Continue => set current = r.frame
+.Break => return done(r.frame, .UnitV)
+_ => return r
+}
+}
+done(current, .UnitV)
+}
+.ExprStatement(expr) => {
+let v = eval(p, ctx, frame, expr)
+if v.flow != .Normal {
+return v
+}
+done(v.frame, .UnitV)
+}
+}
+}
+
+fn place_root_name(target: ast.Expr) -> Text {
+match target.kind {
+.Name(name) => name
+.FieldAccess(inner, _, _) => place_root_name(inner)
+.Index(inner, _) => place_root_name(inner)
+_ => ""
+}
+}
+
+note "The field and index steps of a place, from the variable outwards."
+fn place_chain(target: ast.Expr) -> List[ast.Expr] {
+let empty: List[ast.Expr] = []
+match target.kind {
+.FieldAccess(inner, _, _) => place_chain(inner) + [target]
+.Index(inner, _) => place_chain(inner) + [target]
+_ => empty
+}
+}
+
+note "`set place = value` as compiled code does it: the indexes from left to right, then the value, then the checked write."
+fn set_place(p: Program, ctx: Ctx, frame: Frame, target: ast.Expr, value: ast.Expr) -> Ev uses io, env, time, random, log {
+var current = frame
+var steps: List[Step] = []
+for link in place_chain(target) {
+match link.kind {
+.FieldAccess(_, field, _) => set steps += [Step { field: field, index: 0, span: link.span }]
+.Index(_, index_expr) => {
+let i = eval(p, ctx, current, index_expr)
+if i.flow != .Normal {
+return i
+}
+set current = i.frame
+set steps += [Step { field: "", index: int_of(i.value), span: link.span }]
+}
+_ => {}
+}
+}
+let v = eval(p, ctx, current, value)
+if v.flow != .Normal {
+return v
+}
+let root = place_root_name(target)
+match write_place(p, lookup(v.frame, root), steps, 0, v.value) {
+.Ok(updated) => done(bind(v.frame, root, updated), .UnitV)
+.Error(e) => failed_at(p, ctx, v.frame, e.span, problem(e.code, e.message))
+}
+}
+
+fn write_place(p: Program, container: Value, steps: List[Step], at: Int, value: Value) -> Result[Value, PlaceError] {
+if at == length(steps) {
+return .Ok(value)
+}
+let step = steps[at]
+match container {
+.RecordV(type_name, fields) => {
+let index = field_index(p, type_name, step.field)
+if index < 0 {
+return .Ok(container)
+}
+let inner = try write_place(p, fields[index], steps, at + 1, value)
+var changed = fields
+set changed[index] = inner
+.Ok(.RecordV(type_name, changed))
+}
+.BytesV(b) => {
+if step.index < 0 or step.index >= length(b) {
+return .Error(PlaceError { code: "R001", message: "index \(step.index) is out of bounds for bytes of length \(length(b))", span: step.span })
+}
+let byte = int_of(value)
+if byte < 0 or byte > 255 {
+return .Error(PlaceError { code: "R018", message: "byte value \(byte) is outside 0..255", span: step.span })
+}
+var changed = b
+set changed[step.index] = byte
+.Ok(.BytesV(changed))
+}
+.ListV(items) => {
+if step.index < 0 or step.index >= length(items) {
+return .Error(PlaceError { code: "R001", message: "list index \(step.index) is out of bounds for a list of length \(length(items))", span: step.span })
+}
+let inner = try write_place(p, items[step.index], steps, at + 1, value)
+var changed = items
+set changed[step.index] = inner
+.Ok(.ListV(changed))
+}
+_ => .Ok(container)
+}
+}
+
+fn eval_match(p: Program, ctx: Ctx, frame: Frame, scrutinee: ast.Expr, arms: List[ast.Arm]) -> Ev uses io, env, time, random, log {
+let s = eval(p, ctx, frame, scrutinee)
+if s.flow != .Normal {
+return s
+}
+for arm in arms {
+if pattern_fits(s.value, arm.pattern) {
+return eval(p, ctx, bind_pattern(s.frame, s.value, arm.pattern), arm.body)
+}
+}
+failed_at(p, ctx, s.frame, scrutinee.span, problem("R000", "no arm of the `match` fits; this is a bug in the interpreter"))
+}
+
+fn pattern_fits(v: Value, pattern: ast.Pattern) -> Bool {
+match pattern.kind {
+.Wildcard => true
+.IntPattern(n) => v == .IntV(n)
+.TextPattern(t) => v == .TextV(t)
+.BoolPattern(b) => v == .BoolV(b)
+.VariantPattern(_, variant, _) => match v {
+.VariantV(_, name, _) => name == variant
+_ => false
+}
+}
+}
+
+fn bind_pattern(frame: Frame, v: Value, pattern: ast.Pattern) -> Frame {
+var out = frame
+match pattern.kind {
+.VariantPattern(_, _, bindings) => match v {
+.VariantV(_, _, args) => for index in range(0, length(bindings)) {
+if index < length(args) {
+set out = bind(out, bindings[index].name, args[index])
+}
+}
+_ => {}
+}
+_ => {}
+}
+out
+}
+
+// ---------- calls ----------
+
+fn call(p: Program, ctx: Ctx, frame: Frame, name: Text, args: List[Value], span: source.Span) -> Ev uses io, env, time, random, log {
+match get(p.functions, name) {
+.Some(f) => call_function(p, ctx, frame, f, args)
+.None => {
+let builtin_name = if starts_with(name, "#") { slice_text(name, 1, length(name)) } else { name }
+call_builtin(p, ctx, frame, builtin_name, args, span)
+}
+}
+}
+
+fn call_function(p: Program, ctx: Ctx, frame: Frame, f: ast.Function, args: List[Value]) -> Ev uses io, env, time, random, log {
+let inner = Ctx { function_name: f.name, depth: ctx.depth + 1 }
+if inner.depth > p.max_depth {
+return failed_at(p, inner, frame, f.name_span, problem("R013", "recursion is too deep: the stack is full"))
+}
+var names: List[Text] = []
+for param in f.params {
+set names += [param.name]
+}
+let body = eval(p, inner, Frame { names: names, values: args }, f.body)
+match body.flow {
+.Failed(_, _, _) => stop(frame, body.flow)
+.Exit(_) => stop(frame, body.flow)
+_ => done(frame, body.value)
+}
+}
+
+fn call_builtin(p: Program, ctx: Ctx, frame: Frame, name: Text, args: List[Value], span: source.Span) -> Ev uses io, env, time, random, log {
+if name == "map" or name == "filter" {
+var out: List[Value] = []
+let function = function_name_of(args[1])
+for item in list_of(args[0]) {
+let r = call(p, ctx, frame, function, [item], span)
+if r.flow != .Normal {
+return r
+}
+if name == "map" {
+set out += [r.value]
+} else if bool_of(r.value) {
+set out += [item]
+}
+}
+return done(frame, .ListV(out))
+}
+if name == "sort_by" {
+let items = list_of(args[0])
+var keys: List[Value] = []
+for item in items {
+let r = call(p, ctx, frame, function_name_of(args[1]), [item], span)
+if r.flow != .Normal {
+return r
+}
+set keys += [r.value]
+}
+var sorted: List[Value] = []
+for index in sorted_positions(keys) {
+set sorted += [items[index]]
+}
+return done(frame, .ListV(sorted))
+}
+if name == "exit" or name == "exit_with" {
+let code = int_of(args[0])
+if code < 0 or code > 255 {
+return failed_at(p, ctx, frame, span, problem("R009", "exit code \(code) is outside 0..255"))
+}
+if name == "exit_with" {
+print_error(text_of(args[1]))
+}
+return stop(frame, .Exit(code))
+}
+match builtin(p, name, args) {
+.Ok(v) => done(frame, v)
+.Error(f) => failed_at(p, ctx, frame, span, f)
+}
+}
+
+note "The positions of `keys` in stable ascending order (merge sort)."
+fn sorted_positions(keys: List[Value]) -> List[Int] {
+var positions = range(0, length(keys))
+var width = 1
+let count = length(keys)
+while width < count {
+var merged: List[Int] = []
+var start = 0
+while start < count {
+let middle = if start + width < count { start + width } else { count }
+let finish = if start + 2 * width < count { start + 2 * width } else { count }
+var i = start
+var j = middle
+while i < middle or j < finish {
+if j >= finish or (i < middle and sort_order(keys[positions[i]], keys[positions[j]]) <= 0) {
+set merged += [positions[i]]
+set i += 1
+} else {
+set merged += [positions[j]]
+set j += 1
+}
+}
+set start += 2 * width
+}
+set positions = merged
+set width = width * 2
+}
+positions
+}
+
+// ---------- built-in functions ----------
+
+fn value_text(v: Value) -> Text {
+match v {
+.IntV(n) => to_text(n)
+.BoolV(b) => to_text(b)
+.TextV(t) => t
+.DecimalV(d) => to_text(d)
+.FloatV(x) => to_text(x)
+_ => ""
+}
+}
+
+fn length_of(v: Value) -> Int {
+match v {
+.TextV(t) => length(t)
+.ListV(items) => length(items)
+.IntMapV(m) => length(m)
+.TextMapV(m) => length(m)
+.BytesV(b) => length(b)
+_ => 0
+}
+}
+
+fn slice_value(v: Value, start: Int, finish: Int) -> Result[Value, Failure] {
+let count = length_of(v)
+if start < 0 or finish < start or finish > count {
+return .Error(problem("R004", "invalid slice \(start)..\(finish) of a list of length \(count)"))
+}
+match v {
+.BytesV(b) => .Ok(.BytesV(slice(b, start, finish)))
+_ => .Ok(.ListV(slice(list_of(v), start, finish)))
+}
+}
+
+fn sort_value(v: Value) -> Value {
+let items = list_of(v)
+if length(items) == 0 {
+return v
+}
+match items[0] {
+.IntV(_) => .ListV(int_list(sort(ints_of(v))))
+.TextV(_) => .ListV(text_list(sort(texts_of(v))))
+.FloatV(_) => {
+var out: List[Value] = []
+for x in sort(floats_of(v)) {
+set out += [Value.FloatV(x)]
+}
+.ListV(out)
+}
+_ => {
+var out: List[Value] = []
+for index in sorted_positions(items) {
+set out += [items[index]]
+}
+.ListV(out)
+}
+}
+}
+
+fn index_of_value(a: Value, b: Value) -> Value {
+match a {
+.TextV(t) => option_int(index_of(t, text_of(b)))
+_ => option_int(index_of(list_of(a), b))
+}
+}
+
+fn contains_value(a: Value, b: Value) -> Bool {
+match a {
+.TextV(t) => contains(t, text_of(b))
+.IntMapV(m) => contains(m, int_of(b))
+.TextMapV(m) => contains(m, text_of(b))
+_ => contains(list_of(a), b)
+}
+}
+
+fn map_get(m: Value, key: Value) -> Value {
+match m {
+.IntMapV(entries) => option_value(get(entries, int_of(key)))
+.TextMapV(entries) => option_value(get(entries, text_of(key)))
+_ => none()
+}
+}
+
+fn map_put(m: Value, key: Value, v: Value) -> Value {
+match m {
+.IntMapV(entries) => .IntMapV(put(entries, int_of(key), v))
+.TextMapV(entries) => .TextMapV(put(entries, text_of(key), v))
+_ => m
+}
+}
+
+fn map_remove(m: Value, key: Value) -> Value {
+match m {
+.IntMapV(entries) => .IntMapV(remove(entries, int_of(key)))
+.TextMapV(entries) => .TextMapV(remove(entries, text_of(key)))
+_ => m
+}
+}
+
+fn map_keys(m: Value) -> Value {
+match m {
+.IntMapV(entries) => .ListV(int_list(keys(entries)))
+.TextMapV(entries) => .ListV(text_list(keys(entries)))
+_ => m
+}
+}
+
+fn map_values(m: Value) -> Value {
+match m {
+.IntMapV(entries) => .ListV(values(entries))
+.TextMapV(entries) => .ListV(values(entries))
+_ => m
+}
+}
+
+fn valid_code_point(c: Int) -> Bool = c >= 0 and c <= 1114111 and (c < 55296 or c > 57343)
+
+fn code_points_text(codes: List[Int]) -> Result[Value, Failure] {
+for c in codes {
+if not valid_code_point(c) {
+return .Error(problem("R005", "\(c) is not a valid unicode code point"))
+}
+}
+.Ok(.TextV(from_code_points(codes)))
+}
+
+fn pad_text(text: Text, width: Int, fill: Text, left: Bool) -> Result[Value, Failure] {
+if length(fill) != 1 {
+return .Error(problem("R004", "the fill text must be exactly one character, found \(debug_quoted(fill))"))
+}
+.Ok(.TextV(if left { pad_left(text, width, fill) } else { pad_right(text, width, fill) }))
+}
+
+fn repeat_value(v: Value, times: Int) -> Result[Value, Failure] {
+if times < 0 {
+return .Error(problem("R004", "repeat count \(times) is negative"))
+}
+match v {
+.ListV(items) => .Ok(.ListV(repeat(items, times)))
+_ => .Ok(.TextV(repeat(text_of(v), times)))
+}
+}
+
+fn shift_value(a: Int, n: Int, left: Bool) -> Result[Value, Failure] {
+if n < 0 or n > 63 {
+return .Error(problem("R020", "shift amount \(n) is outside 0..63"))
+}
+if not left {
+return .Ok(.IntV(shift_right(a, n)))
+}
+if n > 0 {
+let bound = shift_left(1, 63 - n)
+if a >= bound or a < -bound {
+return .Error(problem("R002", "shift_left(\(a), \(n)) does not fit in Int"))
+}
+}
+.Ok(.IntV(shift_left(a, n)))
+}
+
+fn bytes_value(values: List[Int]) -> Result[Value, Failure] {
+for v in values {
+if v < 0 or v > 255 {
+return .Error(problem("R018", "byte value \(v) is outside 0..255"))
+}
+}
+.Ok(.BytesV(bytes(values)))
+}
+
+fn round_value(v: Value, places: Int) -> Result[Value, Failure] {
+match v {
+.FloatV(x) => {
+if places < 0 or places > 15 {
+return .Error(problem("R004", "round: places \(places) is outside 0..15"))
+}
+.Ok(.FloatV(round(x, places)))
+}
+_ => {
+if places < 0 or places > 9 {
+return .Error(problem("R004", "round: places \(places) is outside 0..9"))
+}
+.Ok(.DecimalV(round(decimal_of(v), places)))
+}
+}
+}
+
+fn to_int_value(v: Value) -> Result[Value, Failure] {
+match v {
+.FloatV(x) => float_to_int(x)
+_ => {
+let d = decimal_of(v)
+if d >= decimal(max_int()) + decimal(1) or d <= decimal(min_int()) - decimal(1) {
+return .Error(problem("R002", "decimal \(d) does not fit in an Int"))
+}
+.Ok(.IntV(to_int(d)))
+}
+}
+}
+
+fn aead_check(name: Text, key: Bytes, nonce: Bytes) -> Option[Failure] {
+if length(key) != 32 {
+return .Some(problem("R004", "\(name): the key must be 32 bytes, not \(length(key))"))
+}
+if length(nonce) != 12 {
+return .Some(problem("R004", "\(name): the nonce must be 12 bytes, not \(length(nonce))"))
+}
+.None
+}
+
+fn rgb_value(red: Int, green: Int, blue: Int) -> Result[Value, Failure] {
+let parts = [red, green, blue]
+let names = ["red", "green", "blue"]
+for index in range(0, 3) {
+if parts[index] < 0 or parts[index] > 255 {
+return .Error(problem("R011", "\(names[index]) component \(parts[index]) is outside 0..255"))
+}
+}
+.Ok(.IntV(rgb(red, green, blue)))
+}
+
+fn argument(args: List[Value], index: Int) -> Value = if index < length(args) { args[index] } else { Value.UnitV }
+
+fn unit_result() -> Result[Value, Failure] = .Ok(.UnitV)
+
+note "The built-in functions without effects or with the effects a script may use. The rest cannot be reached: `interpret` refuses a program whose `main` uses another effect (E0707)."
+fn builtin(p: Program, name: Text, args: List[Value]) -> Result[Value, Failure] uses io, env, time, random, log {
+let a = argument(args, 0)
+let b = argument(args, 1)
+let c = argument(args, 2)
+let d = argument(args, 3)
+match name {
+"print" => {
+print(text_of(a))
+unit_result()
+}
+"print_error" => {
+print_error(text_of(a))
+unit_result()
+}
+"log" => {
+log(text_of(a), text_of(b))
+unit_result()
+}
+"read_line" => .Ok(option_text(read_line()))
+"read_input" => .Ok(.TextV(read_input()))
+"args" => .Ok(.ListV(text_list(p.arguments)))
+"environment_variable" => .Ok(.TextV(environment_variable(text_of(a))))
+"now" => .Ok(.IntV(now()))
+"monotonic" => .Ok(.IntV(monotonic()))
+"sleep" => {
+if int_of(a) < 0 {
+return .Error(problem("R004", "sleep: \(int_of(a)) milliseconds is negative"))
+}
+sleep(int_of(a))
+unit_result()
+}
+"random_int" => {
+if int_of(a) >= int_of(b) {
+return .Error(problem("R004", "random_int: low (\(int_of(a))) must be less than high (\(int_of(b)))"))
+}
+.Ok(.IntV(random_int(int_of(a), int_of(b))))
+}
+"random_bytes" => {
+if int_of(a) < 0 or int_of(a) > 1048576 {
+return .Error(problem("R004", "random_bytes: count \(int_of(a)) is outside 0..1048576"))
+}
+.Ok(.BytesV(random_bytes(int_of(a))))
+}
+"password_hash" => .Ok(.TextV(password_hash(text_of(a))))
+_ => pure_builtin(name, a, b, c, d)
+}
+}
+
+fn pure_builtin(name: Text, a: Value, b: Value, c: Value, d: Value) -> Result[Value, Failure] {
+match name {
+"to_text" => .Ok(.TextV(value_text(a)))
+"length" => .Ok(.IntV(length_of(a)))
+"append" => .Ok(.ListV(list_of(a) + [b]))
+"concat" => .Ok(.ListV(list_of(a) + list_of(b)))
+"slice" => slice_value(a, int_of(b), int_of(c))
+"replace_at" => {
+let items = list_of(a)
+let index = int_of(b)
+if index < 0 or index >= length(items) {
+return .Error(problem("R001", "list index \(index) is out of bounds for a list of length \(length(items))"))
+}
+.Ok(.ListV(replace_at(items, index, c)))
+}
+"value_or" => match a {
+.VariantV(_, variant, values) => .Ok(if variant == "Some" { values[0] } else { b })
+_ => .Ok(b)
+}
+"range" => .Ok(.ListV(int_list(range(int_of(a), int_of(b)))))
+"sort" => .Ok(sort_value(a))
+"index_of" => .Ok(index_of_value(a, b))
+"contains" => .Ok(.BoolV(contains_value(a, b)))
+"get" => .Ok(map_get(a, b))
+"put" => .Ok(map_put(a, b, c))
+"remove" => .Ok(map_remove(a, b))
+"keys" => .Ok(map_keys(a))
+"values" => .Ok(map_values(a))
+"code_points" => .Ok(.ListV(int_list(code_points(text_of(a)))))
+"from_code_point" => code_points_text([int_of(a)])
+"from_code_points" => code_points_text(ints_of(a))
+"join" => .Ok(.TextV(join(texts_of(a), text_of(b))))
+"split" => .Ok(.ListV(text_list(split(text_of(a), text_of(b)))))
+"lines" => .Ok(.ListV(text_list(lines(text_of(a)))))
+"parse_int" => .Ok(option_int(parse_int(text_of(a))))
+"to_lower" => .Ok(.TextV(to_lower(text_of(a))))
+"to_upper" => .Ok(.TextV(to_upper(text_of(a))))
+"trim" => .Ok(.TextV(trim(text_of(a))))
+"starts_with" => .Ok(.BoolV(starts_with(text_of(a), text_of(b))))
+"ends_with" => .Ok(.BoolV(ends_with(text_of(a), text_of(b))))
+"replace" => .Ok(.TextV(replace(text_of(a), text_of(b), text_of(c))))
+"slice_text" => {
+let text = text_of(a)
+let start = int_of(b)
+let finish = int_of(c)
+if start < 0 or finish < start or finish > length(text) {
+return .Error(problem("R004", "invalid slice_text \(start)..\(finish) of a text of length \(length(text))"))
+}
+.Ok(.TextV(slice_text(text, start, finish)))
+}
+"repeat" => repeat_value(a, int_of(b))
+"pad_left" => pad_text(text_of(a), int_of(b), text_of(c), true)
+"pad_right" => pad_text(text_of(a), int_of(b), text_of(c), false)
+"bit_and" => .Ok(.IntV(bit_and(int_of(a), int_of(b))))
+"bit_or" => .Ok(.IntV(bit_or(int_of(a), int_of(b))))
+"bit_xor" => .Ok(.IntV(bit_xor(int_of(a), int_of(b))))
+"shift_left" => shift_value(int_of(a), int_of(b), true)
+"shift_right" => shift_value(int_of(a), int_of(b), false)
+"to_bytes" => .Ok(.BytesV(to_bytes(text_of(a))))
+"from_bytes" => .Ok(option_text(from_bytes(bytes_of(a))))
+"bytes" => bytes_value(ints_of(a))
+"byte_values" => .Ok(.ListV(int_list(byte_values(bytes_of(a)))))
+"decimal" => .Ok(.DecimalV(decimal(int_of(a))))
+"parse_decimal" => .Ok(option_decimal(parse_decimal(text_of(a))))
+"round" => round_value(a, int_of(b))
+"to_int" => to_int_value(a)
+"float" => .Ok(.FloatV(float(int_of(a))))
+"floor" => .Ok(.FloatV(floor(float_of(a))))
+"ceil" => .Ok(.FloatV(ceil(float_of(a))))
+"sqrt" => if float_of(a) < 0.0 { Result.Error(problem("R021", "sqrt(\(float_of(a))) has no real result")) } else { Result.Ok(Value.FloatV(sqrt(float_of(a)))) }
+"ln" => if float_of(a) <= 0.0 { Result.Error(problem("R021", "ln(\(float_of(a))) has no real result")) } else { Result.Ok(Value.FloatV(ln(float_of(a)))) }
+"exp" => if float_of(a) > 709.782712893384 { Result.Error(problem("R002", "float overflow: exp(\(float_of(a)))")) } else { Result.Ok(Value.FloatV(exp(float_of(a)))) }
+"sin" => .Ok(.FloatV(sin(float_of(a))))
+"cos" => .Ok(.FloatV(cos(float_of(a))))
+"tan" => .Ok(.FloatV(tan(float_of(a))))
+"atan2" => .Ok(.FloatV(atan2(float_of(a), float_of(b))))
+"pow" => float_pow(float_of(a), float_of(b))
+"pi" => .Ok(.FloatV(pi()))
+"parse_float" => .Ok(option_float(parse_float(text_of(a))))
+"format_time" => .Ok(.TextV(format_time(int_of(a))))
+"parse_time" => .Ok(option_int(parse_time(text_of(a))))
+"http_date" => .Ok(.TextV(http_date(int_of(a))))
+"sha256" => .Ok(.BytesV(sha256(bytes_of(a))))
+"sha512" => .Ok(.BytesV(sha512(bytes_of(a))))
+"hmac_sha256" => .Ok(.BytesV(hmac_sha256(bytes_of(a), bytes_of(b))))
+"hmac_sha512" => .Ok(.BytesV(hmac_sha512(bytes_of(a), bytes_of(b))))
+"hkdf_sha256" => {
+let size = int_of(d)
+if size < 1 or size > 8160 {
+return .Error(problem("R004", "hkdf_sha256: length \(size) is outside 1..8160"))
+}
+.Ok(.BytesV(hkdf_sha256(bytes_of(a), bytes_of(b), bytes_of(c), size)))
+}
+"aead_seal" => {
+let wrong = aead_check("aead_seal", bytes_of(a), bytes_of(b))
+match wrong {
+.Some(f) => .Error(f)
+.None => .Ok(.BytesV(aead_seal(bytes_of(a), bytes_of(b), bytes_of(c), bytes_of(d))))
+}
+}
+"aead_open" => {
+let wrong = aead_check("aead_open", bytes_of(a), bytes_of(b))
+match wrong {
+.Some(f) => .Error(f)
+.None => .Ok(option_bytes(aead_open(bytes_of(a), bytes_of(b), bytes_of(c), bytes_of(d))))
+}
+}
+"base64_encode" => .Ok(.TextV(base64_encode(bytes_of(a))))
+"base64_decode" => .Ok(option_bytes(base64_decode(text_of(a))))
+"hex_encode" => .Ok(.TextV(hex_encode(bytes_of(a))))
+"hex_decode" => .Ok(option_bytes(hex_decode(text_of(a))))
+"equal_constant_time" => .Ok(.BoolV(equal_constant_time(bytes_of(a), bytes_of(b))))
+"password_verify" => .Ok(.BoolV(password_verify(text_of(a), text_of(b))))
+"rgb" => rgb_value(int_of(a), int_of(b), int_of(c))
+"assert" => if bool_of(a) { unit_result() } else { Result.Error(problem("R019", "assertion failed")) }
+"fail" => .Error(problem("R010", text_of(a)))
+_ => .Error(problem("R000", "`\(name)` cannot run in the interpreter"))
+}
+}

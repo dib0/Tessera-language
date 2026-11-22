@@ -32,7 +32,7 @@ done
 $tessera0 run tools/embed_runtime.tes -- stage1/runtime_text.tes core_runtime=runtime/core.rs ui_runtime=runtime/ui.rs \
     win32_runtime=runtime/win32.rs audio_runtime=runtime/audio.rs winmm_runtime=runtime/winmm.rs \
     extra_runtime=runtime/extra.rs web_runtime=runtime/web.rs crypto_runtime=runtime/crypto.rs tls_runtime=runtime/tls.rs \
-    adapter_runtime=runtime/adapter.rs grammar_gbnf=grammar/tessera.gbnf $std_modules
+    adapter_runtime=runtime/adapter.rs wasm_runtime=runtime/wasm.rs grammar_gbnf=grammar/tessera.gbnf $std_modules
 
 echo "== bootstrap compiler (rustc on the generated seed bootstrap/tessera1.rs)"
 mkdir -p bin
